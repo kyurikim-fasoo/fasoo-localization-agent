@@ -335,6 +335,9 @@ def init_session_state():
         "last_result": None,
         "last_output_path": None,
         "last_output_filename": None,
+        "glossary_editor_key": 0,
+        "phrase_editor_key": 0,
+        "sentence_editor_key": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -541,7 +544,7 @@ elif st.session_state.step == 2:
                 "Note": st.column_config.TextColumn("Note", width="medium"),
                 "Def_KO": st.column_config.TextColumn("Def_KO", width="medium"),
             },
-            key=f"glossary_editor_{st.session_state.glossary_editor_key}",
+            key=f"glossary_editor_{st.session_state.get('glossary_editor_key', 0)}",
         )
         st.session_state.glossary_df = prepare_glossary_editor_df(edited_glossary_df)
 
@@ -586,7 +589,7 @@ elif st.session_state.step == 2:
                 "File": st.column_config.TextColumn("File", width="small"),
                 "Pattern Type": st.column_config.TextColumn("Pattern Type", width="small"),
             },
-            key=f"phrase_editor_{st.session_state.phrase_editor_key}",
+            key=f"phrase_editor_{st.session_state.get('phrase_editor_key', 0)}",
         )
         st.session_state.phrase_df = prepare_pattern_editor_df(edited_phrase_df)
 
@@ -631,7 +634,7 @@ elif st.session_state.step == 2:
                 "File": st.column_config.TextColumn("File", width="small"),
                 "Pattern Type": st.column_config.TextColumn("Pattern Type", width="small"),
             },
-            key=f"sentence_editor_{st.session_state.sentence_editor_key}",
+            key=f"sentence_editor_{st.session_state.get('sentence_editor_key', 0)}",
         )
         st.session_state.sentence_df = prepare_pattern_editor_df(edited_sentence_df)
 
