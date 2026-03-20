@@ -1,0 +1,30 @@
+{
+  "FSP": {
+    "default_glossaries": [
+      "data/glossaries/common.tsv",
+      "data/glossaries/fsp.tsv"
+    ],
+    "default_sentence_patterns": [
+      "data/patterns/sentence/common.tsv",
+      "data/patterns/sentence/fsp.tsv"
+    ],
+    "default_phrase_patterns": [
+      "data/patterns/phrase/common.tsv",
+      "data/patterns/phrase/fsp.tsv"
+    ]
+  },
+  "Wrapsody": {
+    "default_glossaries": [
+      "data/glossaries/common.tsv",
+      "data/glossaries/wrapsody.tsv"
+    ],
+    "default_sentence_patterns": [
+      "data/patterns/sentence/common.tsv",
+      "data/patterns/sentence/wrapsody.tsv"
+    ],
+    "default_phrase_patterns": [
+      "data/patterns/phrase/common.tsv",
+      "data/patterns/phrase/wrapsody.tsv"
+    ]
+  }
+}
