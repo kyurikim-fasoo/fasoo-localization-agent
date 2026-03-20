@@ -85,7 +85,11 @@ def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
+    if "Apply" not in out.columns:
+        out["Apply"] = True
+
     expected_cols = [
+        "Apply",
         "KO",
         "EN",
         "File",
@@ -104,7 +108,8 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = out[expected_cols]
 
     for col in expected_cols:
-        out[col] = out[col].fillna("").astype(str)
+        if col != "Apply":
+            out[col] = out[col].fillna("").astype(str)
 
     return out
 
@@ -112,7 +117,11 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
 def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
+    if "Apply" not in out.columns:
+        out["Apply"] = True
+
     expected_cols = [
+        "Apply",
         "KO",
         "EN",
         "File",
@@ -126,7 +135,8 @@ def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = out[expected_cols]
 
     for col in expected_cols:
-        out[col] = out[col].fillna("").astype(str)
+        if col != "Apply":
+            out[col] = out[col].fillna("").astype(str)
 
     return out
 
@@ -494,6 +504,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File"],
             column_config={
+                "Apply" : st.column_config.CheckboxColumn("Apply", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -546,6 +557,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File", "Pattern Type"],
             column_config={
+                "Apply" : st.column_config.CheckboxColumn("Apply", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -593,6 +605,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File", "Pattern Type"],
             column_config={
+                "Apply" : st.column_config.CheckboxColumn("Apply", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -630,9 +643,28 @@ elif st.session_state.step == 3:
         st.session_state.enable_cache,
     )
 
-    glossary_rows = st.session_state.glossary_df.to_dict("records")
-    sentence_rows = st.session_state.sentence_df.to_dict("records")
-    phrase_rows = st.session_state.phrase_df.to_dict("records")
+    glossary_rows = (
+    st.session_state.glossary_df[
+        st.session_state.glossary_df["Apply"] == True
+    ]
+    .drop(columns=["Apply"])
+    .to_dict("records")
+    )
+    sentence_rows = (
+        st.session_state.sentence_df[
+            st.session_state.sentence_df["Apply"] == True
+        ]
+        .drop(columns=["Apply"])
+        .to_dict("records")
+    )
+
+    phrase_rows = (
+        st.session_state.phrase_df[
+            st.session_state.phrase_df["Apply"] == True
+        ]
+        .drop(columns=["Apply"])
+        .to_dict("records")
+    )
 
     st.markdown(
         """
