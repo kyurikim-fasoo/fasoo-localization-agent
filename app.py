@@ -590,7 +590,7 @@ elif st.session_state.step == 2:
         )
         st.session_state.phrase_df = prepare_pattern_editor_df(edited_phrase_df)
 
-     with tab3:
+    with tab3:
         st.caption("비슷한 문장이 나오면 아래 예시를 참고해 번역합니다.")
 
         uploaded_sentence_tsv = st.file_uploader(
@@ -634,6 +634,7 @@ elif st.session_state.step == 2:
             key=f"sentence_editor_{st.session_state.sentence_editor_key}",
         )
         st.session_state.sentence_df = prepare_pattern_editor_df(edited_sentence_df)
+
     col_back, col_next = st.columns([1, 1])
 
     with col_back:
