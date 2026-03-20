@@ -514,24 +514,12 @@ elif st.session_state.step == 2:
     with tab1:
         st.caption("선택한 용어는 항상 동일하게 번역됩니다.")
 
-        uploaded_glossary_tsv = st.file_uploader(
-            "Glossary TSV 업로드",
-            type=["tsv"],
-            key="uploaded_glossary_tsv",
-        )
-        if uploaded_glossary_tsv is not None:
-            try:
-                st.session_state.glossary_df = merge_glossary_upload(
-                    st.session_state.glossary_df,
-                    uploaded_glossary_tsv,
-                )
-                st.success(f"{uploaded_glossary_tsv.name}을(를) glossary에 추가했습니다.")
-            except Exception as e:
-                st.error(f"Glossary TSV 업로드 오류: {e}")
-
-        if st.button("Glossaries 기본값으로 복원", key="reset_glossary"):
-            st.session_state.glossary_df = st.session_state.base_glossary_df.copy()
-            st.rerun()
+        top_left, top_right = st.columns([8, 1])
+        with top_right:
+            if st.button("복원", key="reset_glossary"):
+                st.session_state.glossary_df = st.session_state.base_glossary_df.copy()
+                st.session_state.glossary_editor_key += 1
+                st.rerun()
 
         st.session_state.glossary_df = prepare_glossary_editor_df(st.session_state.glossary_df)
 
@@ -553,7 +541,7 @@ elif st.session_state.step == 2:
                 "Note": st.column_config.TextColumn("Note", width="medium"),
                 "Def_KO": st.column_config.TextColumn("Def_KO", width="medium"),
             },
-            key="glossary_editor",
+            key=f"glossary_editor_{st.session_state.glossary_editor_key}",
         )
         st.session_state.glossary_df = prepare_glossary_editor_df(edited_glossary_df)
 
@@ -576,9 +564,12 @@ elif st.session_state.step == 2:
             except Exception as e:
                 st.error(f"Phrase pattern TSV 업로드 오류: {e}")
 
-        if st.button("Phrase patterns 기본값으로 복원", key="reset_phrase"):
-            st.session_state.phrase_df = st.session_state.base_phrase_df.copy()
-            st.rerun()
+        top_left, top_right = st.columns([8, 1])
+        with top_right:
+            if st.button("복원", key="reset_phrase"):
+                st.session_state.phrase_df = st.session_state.base_phrase_df.copy()
+                st.session_state.phrase_editor_key += 1
+                st.rerun()
 
         st.session_state.phrase_df = prepare_pattern_editor_df(st.session_state.phrase_df)
 
@@ -595,11 +586,11 @@ elif st.session_state.step == 2:
                 "File": st.column_config.TextColumn("File", width="small"),
                 "Pattern Type": st.column_config.TextColumn("Pattern Type", width="small"),
             },
-            key="phrase_editor",
+            key=f"phrase_editor_{st.session_state.phrase_editor_key}",
         )
         st.session_state.phrase_df = prepare_pattern_editor_df(edited_phrase_df)
 
-    with tab3:
+     with tab3:
         st.caption("비슷한 문장이 나오면 아래 예시를 참고해 번역합니다.")
 
         uploaded_sentence_tsv = st.file_uploader(
@@ -618,9 +609,12 @@ elif st.session_state.step == 2:
             except Exception as e:
                 st.error(f"Sentence pattern TSV 업로드 오류: {e}")
 
-        if st.button("Sentence patterns 기본값으로 복원", key="reset_sentence"):
-            st.session_state.sentence_df = st.session_state.base_sentence_df.copy()
-            st.rerun()
+        top_left, top_right = st.columns([8, 1])
+        with top_right:
+            if st.button("복원", key="reset_sentence"):
+                st.session_state.sentence_df = st.session_state.base_sentence_df.copy()
+                st.session_state.sentence_editor_key += 1
+                st.rerun()
 
         st.session_state.sentence_df = prepare_pattern_editor_df(st.session_state.sentence_df)
 
@@ -637,10 +631,9 @@ elif st.session_state.step == 2:
                 "File": st.column_config.TextColumn("File", width="small"),
                 "Pattern Type": st.column_config.TextColumn("Pattern Type", width="small"),
             },
-            key="sentence_editor",
+            key=f"sentence_editor_{st.session_state.sentence_editor_key}",
         )
         st.session_state.sentence_df = prepare_pattern_editor_df(edited_sentence_df)
-
     col_back, col_next = st.columns([1, 1])
 
     with col_back:
