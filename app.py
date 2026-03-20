@@ -1,5 +1,6 @@
 import json
 import os
+from io import StringIO
 from pathlib import Path
 
 import pandas as pd
@@ -46,14 +47,13 @@ def read_tsv_flexible(path: Path) -> pd.DataFrame:
 
 
 def read_uploaded_tsv_flexible(uploaded_file) -> pd.DataFrame:
-    encodings_to_try = ["utf-16", "utf-8-sig", "utf-8", "cp949", "euc-kr"]
     raw = uploaded_file.getvalue()
-
+    encodings_to_try = ["utf-16", "utf-8-sig", "utf-8", "cp949", "euc-kr"]
     last_error = None
+
     for enc in encodings_to_try:
         try:
             text = raw.decode(enc)
-            from io import StringIO
             df = pd.read_csv(StringIO(text), sep="\t")
             df.columns = [str(c).strip() for c in df.columns]
             return df
@@ -63,10 +63,6 @@ def read_uploaded_tsv_flexible(uploaded_file) -> pd.DataFrame:
     raise RuntimeError(f"Failed to read uploaded TSV: {uploaded_file.name}. Last error: {last_error}")
 
 
-def estimate_cost_usd(total_tokens: int, rate_per_1k_tokens: float = COST_PER_1K_TOKENS) -> float:
-    return round((total_tokens / 1000) * rate_per_1k_tokens, 4)
-
-
 def save_uploaded_file(uploaded_file, save_dir: Path):
     save_path = save_dir / uploaded_file.name
     with open(save_path, "wb") as f:
@@ -74,11 +70,118 @@ def save_uploaded_file(uploaded_file, save_dir: Path):
     return save_path
 
 
+def estimate_cost_usd(total_tokens: int, rate_per_1k_tokens: float = COST_PER_1K_TOKENS) -> float:
+    return round((total_tokens / 1000) * rate_per_1k_tokens, 4)
+
+
 def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     out = df.copy()
     for col in cols:
         if col not in out.columns:
             out[col] = ""
+    return out
+
+
+def normalize_selected_column(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    if "Selected" not in out.columns:
+        out["Selected"] = True
+
+    def to_bool(v):
+        if isinstance(v, bool):
+            return v
+        if pd.isna(v):
+            return True
+        s = str(v).strip().lower()
+        if s in ("", "nan", "none"):
+            return True
+        if s in ("true", "1", "yes", "y"):
+            return True
+        if s in ("false", "0", "no", "n"):
+            return False
+        return True
+
+    out["Selected"] = out["Selected"].map(to_bool)
+    out["Selected"] = out["Selected"].fillna(True).astype(bool)
+    return out
+
+
+def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    expected_cols = [
+        "Selected",
+        "KO",
+        "EN",
+        "File",
+        "Product",
+        "Category",
+        "DNT",
+        "Case-sensitive",
+        "Note",
+        "Def_KO",
+    ]
+
+    for col in expected_cols:
+        if col not in out.columns:
+            if col == "Selected":
+                out[col] = True
+            else:
+                out[col] = ""
+
+    out = out[expected_cols]
+    out = normalize_selected_column(out)
+
+    text_cols = [
+        "KO",
+        "EN",
+        "File",
+        "Product",
+        "Category",
+        "DNT",
+        "Case-sensitive",
+        "Note",
+        "Def_KO",
+    ]
+
+    for col in text_cols:
+        out[col] = out[col].fillna("").astype(str)
+
+    return out
+
+
+def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    expected_cols = [
+        "Selected",
+        "KO",
+        "EN",
+        "File",
+        "Pattern Type",
+    ]
+
+    for col in expected_cols:
+        if col not in out.columns:
+            if col == "Selected":
+                out[col] = True
+            else:
+                out[col] = ""
+
+    out = out[expected_cols]
+    out = normalize_selected_column(out)
+
+    text_cols = [
+        "KO",
+        "EN",
+        "File",
+        "Pattern Type",
+    ]
+
+    for col in text_cols:
+        out[col] = out[col].fillna("").astype(str)
+
     return out
 
 
@@ -115,23 +218,25 @@ def load_glossary_table(paths: list[str]) -> pd.DataFrame:
         frames.append(df)
 
     if not frames:
-        return pd.DataFrame(
-            columns=[
-                "Selected",
-                "KO",
-                "EN",
-                "File",
-                "Product",
-                "Category",
-                "DNT",
-                "Case-sensitive",
-                "Note",
-                "Def_KO",
-            ]
+        return prepare_glossary_editor_df(
+            pd.DataFrame(
+                columns=[
+                    "Selected",
+                    "KO",
+                    "EN",
+                    "File",
+                    "Product",
+                    "Category",
+                    "DNT",
+                    "Case-sensitive",
+                    "Note",
+                    "Def_KO",
+                ]
+            )
         )
 
     result = pd.concat(frames, ignore_index=True)
-    return normalize_selected_column(result)
+    return prepare_glossary_editor_df(result)
 
 
 def load_pattern_table(paths: list[str], pattern_type: str) -> pd.DataFrame:
@@ -152,10 +257,12 @@ def load_pattern_table(paths: list[str], pattern_type: str) -> pd.DataFrame:
         frames.append(df)
 
     if not frames:
-        return pd.DataFrame(columns=["Selected", "KO", "EN", "File", "Pattern Type"])
+        return prepare_pattern_editor_df(
+            pd.DataFrame(columns=["Selected", "KO", "EN", "File", "Pattern Type"])
+        )
 
     result = pd.concat(frames, ignore_index=True)
-    return normalize_selected_column(result)
+    return prepare_pattern_editor_df(result)
 
 
 def build_product_tables(product_name: str, config: dict):
@@ -170,6 +277,47 @@ def build_product_tables(product_name: str, config: dict):
     phrase_df = load_pattern_table(phrase_paths, "Phrase")
 
     return glossary_df, sentence_df, phrase_df
+
+
+def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
+    uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
+    uploaded_df = _ensure_columns(
+        uploaded_df,
+        ["KO", "EN", "Def_KO", "DNT", "Case-sensitive", "Category", "Product", "Note"],
+    )
+    uploaded_df["File"] = uploaded_file.name
+    uploaded_df["Selected"] = True
+
+    uploaded_df = uploaded_df[
+        [
+            "Selected",
+            "KO",
+            "EN",
+            "File",
+            "Product",
+            "Category",
+            "DNT",
+            "Case-sensitive",
+            "Note",
+            "Def_KO",
+        ]
+    ]
+
+    merged = pd.concat([current_df, uploaded_df], ignore_index=True)
+    return prepare_glossary_editor_df(merged)
+
+
+def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file, pattern_type: str) -> pd.DataFrame:
+    uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
+    uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN"])
+    uploaded_df["File"] = uploaded_file.name
+    uploaded_df["Pattern Type"] = pattern_type
+    uploaded_df["Selected"] = True
+
+    uploaded_df = uploaded_df[["Selected", "KO", "EN", "File", "Pattern Type"]]
+
+    merged = pd.concat([current_df, uploaded_df], ignore_index=True)
+    return prepare_pattern_editor_df(merged)
 
 
 def init_session_state():
@@ -223,73 +371,6 @@ def render_summary_pills(product: str, mode: str, cache: bool):
         """,
         unsafe_allow_html=True,
     )
-
-def normalize_selected_column(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-
-    if "Selected" not in out.columns:
-        out["Selected"] = True
-
-    def to_bool(v):
-        if isinstance(v, bool):
-            return v
-        if pd.isna(v):
-            return True
-        s = str(v).strip().lower()
-        if s in ("", "nan", "none"):
-            return True
-        if s in ("true", "1", "yes", "y"):
-            return True
-        if s in ("false", "0", "no", "n"):
-            return False
-        return True
-
-    out["Selected"] = out["Selected"].map(to_bool).astype(bool)
-    return out
-
-def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
-    uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
-    uploaded_df = _ensure_columns(
-        uploaded_df,
-        ["KO", "EN", "Def_KO", "DNT", "Case-sensitive", "Category", "Product", "Note"],
-    )
-    uploaded_df["File"] = uploaded_file.name
-    uploaded_df["Selected"] = True
-
-    uploaded_df = uploaded_df[
-        [
-            "Selected",
-            "KO",
-            "EN",
-            "File",
-            "Product",
-            "Category",
-            "DNT",
-            "Case-sensitive",
-            "Note",
-            "Def_KO",
-        ]
-    ]
-
-    merged = pd.concat([current_df, uploaded_df], ignore_index=True)
-    merged = merged.fillna("")
-    merged = normalize_selected_column(merged)
-    return merged
-
-
-def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file, pattern_type: str) -> pd.DataFrame:
-    uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
-    uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN"])
-    uploaded_df["File"] = uploaded_file.name
-    uploaded_df["Pattern Type"] = pattern_type
-    uploaded_df["Selected"] = True
-
-    uploaded_df = uploaded_df[["Selected", "KO", "EN", "File", "Pattern Type"]]
-
-    merged = pd.concat([current_df, uploaded_df], ignore_index=True)
-    merged = merged.fillna("")
-    merged = normalize_selected_column(merged)
-    return merged
 
 
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
@@ -369,7 +450,9 @@ if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY를 찾을 수 없습니다.")
     st.stop()
 
+# ---------------------------------
 # Step 1
+# ---------------------------------
 if st.session_state.step == 1:
     st.subheader("Step 1. 기본 설정")
     st.markdown("번역할 텍스트 유형과 제품을 선택하세요.")
@@ -413,7 +496,9 @@ if st.session_state.step == 1:
         st.session_state.step = 2
         st.rerun()
 
+# ---------------------------------
 # Step 2
+# ---------------------------------
 elif st.session_state.step == 2:
     st.subheader("Step 2. 용어 및 번역 스타일 선택")
     st.markdown("번역에 적용할 용어와 표현 방식을 선택하세요.")
@@ -447,7 +532,9 @@ elif st.session_state.step == 2:
         if st.button("Glossaries 기본값으로 복원", key="reset_glossary"):
             st.session_state.glossary_df = st.session_state.base_glossary_df.copy()
             st.rerun()
-        st.session_state.glossary_df = normalize_selected_column(st.session_state.glossary_df)
+
+        st.session_state.glossary_df = prepare_glossary_editor_df(st.session_state.glossary_df)
+
         edited_glossary_df = st.data_editor(
             st.session_state.glossary_df,
             use_container_width=True,
@@ -468,7 +555,7 @@ elif st.session_state.step == 2:
             },
             key="glossary_editor",
         )
-        st.session_state.glossary_df = normalize_selected_column(edited_glossary_df.fillna(""))
+        st.session_state.glossary_df = prepare_glossary_editor_df(edited_glossary_df)
 
     with tab2:
         st.caption("비슷한 표현이 나오면 아래 패턴을 참고해 번역합니다.")
@@ -492,7 +579,9 @@ elif st.session_state.step == 2:
         if st.button("Phrase patterns 기본값으로 복원", key="reset_phrase"):
             st.session_state.phrase_df = st.session_state.base_phrase_df.copy()
             st.rerun()
-        st.session_state.glossary_df = normalize_selected_column(st.session_state.glossary_df)
+
+        st.session_state.phrase_df = prepare_pattern_editor_df(st.session_state.phrase_df)
+
         edited_phrase_df = st.data_editor(
             st.session_state.phrase_df,
             use_container_width=True,
@@ -508,7 +597,7 @@ elif st.session_state.step == 2:
             },
             key="phrase_editor",
         )
-        st.session_state.phrase_df = normalize_selected_column(edited_phrase_df.fillna(""))
+        st.session_state.phrase_df = prepare_pattern_editor_df(edited_phrase_df)
 
     with tab3:
         st.caption("비슷한 문장이 나오면 아래 예시를 참고해 번역합니다.")
@@ -532,7 +621,9 @@ elif st.session_state.step == 2:
         if st.button("Sentence patterns 기본값으로 복원", key="reset_sentence"):
             st.session_state.sentence_df = st.session_state.base_sentence_df.copy()
             st.rerun()
-        st.session_state.sentence_df = normalize_selected_column(st.session_state.sentence_df)
+
+        st.session_state.sentence_df = prepare_pattern_editor_df(st.session_state.sentence_df)
+
         edited_sentence_df = st.data_editor(
             st.session_state.sentence_df,
             use_container_width=True,
@@ -548,7 +639,7 @@ elif st.session_state.step == 2:
             },
             key="sentence_editor",
         )
-        st.session_state.sentence_df = normalize_selected_column(edited_sentence_df.fillna(""))
+        st.session_state.sentence_df = prepare_pattern_editor_df(edited_sentence_df)
 
     col_back, col_next = st.columns([1, 1])
 
@@ -567,7 +658,9 @@ elif st.session_state.step == 2:
                 st.session_state.step = 3
                 st.rerun()
 
+# ---------------------------------
 # Step 3
+# ---------------------------------
 elif st.session_state.step == 3:
     st.subheader("Step 3. 업로드")
     st.markdown("번역할 Word 파일을 업로드하거나 끌어서 놓으세요.")
@@ -662,7 +755,9 @@ elif st.session_state.step == 3:
             except Exception as e:
                 st.error(f"오류: {e}")
 
+# ---------------------------------
 # Step 4
+# ---------------------------------
 elif st.session_state.step == 4:
     st.subheader("Step 4. 다운로드")
 
