@@ -12,7 +12,9 @@ from translator_engine import translate_document
 load_dotenv()
 
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-COST_PER_1K_TOKENS = float(st.secrets.get("MODEL_COST_PER_1K_TOKENS", os.getenv("MODEL_COST_PER_1K_TOKENS", "0.01")))
+COST_PER_1K_TOKENS = float(
+    st.secrets.get("MODEL_COST_PER_1K_TOKENS", os.getenv("MODEL_COST_PER_1K_TOKENS", "0.01"))
+)
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -41,6 +43,24 @@ def read_tsv_flexible(path: Path) -> pd.DataFrame:
             last_error = e
 
     raise RuntimeError(f"Failed to read TSV: {path}. Last error: {last_error}")
+
+
+def read_uploaded_tsv_flexible(uploaded_file) -> pd.DataFrame:
+    encodings_to_try = ["utf-16", "utf-8-sig", "utf-8", "cp949", "euc-kr"]
+    raw = uploaded_file.getvalue()
+
+    last_error = None
+    for enc in encodings_to_try:
+        try:
+            text = raw.decode(enc)
+            from io import StringIO
+            df = pd.read_csv(StringIO(text), sep="\t")
+            df.columns = [str(c).strip() for c in df.columns]
+            return df
+        except Exception as e:
+            last_error = e
+
+    raise RuntimeError(f"Failed to read uploaded TSV: {uploaded_file.name}. Last error: {last_error}")
 
 
 def estimate_cost_usd(total_tokens: int, rate_per_1k_tokens: float = COST_PER_1K_TOKENS) -> float:
@@ -159,6 +179,9 @@ def init_session_state():
         "glossary_df": None,
         "sentence_df": None,
         "phrase_df": None,
+        "base_glossary_df": None,
+        "base_sentence_df": None,
+        "base_phrase_df": None,
         "last_result": None,
         "last_output_path": None,
         "last_output_filename": None,
@@ -200,6 +223,47 @@ def render_summary_pills(product: str, mode: str, cache: bool):
     )
 
 
+def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
+    uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
+    uploaded_df = _ensure_columns(
+        uploaded_df,
+        ["KO", "EN", "Def_KO", "DNT", "Case-sensitive", "Category", "Product", "Note"],
+    )
+    uploaded_df["File"] = uploaded_file.name
+    uploaded_df["Selected"] = True
+
+    uploaded_df = uploaded_df[
+        [
+            "Selected",
+            "KO",
+            "EN",
+            "File",
+            "Product",
+            "Category",
+            "DNT",
+            "Case-sensitive",
+            "Note",
+            "Def_KO",
+        ]
+    ]
+
+    merged = pd.concat([current_df, uploaded_df], ignore_index=True)
+    return merged.fillna("")
+
+
+def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file, pattern_type: str) -> pd.DataFrame:
+    uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
+    uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN"])
+    uploaded_df["File"] = uploaded_file.name
+    uploaded_df["Pattern Type"] = pattern_type
+    uploaded_df["Selected"] = True
+
+    uploaded_df = uploaded_df[["Selected", "KO", "EN", "File", "Pattern Type"]]
+
+    merged = pd.concat([current_df, uploaded_df], ignore_index=True)
+    return merged.fillna("")
+
+
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
 init_session_state()
 
@@ -212,18 +276,14 @@ st.markdown(
         padding-bottom: 3rem;
     }
 
-    /* 업로드 영역 - 배경 제거 + 점선 박스 */
     [data-testid="stFileUploader"] section {
         min-height: 260px;
         border-radius: 16px;
         border: 2px dashed #c8d1dc;
         background: transparent;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        padding: 0;
     }
-    
-    /* 내부 드롭존 */
+
     [data-testid="stFileUploaderDropzone"] {
         min-height: 240px;
         display: flex;
@@ -231,7 +291,6 @@ st.markdown(
         justify-content: center;
     }
 
-    /* 내부 텍스트 스타일 */
     [data-testid="stFileUploaderDropzone"] div {
         text-align: center;
         font-size: 18px;
@@ -239,19 +298,16 @@ st.markdown(
         color: #57606a;
     }
 
-    /* hover 시 살짝 강조 */
     [data-testid="stFileUploader"] section:hover {
         border-color: #8c959f;
     }
 
-    /* 기본 버튼 */
     [data-testid="stButton"] button {
         min-height: 46px;
         font-weight: 600;
         border-radius: 12px;
     }
 
-    /* 강조 버튼 */
     [data-testid="stButton"] button[kind="primary"],
     [data-testid="stDownloadButton"] button[kind="primary"] {
         min-height: 54px;
@@ -260,7 +316,6 @@ st.markdown(
         font-size: 16px;
     }
 
-    /* 다운로드 버튼도 크게 */
     [data-testid="stDownloadButton"] button {
         min-height: 54px;
         font-weight: 700;
@@ -277,18 +332,16 @@ st.markdown(
 )
 
 st.title("Fasoo Localization Agent")
-st.markdown("국문 문서를 영문으로 번역합니다.")
+st.markdown("국문 문서를 자연스러운 영문으로 번역합니다.")
 
 config = load_product_config()
 products = list(config.keys())
 
 if not OPENAI_API_KEY:
-    st.error("`.env` 파일에서 OPENAI_API_KEY를 찾을 수 없습니다.")
+    st.error("OPENAI_API_KEY를 찾을 수 없습니다.")
     st.stop()
 
-# ---------------------------------
 # Step 1
-# ---------------------------------
 if st.session_state.step == 1:
     st.subheader("Step 1. 기본 설정")
     st.markdown("번역할 텍스트 유형과 제품을 선택하세요.")
@@ -297,17 +350,13 @@ if st.session_state.step == 1:
     if st.session_state.selected_product in products:
         default_product_index = products.index(st.session_state.selected_product)
 
+    selected_product = st.selectbox("제품", products, index=default_product_index)
+
     translation_mode = st.radio(
         "텍스트 유형",
-        options=["UI 텍스트", "가이드"],
+        options=["UI", "Manual"],
         index=0 if st.session_state.translation_mode == "UI" else 1,
         horizontal=True,
-    )
-
-    selected_product = st.selectbox(
-        "제품",
-        products,
-        index=default_product_index,
     )
 
     enable_cache = st.checkbox(
@@ -323,20 +372,24 @@ if st.session_state.step == 1:
         st.session_state.enable_cache = enable_cache
 
         glossary_df, sentence_df, phrase_df = build_product_tables(selected_product, config)
-        st.session_state.glossary_df = glossary_df
-        st.session_state.sentence_df = sentence_df
-        st.session_state.phrase_df = phrase_df
+
+        st.session_state.glossary_df = glossary_df.copy()
+        st.session_state.sentence_df = sentence_df.copy()
+        st.session_state.phrase_df = phrase_df.copy()
+
+        st.session_state.base_glossary_df = glossary_df.copy()
+        st.session_state.base_sentence_df = sentence_df.copy()
+        st.session_state.base_phrase_df = phrase_df.copy()
 
         reset_translation_result()
         st.session_state.step = 2
         st.rerun()
 
-# ---------------------------------
 # Step 2
-# ---------------------------------
 elif st.session_state.step == 2:
     st.subheader("Step 2. 용어 및 번역 스타일 선택")
-    st.markdown("번역에 적용할 용어와 표현 방식을 선택합니다.")
+    st.markdown("번역에 적용할 용어와 표현 방식을 선택하세요.")
+    st.markdown("적용하지 않을 항목은 선택을 해제하세요. 필요하면 직접 수정하거나 새 항목을 추가할 수 있습니다.")
     render_summary_pills(
         st.session_state.selected_product,
         st.session_state.translation_mode,
@@ -346,23 +399,33 @@ elif st.session_state.step == 2:
     tab1, tab2, tab3 = st.tabs(["Glossaries", "Phrase patterns", "Sentence patterns"])
 
     with tab1:
-        st.caption("선택한 용어는 항상 동일하게 번역됩니다. 적용하지 않을 항목은 선택을 해제하세요.")
+        st.caption("선택한 용어는 항상 동일하게 번역됩니다.")
+
+        uploaded_glossary_tsv = st.file_uploader(
+            "Glossary TSV 업로드",
+            type=["tsv"],
+            key="uploaded_glossary_tsv",
+        )
+        if uploaded_glossary_tsv is not None:
+            try:
+                st.session_state.glossary_df = merge_glossary_upload(
+                    st.session_state.glossary_df,
+                    uploaded_glossary_tsv,
+                )
+                st.success(f"{uploaded_glossary_tsv.name}을(를) glossary에 추가했습니다.")
+            except Exception as e:
+                st.error(f"Glossary TSV 업로드 오류: {e}")
+
+        if st.button("Glossaries 기본값으로 복원", key="reset_glossary"):
+            st.session_state.glossary_df = st.session_state.base_glossary_df.copy()
+            st.rerun()
+
         edited_glossary_df = st.data_editor(
             st.session_state.glossary_df,
             use_container_width=True,
             hide_index=True,
-            num_rows="fixed",
-            disabled=[
-                "KO",
-                "EN",
-                "File",
-                "Product",
-                "Category",
-                "DNT",
-                "Case-sensitive",
-                "Note",
-                "Def_KO",
-            ],
+            num_rows="dynamic",
+            disabled=["File"],
             column_config={
                 "Selected": st.column_config.CheckboxColumn("Selected"),
                 "KO": st.column_config.TextColumn("KO", width="large"),
@@ -377,16 +440,37 @@ elif st.session_state.step == 2:
             },
             key="glossary_editor",
         )
-        st.session_state.glossary_df = edited_glossary_df
+        st.session_state.glossary_df = edited_glossary_df.fillna("")
 
     with tab2:
-        st.caption("비슷한 표현이 나오면 아래 패턴을 참고해 번역합니다. 적용하지 않을 항목은 선택을 해제하세요.")
+        st.caption("비슷한 표현이 나오면 아래 패턴을 참고해 번역합니다.")
+
+        uploaded_phrase_tsv = st.file_uploader(
+            "Phrase pattern TSV 업로드",
+            type=["tsv"],
+            key="uploaded_phrase_tsv",
+        )
+        if uploaded_phrase_tsv is not None:
+            try:
+                st.session_state.phrase_df = merge_pattern_upload(
+                    st.session_state.phrase_df,
+                    uploaded_phrase_tsv,
+                    "Phrase",
+                )
+                st.success(f"{uploaded_phrase_tsv.name}을(를) phrase patterns에 추가했습니다.")
+            except Exception as e:
+                st.error(f"Phrase pattern TSV 업로드 오류: {e}")
+
+        if st.button("Phrase patterns 기본값으로 복원", key="reset_phrase"):
+            st.session_state.phrase_df = st.session_state.base_phrase_df.copy()
+            st.rerun()
+
         edited_phrase_df = st.data_editor(
             st.session_state.phrase_df,
             use_container_width=True,
             hide_index=True,
-            num_rows="fixed",
-            disabled=["KO", "EN", "File", "Pattern Type"],
+            num_rows="dynamic",
+            disabled=["File", "Pattern Type"],
             column_config={
                 "Selected": st.column_config.CheckboxColumn("Selected"),
                 "KO": st.column_config.TextColumn("KO", width="large"),
@@ -396,16 +480,37 @@ elif st.session_state.step == 2:
             },
             key="phrase_editor",
         )
-        st.session_state.phrase_df = edited_phrase_df
+        st.session_state.phrase_df = edited_phrase_df.fillna("")
 
     with tab3:
-        st.caption("비슷한 문장이 나오면 아래 예시를 참고해 번역합니다. 적용하지 않을 항목은 선택을 해제하세요.")
+        st.caption("비슷한 문장이 나오면 아래 예시를 참고해 번역합니다.")
+
+        uploaded_sentence_tsv = st.file_uploader(
+            "Sentence pattern TSV 업로드",
+            type=["tsv"],
+            key="uploaded_sentence_tsv",
+        )
+        if uploaded_sentence_tsv is not None:
+            try:
+                st.session_state.sentence_df = merge_pattern_upload(
+                    st.session_state.sentence_df,
+                    uploaded_sentence_tsv,
+                    "Sentence",
+                )
+                st.success(f"{uploaded_sentence_tsv.name}을(를) sentence patterns에 추가했습니다.")
+            except Exception as e:
+                st.error(f"Sentence pattern TSV 업로드 오류: {e}")
+
+        if st.button("Sentence patterns 기본값으로 복원", key="reset_sentence"):
+            st.session_state.sentence_df = st.session_state.base_sentence_df.copy()
+            st.rerun()
+
         edited_sentence_df = st.data_editor(
             st.session_state.sentence_df,
             use_container_width=True,
             hide_index=True,
-            num_rows="fixed",
-            disabled=["KO", "EN", "File", "Pattern Type"],
+            num_rows="dynamic",
+            disabled=["File", "Pattern Type"],
             column_config={
                 "Selected": st.column_config.CheckboxColumn("Selected"),
                 "KO": st.column_config.TextColumn("KO", width="large"),
@@ -415,7 +520,7 @@ elif st.session_state.step == 2:
             },
             key="sentence_editor",
         )
-        st.session_state.sentence_df = edited_sentence_df
+        st.session_state.sentence_df = edited_sentence_df.fillna("")
 
     col_back, col_next = st.columns([1, 1])
 
@@ -434,9 +539,7 @@ elif st.session_state.step == 2:
                 st.session_state.step = 3
                 st.rerun()
 
-# ---------------------------------
 # Step 3
-# ---------------------------------
 elif st.session_state.step == 3:
     st.subheader("Step 3. 업로드")
     st.markdown("번역할 Word 파일을 업로드하거나 끌어서 놓으세요.")
@@ -461,8 +564,14 @@ elif st.session_state.step == 3:
 
     st.markdown(
         """
-        <div style="margin-bottom: 10px; color: #57606a; font-size: 14px;">
-            파일을 끌어다 놓거나 클릭해 업로드하세요.
+        <div style="
+            text-align:center;
+            font-size:20px;
+            font-weight:600;
+            color:#57606a;
+            margin-bottom:12px;
+        ">
+            파일을 끌어다 놓거나 클릭해 업로드하세요
         </div>
         """,
         unsafe_allow_html=True,
@@ -525,9 +634,7 @@ elif st.session_state.step == 3:
             except Exception as e:
                 st.error(f"오류: {e}")
 
-# ---------------------------------
 # Step 4
-# ---------------------------------
 elif st.session_state.step == 4:
     st.subheader("Step 4. 다운로드")
 
@@ -543,6 +650,7 @@ elif st.session_state.step == 4:
     estimated_cost = estimate_cost_usd(result["total_tokens"])
 
     st.success("번역이 완료되었습니다.")
+    st.write("### 결과")
     st.write(f"**토큰 사용량:** {result['total_tokens']:,} (약 ${estimated_cost})")
 
     with open(output_path, "rb") as f:
