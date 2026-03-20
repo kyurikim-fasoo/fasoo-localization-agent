@@ -82,36 +82,10 @@ def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return out
 
 
-def normalize_selected_column(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-
-    if "Selected" not in out.columns:
-        out["Selected"] = True
-
-    def to_bool(v):
-        if isinstance(v, bool):
-            return v
-        if pd.isna(v):
-            return True
-        s = str(v).strip().lower()
-        if s in ("", "nan", "none"):
-            return True
-        if s in ("true", "1", "yes", "y"):
-            return True
-        if s in ("false", "0", "no", "n"):
-            return False
-        return True
-
-    out["Selected"] = out["Selected"].map(to_bool)
-    out["Selected"] = out["Selected"].fillna(True).astype(bool)
-    return out
-
-
 def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
     expected_cols = [
-        "Selected",
         "KO",
         "EN",
         "File",
@@ -125,27 +99,11 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in expected_cols:
         if col not in out.columns:
-            if col == "Selected":
-                out[col] = True
-            else:
-                out[col] = ""
+            out[col] = ""
 
     out = out[expected_cols]
-    out = normalize_selected_column(out)
 
-    text_cols = [
-        "KO",
-        "EN",
-        "File",
-        "Product",
-        "Category",
-        "DNT",
-        "Case-sensitive",
-        "Note",
-        "Def_KO",
-    ]
-
-    for col in text_cols:
+    for col in expected_cols:
         out[col] = out[col].fillna("").astype(str)
 
     return out
@@ -155,7 +113,6 @@ def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
     expected_cols = [
-        "Selected",
         "KO",
         "EN",
         "File",
@@ -164,22 +121,11 @@ def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in expected_cols:
         if col not in out.columns:
-            if col == "Selected":
-                out[col] = True
-            else:
-                out[col] = ""
+            out[col] = ""
 
     out = out[expected_cols]
-    out = normalize_selected_column(out)
 
-    text_cols = [
-        "KO",
-        "EN",
-        "File",
-        "Pattern Type",
-    ]
-
-    for col in text_cols:
+    for col in expected_cols:
         out[col] = out[col].fillna("").astype(str)
 
     return out
@@ -199,11 +145,9 @@ def load_glossary_table(paths: list[str]) -> pd.DataFrame:
             ["KO", "EN", "Def_KO", "DNT", "Case-sensitive", "Category", "Product", "Note"],
         )
         df["File"] = path.name
-        df["Selected"] = True
 
         df = df[
             [
-                "Selected",
                 "KO",
                 "EN",
                 "File",
@@ -221,7 +165,6 @@ def load_glossary_table(paths: list[str]) -> pd.DataFrame:
         return prepare_glossary_editor_df(
             pd.DataFrame(
                 columns=[
-                    "Selected",
                     "KO",
                     "EN",
                     "File",
@@ -251,14 +194,13 @@ def load_pattern_table(paths: list[str], pattern_type: str) -> pd.DataFrame:
         df = _ensure_columns(df, ["KO", "EN"])
         df["File"] = path.name
         df["Pattern Type"] = pattern_type
-        df["Selected"] = True
 
-        df = df[["Selected", "KO", "EN", "File", "Pattern Type"]]
+        df = df[["KO", "EN", "File", "Pattern Type"]]
         frames.append(df)
 
     if not frames:
         return prepare_pattern_editor_df(
-            pd.DataFrame(columns=["Selected", "KO", "EN", "File", "Pattern Type"])
+            pd.DataFrame(columns=["KO", "EN", "File", "Pattern Type"])
         )
 
     result = pd.concat(frames, ignore_index=True)
@@ -286,11 +228,9 @@ def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFra
         ["KO", "EN", "Def_KO", "DNT", "Case-sensitive", "Category", "Product", "Note"],
     )
     uploaded_df["File"] = uploaded_file.name
-    uploaded_df["Selected"] = True
 
     uploaded_df = uploaded_df[
         [
-            "Selected",
             "KO",
             "EN",
             "File",
@@ -312,9 +252,8 @@ def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file, pattern_type: 
     uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN"])
     uploaded_df["File"] = uploaded_file.name
     uploaded_df["Pattern Type"] = pattern_type
-    uploaded_df["Selected"] = True
 
-    uploaded_df = uploaded_df[["Selected", "KO", "EN", "File", "Pattern Type"]]
+    uploaded_df = uploaded_df[["KO", "EN", "File", "Pattern Type"]]
 
     merged = pd.concat([current_df, uploaded_df], ignore_index=True)
     return prepare_pattern_editor_df(merged)
@@ -495,6 +434,10 @@ if st.session_state.step == 1:
         st.session_state.base_sentence_df = sentence_df.copy()
         st.session_state.base_phrase_df = phrase_df.copy()
 
+        st.session_state.glossary_editor_key += 1
+        st.session_state.phrase_editor_key += 1
+        st.session_state.sentence_editor_key += 1
+
         reset_translation_result()
         st.session_state.step = 2
         st.rerun()
@@ -505,7 +448,7 @@ if st.session_state.step == 1:
 elif st.session_state.step == 2:
     st.subheader("Step 2. 용어 및 번역 스타일 선택")
     st.markdown("번역에 적용할 용어와 표현 방식을 선택하세요.")
-    st.markdown("적용하지 않을 항목은 선택을 해제하세요. 필요하면 직접 수정하거나 새 항목을 추가할 수 있습니다.")
+    st.markdown("적용에서 제외할 항목은 행을 삭제하세요. 필요하면 직접 수정하거나 새 항목을 추가할 수 있습니다.")
     render_summary_pills(
         st.session_state.selected_product,
         st.session_state.translation_mode,
@@ -516,6 +459,24 @@ elif st.session_state.step == 2:
 
     with tab1:
         st.caption("선택한 용어는 항상 동일하게 번역됩니다.")
+
+        with st.expander("Glossary TSV 업로드", expanded=False):
+            uploaded_glossary_tsv = st.file_uploader(
+                "Glossary TSV 업로드",
+                type=["tsv"],
+                key="uploaded_glossary_tsv",
+                label_visibility="collapsed",
+            )
+            if uploaded_glossary_tsv is not None:
+                try:
+                    st.session_state.glossary_df = merge_glossary_upload(
+                        st.session_state.glossary_df,
+                        uploaded_glossary_tsv,
+                    )
+                    st.session_state.glossary_editor_key += 1
+                    st.success(f"{uploaded_glossary_tsv.name}을(를) glossary에 추가했습니다.")
+                except Exception as e:
+                    st.error(f"Glossary TSV 업로드 오류: {e}")
 
         top_left, top_right = st.columns([8, 1])
         with top_right:
@@ -533,7 +494,6 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File"],
             column_config={
-                "Selected": st.column_config.CheckboxColumn("Selected"),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -551,21 +511,24 @@ elif st.session_state.step == 2:
     with tab2:
         st.caption("비슷한 표현이 나오면 아래 패턴을 참고해 번역합니다.")
 
-        uploaded_phrase_tsv = st.file_uploader(
-            "Phrase pattern TSV 업로드",
-            type=["tsv"],
-            key="uploaded_phrase_tsv",
-        )
-        if uploaded_phrase_tsv is not None:
-            try:
-                st.session_state.phrase_df = merge_pattern_upload(
-                    st.session_state.phrase_df,
-                    uploaded_phrase_tsv,
-                    "Phrase",
-                )
-                st.success(f"{uploaded_phrase_tsv.name}을(를) phrase patterns에 추가했습니다.")
-            except Exception as e:
-                st.error(f"Phrase pattern TSV 업로드 오류: {e}")
+        with st.expander("Phrase pattern TSV 업로드", expanded=False):
+            uploaded_phrase_tsv = st.file_uploader(
+                "Phrase pattern TSV 업로드",
+                type=["tsv"],
+                key="uploaded_phrase_tsv",
+                label_visibility="collapsed",
+            )
+            if uploaded_phrase_tsv is not None:
+                try:
+                    st.session_state.phrase_df = merge_pattern_upload(
+                        st.session_state.phrase_df,
+                        uploaded_phrase_tsv,
+                        "Phrase",
+                    )
+                    st.session_state.phrase_editor_key += 1
+                    st.success(f"{uploaded_phrase_tsv.name}을(를) phrase patterns에 추가했습니다.")
+                except Exception as e:
+                    st.error(f"Phrase pattern TSV 업로드 오류: {e}")
 
         top_left, top_right = st.columns([8, 1])
         with top_right:
@@ -583,7 +546,6 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File", "Pattern Type"],
             column_config={
-                "Selected": st.column_config.CheckboxColumn("Selected"),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -596,21 +558,24 @@ elif st.session_state.step == 2:
     with tab3:
         st.caption("비슷한 문장이 나오면 아래 예시를 참고해 번역합니다.")
 
-        uploaded_sentence_tsv = st.file_uploader(
-            "Sentence pattern TSV 업로드",
-            type=["tsv"],
-            key="uploaded_sentence_tsv",
-        )
-        if uploaded_sentence_tsv is not None:
-            try:
-                st.session_state.sentence_df = merge_pattern_upload(
-                    st.session_state.sentence_df,
-                    uploaded_sentence_tsv,
-                    "Sentence",
-                )
-                st.success(f"{uploaded_sentence_tsv.name}을(를) sentence patterns에 추가했습니다.")
-            except Exception as e:
-                st.error(f"Sentence pattern TSV 업로드 오류: {e}")
+        with st.expander("Sentence pattern TSV 업로드", expanded=False):
+            uploaded_sentence_tsv = st.file_uploader(
+                "Sentence pattern TSV 업로드",
+                type=["tsv"],
+                key="uploaded_sentence_tsv",
+                label_visibility="collapsed",
+            )
+            if uploaded_sentence_tsv is not None:
+                try:
+                    st.session_state.sentence_df = merge_pattern_upload(
+                        st.session_state.sentence_df,
+                        uploaded_sentence_tsv,
+                        "Sentence",
+                    )
+                    st.session_state.sentence_editor_key += 1
+                    st.success(f"{uploaded_sentence_tsv.name}을(를) sentence patterns에 추가했습니다.")
+                except Exception as e:
+                    st.error(f"Sentence pattern TSV 업로드 오류: {e}")
 
         top_left, top_right = st.columns([8, 1])
         with top_right:
@@ -628,7 +593,6 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File", "Pattern Type"],
             column_config={
-                "Selected": st.column_config.CheckboxColumn("Selected"),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -647,9 +611,8 @@ elif st.session_state.step == 2:
 
     with col_next:
         if st.button("다음", use_container_width=True):
-            selected_glossary_count = int(st.session_state.glossary_df["Selected"].sum()) if not st.session_state.glossary_df.empty else 0
-            if selected_glossary_count == 0:
-                st.error("적어도 하나의 glossary 항목은 선택해야 합니다.")
+            if len(st.session_state.glossary_df) == 0:
+                st.error("적어도 하나의 glossary 항목은 남겨 두어야 합니다.")
             else:
                 reset_translation_result()
                 st.session_state.step = 3
@@ -667,18 +630,9 @@ elif st.session_state.step == 3:
         st.session_state.enable_cache,
     )
 
-    selected_glossary_rows = [
-        row for row in st.session_state.glossary_df.to_dict("records")
-        if bool(row.get("Selected")) is True
-    ]
-    selected_sentence_rows = [
-        row for row in st.session_state.sentence_df.to_dict("records")
-        if bool(row.get("Selected")) is True
-    ]
-    selected_phrase_rows = [
-        row for row in st.session_state.phrase_df.to_dict("records")
-        if bool(row.get("Selected")) is True
-    ]
+    glossary_rows = st.session_state.glossary_df.to_dict("records")
+    sentence_rows = st.session_state.sentence_df.to_dict("records")
+    phrase_rows = st.session_state.phrase_df.to_dict("records")
 
     st.markdown(
         """
@@ -734,9 +688,9 @@ elif st.session_state.step == 3:
                 result = translate_document(
                     in_path=str(input_path),
                     out_path=str(output_path),
-                    glossary_rows=selected_glossary_rows,
-                    sentence_pattern_rows=selected_sentence_rows,
-                    phrase_pattern_rows=selected_phrase_rows,
+                    glossary_rows=glossary_rows,
+                    sentence_pattern_rows=sentence_rows,
+                    phrase_pattern_rows=phrase_rows,
                     api_key=OPENAI_API_KEY,
                     enable_cache=st.session_state.enable_cache,
                     translation_mode=st.session_state.translation_mode,
