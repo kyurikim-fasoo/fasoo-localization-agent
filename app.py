@@ -130,7 +130,8 @@ def load_glossary_table(paths: list[str]) -> pd.DataFrame:
             ]
         )
 
-    return pd.concat(frames, ignore_index=True)
+    result = pd.concat(frames, ignore_index=True)
+    return normalize_selected_column(result)
 
 
 def load_pattern_table(paths: list[str], pattern_type: str) -> pd.DataFrame:
@@ -153,7 +154,8 @@ def load_pattern_table(paths: list[str], pattern_type: str) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=["Selected", "KO", "EN", "File", "Pattern Type"])
 
-    return pd.concat(frames, ignore_index=True)
+    result = pd.concat(frames, ignore_index=True)
+    return normalize_selected_column(result)
 
 
 def build_product_tables(product_name: str, config: dict):
@@ -222,6 +224,28 @@ def render_summary_pills(product: str, mode: str, cache: bool):
         unsafe_allow_html=True,
     )
 
+def normalize_selected_column(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    if "Selected" not in out.columns:
+        out["Selected"] = True
+
+    def to_bool(v):
+        if isinstance(v, bool):
+            return v
+        if pd.isna(v):
+            return True
+        s = str(v).strip().lower()
+        if s in ("", "nan", "none"):
+            return True
+        if s in ("true", "1", "yes", "y"):
+            return True
+        if s in ("false", "0", "no", "n"):
+            return False
+        return True
+
+    out["Selected"] = out["Selected"].map(to_bool).astype(bool)
+    return out
 
 def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
     uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
@@ -248,7 +272,9 @@ def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFra
     ]
 
     merged = pd.concat([current_df, uploaded_df], ignore_index=True)
-    return merged.fillna("")
+    merged = merged.fillna("")
+    merged = normalize_selected_column(merged)
+    return merged
 
 
 def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file, pattern_type: str) -> pd.DataFrame:
@@ -261,7 +287,9 @@ def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file, pattern_type: 
     uploaded_df = uploaded_df[["Selected", "KO", "EN", "File", "Pattern Type"]]
 
     merged = pd.concat([current_df, uploaded_df], ignore_index=True)
-    return merged.fillna("")
+    merged = merged.fillna("")
+    merged = normalize_selected_column(merged)
+    return merged
 
 
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
@@ -419,7 +447,7 @@ elif st.session_state.step == 2:
         if st.button("Glossaries 기본값으로 복원", key="reset_glossary"):
             st.session_state.glossary_df = st.session_state.base_glossary_df.copy()
             st.rerun()
-
+        st.session_state.glossary_df = normalize_selected_column(st.session_state.glossary_df)
         edited_glossary_df = st.data_editor(
             st.session_state.glossary_df,
             use_container_width=True,
@@ -440,7 +468,7 @@ elif st.session_state.step == 2:
             },
             key="glossary_editor",
         )
-        st.session_state.glossary_df = edited_glossary_df.fillna("")
+        st.session_state.glossary_df = normalize_selected_column(edited_glossary_df.fillna(""))
 
     with tab2:
         st.caption("비슷한 표현이 나오면 아래 패턴을 참고해 번역합니다.")
@@ -464,7 +492,7 @@ elif st.session_state.step == 2:
         if st.button("Phrase patterns 기본값으로 복원", key="reset_phrase"):
             st.session_state.phrase_df = st.session_state.base_phrase_df.copy()
             st.rerun()
-
+        st.session_state.glossary_df = normalize_selected_column(st.session_state.glossary_df)
         edited_phrase_df = st.data_editor(
             st.session_state.phrase_df,
             use_container_width=True,
@@ -480,7 +508,7 @@ elif st.session_state.step == 2:
             },
             key="phrase_editor",
         )
-        st.session_state.phrase_df = edited_phrase_df.fillna("")
+        st.session_state.phrase_df = normalize_selected_column(edited_phrase_df.fillna(""))
 
     with tab3:
         st.caption("비슷한 문장이 나오면 아래 예시를 참고해 번역합니다.")
@@ -504,7 +532,7 @@ elif st.session_state.step == 2:
         if st.button("Sentence patterns 기본값으로 복원", key="reset_sentence"):
             st.session_state.sentence_df = st.session_state.base_sentence_df.copy()
             st.rerun()
-
+        st.session_state.sentence_df = normalize_selected_column(st.session_state.sentence_df)
         edited_sentence_df = st.data_editor(
             st.session_state.sentence_df,
             use_container_width=True,
@@ -520,7 +548,7 @@ elif st.session_state.step == 2:
             },
             key="sentence_editor",
         )
-        st.session_state.sentence_df = edited_sentence_df.fillna("")
+        st.session_state.sentence_df = normalize_selected_column(edited_sentence_df.fillna(""))
 
     col_back, col_next = st.columns([1, 1])
 
