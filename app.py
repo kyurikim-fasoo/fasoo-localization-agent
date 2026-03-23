@@ -457,7 +457,6 @@ if st.session_state.step == 1:
 # ---------------------------------
 elif st.session_state.step == 2:
     st.subheader("Step 2. 용어 및 패턴 선택")
-    st.markdown("적용할 용어와 패턴을 선택하세요.")
     st.markdown("적용하지 않을 항목은 체크박스를 해제하세요. 필요시 새 항목을 추가하거나 수정, 삭제할 수 있습니다.")
     render_summary_pills(
         st.session_state.selected_product,
@@ -470,9 +469,9 @@ elif st.session_state.step == 2:
     with tab1:
         st.caption("선택한 용어는 항상 동일하게 번역합니다.")
 
-        with st.expander("Glossary TSV 업로드", expanded=False):
+        with st.expander("TSV 업로드", expanded=False):
             uploaded_glossary_tsv = st.file_uploader(
-                "Glossary TSV 업로드",
+                "TSV 업로드",
                 type=["tsv"],
                 key="uploaded_glossary_tsv",
                 label_visibility="collapsed",
@@ -484,13 +483,13 @@ elif st.session_state.step == 2:
                         uploaded_glossary_tsv,
                     )
                     st.session_state.glossary_editor_key += 1
-                    st.success(f"{uploaded_glossary_tsv.name}을(를) glossary에 추가했습니다.")
+                    st.success(f"{uploaded_glossary_tsv.name}을(를) 용어에 추가했습니다.")
                 except Exception as e:
-                    st.error(f"Glossary TSV 업로드 오류: {e}")
+                    st.error(f"업로드 오류: {e}")
 
         top_left, top_right = st.columns([8, 1])
         with top_right:
-            if st.button("복원", key="reset_glossary"):
+            if st.button("초기 설정으로 복원", key="reset_glossary"):
                 st.session_state.glossary_df = st.session_state.base_glossary_df.copy()
                 st.session_state.glossary_editor_key += 1
                 st.rerun()
@@ -504,7 +503,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File"],
             column_config={
-                "Apply" : st.column_config.CheckboxColumn("Apply", default=True),
+                "적용" : st.column_config.CheckboxColumn("Apply", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -520,11 +519,11 @@ elif st.session_state.step == 2:
         st.session_state.glossary_df = prepare_glossary_editor_df(edited_glossary_df)
 
     with tab2:
-        st.caption("비슷한 표현이 나오면 아래 패턴을 참고해 번역합니다.")
+        st.caption("비슷한 구(phrase)가 나오면 아래 패턴을 참고해 번역합니다.")
 
-        with st.expander("Phrase pattern TSV 업로드", expanded=False):
+        with st.expander("TSV 업로드", expanded=False):
             uploaded_phrase_tsv = st.file_uploader(
-                "Phrase pattern TSV 업로드",
+                "TSV 업로드",
                 type=["tsv"],
                 key="uploaded_phrase_tsv",
                 label_visibility="collapsed",
@@ -537,13 +536,13 @@ elif st.session_state.step == 2:
                         "Phrase",
                     )
                     st.session_state.phrase_editor_key += 1
-                    st.success(f"{uploaded_phrase_tsv.name}을(를) phrase patterns에 추가했습니다.")
+                    st.success(f"{uploaded_phrase_tsv.name}을(를) 구 패턴에 추가했습니다.")
                 except Exception as e:
-                    st.error(f"Phrase pattern TSV 업로드 오류: {e}")
+                    st.error(f"업로드 오류: {e}")
 
         top_left, top_right = st.columns([8, 1])
         with top_right:
-            if st.button("복원", key="reset_phrase"):
+            if st.button("초기 설정으로 복원", key="reset_phrase"):
                 st.session_state.phrase_df = st.session_state.base_phrase_df.copy()
                 st.session_state.phrase_editor_key += 1
                 st.rerun()
@@ -557,7 +556,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File", "Pattern Type"],
             column_config={
-                "Apply" : st.column_config.CheckboxColumn("Apply", default=True),
+                "적용" : st.column_config.CheckboxColumn("Apply", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -570,9 +569,9 @@ elif st.session_state.step == 2:
     with tab3:
         st.caption("비슷한 문장이 나오면 아래 패턴을 참고해 번역합니다.")
 
-        with st.expander("Sentence pattern TSV 업로드", expanded=False):
+        with st.expander("TSV 업로드", expanded=False):
             uploaded_sentence_tsv = st.file_uploader(
-                "Sentence pattern TSV 업로드",
+                "TSV 업로드",
                 type=["tsv"],
                 key="uploaded_sentence_tsv",
                 label_visibility="collapsed",
@@ -585,13 +584,13 @@ elif st.session_state.step == 2:
                         "Sentence",
                     )
                     st.session_state.sentence_editor_key += 1
-                    st.success(f"{uploaded_sentence_tsv.name}을(를) sentence patterns에 추가했습니다.")
+                    st.success(f"{uploaded_sentence_tsv.name}을(를) 문장 패턴에 추가했습니다.")
                 except Exception as e:
-                    st.error(f"Sentence pattern TSV 업로드 오류: {e}")
+                    st.error(f"업로드 오류: {e}")
 
         top_left, top_right = st.columns([8, 1])
         with top_right:
-            if st.button("복원", key="reset_sentence"):
+            if st.button("초기 설정으로 복원", key="reset_sentence"):
                 st.session_state.sentence_df = st.session_state.base_sentence_df.copy()
                 st.session_state.sentence_editor_key += 1
                 st.rerun()
@@ -605,7 +604,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File", "Pattern Type"],
             column_config={
-                "Apply" : st.column_config.CheckboxColumn("Apply", default=True),
+                "적용" : st.column_config.CheckboxColumn("Apply", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
