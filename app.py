@@ -273,7 +273,7 @@ def init_session_state():
     defaults = {
         "step": 1,
         "selected_product": None,
-        "translation_mode": "Manual",
+        "translation_mode": "매뉴얼",
         "enable_cache": True,
         "glossary_df": None,
         "sentence_df": None,
@@ -417,8 +417,8 @@ if st.session_state.step == 1:
 
     translation_mode = st.radio(
         "텍스트 유형",
-        options=["UI", "Manual"],
-        index=0 if st.session_state.translation_mode == "UI" else 1,
+        options=["UI 텍스트", "매뉴얼"],
+        index=0 if st.session_state.translation_mode == "UI 텍스트" else 1,
         horizontal=True,
     )
 
@@ -504,8 +504,8 @@ elif st.session_state.step == 2:
             disabled=["File"],
             column_config={
                 "적용" : st.column_config.CheckboxColumn("적용", default=True),
-                "KO": st.column_config.TextColumn("KO", width="large"),
-                "EN": st.column_config.TextColumn("EN", width="large"),
+                "KO": st.column_config.TextColumn("KO", width="small"),
+                "EN": st.column_config.TextColumn("EN", width="small"),
                 "File": st.column_config.TextColumn("File", width="small"),
                 "Product": st.column_config.TextColumn("Product", width="small"),
                 "Category": st.column_config.TextColumn("Category", width="small"),
