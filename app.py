@@ -330,6 +330,18 @@ def render_summary_pills(product: str, mode: str, cache: bool):
     )
 
 
+def sync_glossary_editor():
+    edited_df = st.session_state["glossary_editor_widget"].copy()
+    st.session_state.glossary_df = prepare_glossary_editor_df(edited_df)
+
+def sync_phrase_editor():
+    edited_df = st.session_state["phrase_editor_widget"].copy()
+    st.session_state.phrase_df = prepare_pattern_editor_df(edited_df)
+
+def sync_sentence_editor():
+    edited_df = st.session_state["sentence_editor_widget"].copy()
+    st.session_state.sentence_df = prepare_pattern_editor_df(edited_df)
+
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
 init_session_state()
 
@@ -460,18 +472,6 @@ if st.session_state.step == 1:
 # ---------------------------------
 # Step 2
 # ---------------------------------
-
-def sync_glossary_editor():
-    edited_df = st.session_state["glossary_editor_widget"].copy()
-    st.session_state.glossary_df = prepare_glossary_editor_df(edited_df)
-
-def sync_phrase_editor():
-    edited_df = st.session_state["phrase_editor_widget"].copy()
-    st.session_state.phrase_df = prepare_pattern_editor_df(edited_df)
-
-def sync_sentence_editor():
-    edited_df = st.session_state["sentence_editor_widget"].copy()
-    st.session_state.sentence_df = prepare_pattern_editor_df(edited_df)
 
 elif st.session_state.step == 2:
     st.subheader("Step 2. 용어 및 패턴 선택")
