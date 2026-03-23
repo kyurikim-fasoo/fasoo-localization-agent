@@ -461,7 +461,7 @@ elif st.session_state.step == 2:
         st.session_state.enable_cache,
     )
 
-    tab1, tab2, tab3 = st.tabs(["용어", "패턴"])
+    tab1, tab2 = st.tabs(["용어", "패턴"])
 
     with tab1:
         st.caption("선택한 용어는 항상 동일하게 번역합니다.")
