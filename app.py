@@ -83,6 +83,12 @@ def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 
 
 def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        df = pd.DataFrame()
+
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+
     out = df.copy()
 
     if "적용" not in out.columns:
@@ -96,9 +102,11 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
         "EN",
         "File",
         "Product",
+        "Category",
         "DNT",
         "Case-sensitive",
         "Note",
+        "Def_KO",
     ]
 
     for col in expected_cols:
@@ -336,10 +344,6 @@ def render_summary_pills(product: str, mode: str, cache: bool):
     )
 
 
-def sync_glossary_editor():
-    edited_df = st.session_state["glossary_editor_widget"].copy()
-    st.session_state.glossary_df = prepare_glossary_editor_df(edited_df)
-
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
 init_session_state()
 
@@ -514,7 +518,7 @@ elif st.session_state.step == 2:
             st.session_state.glossary_df
         )
 
-        st.data_editor(
+        edited_glossary_df = st.data_editor(
             st.session_state.glossary_df,
             use_container_width=True,
             hide_index=True,
@@ -533,7 +537,6 @@ elif st.session_state.step == 2:
                 "Def_KO": st.column_config.TextColumn("Def_KO"),
             },
             key="glossary_editor_widget",
-            on_change=sync_glossary_editor,
         )
 
     with tab2:
