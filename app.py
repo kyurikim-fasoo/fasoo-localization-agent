@@ -273,7 +273,7 @@ def init_session_state():
     defaults = {
         "step": 1,
         "selected_product": None,
-        "translation_mode": "Manual",
+        "translation_mode": "매뉴얼",
         "enable_cache": True,
         "glossary_df": None,
         "sentence_df": None,
@@ -417,8 +417,8 @@ if st.session_state.step == 1:
 
     translation_mode = st.radio(
         "텍스트 유형",
-        options=["UI", "Manual"],
-        index=0 if st.session_state.translation_mode == "UI" else 1,
+        options=["UI 텍스트", "매뉴얼"],
+        index=0 if st.session_state.translation_mode == "UI 텍스트" else 1,
         horizontal=True,
     )
 
@@ -487,6 +487,30 @@ elif st.session_state.step == 2:
                 except Exception as e:
                     st.error(f"업로드 오류: {e}")
 
+        search_col1, search_col2 = st.columns([2, 2])
+
+        with search_col1:
+            search_term = st.text_input("검색어", placeholder="용어 입력")
+
+        with search_col2:
+            category_filter = st.selectbox(
+                "Category",
+                ["전체"] + sorted(st.session_state.glossary_df["Category"].dropna().unique().tolist())
+            )
+
+        filtered_df = st.session_state.glossary_df.copy()
+
+        if search_term:
+            mask = filtered_df.astype(str).apply(
+                lambda col: col.str.contains(search_term, case=False, na=False)
+            ).any(axis=1)
+            filtered_df = filtered_df[mask]
+
+        if category_filter != "전체":
+            filtered_df = filtered_df[filtered_df["Category"] == category_filter]
+
+        editor_df = prepare_glossary_editor_df(filtered_df)
+
         top_left, top_right = st.columns([6, 2])
         with top_right:
             if st.button("초기 설정으로 복원", key="reset_glossary", use_container_width=True):
@@ -494,18 +518,16 @@ elif st.session_state.step == 2:
                 st.session_state.glossary_editor_key += 1
                 st.rerun()
 
-        st.session_state.glossary_df = prepare_glossary_editor_df(st.session_state.glossary_df)
-
         edited_glossary_df = st.data_editor(
-            st.session_state.glossary_df,
+            editor_df,
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
             disabled=["File"],
             column_config={
                 "적용" : st.column_config.CheckboxColumn("적용", default=True),
-                "KO": st.column_config.TextColumn("KO", width="large"),
-                "EN": st.column_config.TextColumn("EN", width="large"),
+                "KO": st.column_config.TextColumn("KO", width="medium"),
+                "EN": st.column_config.TextColumn("EN", width="medium"),
                 "File": st.column_config.TextColumn("File", width="small"),
                 "Product": st.column_config.TextColumn("Product", width="small"),
                 "Category": st.column_config.TextColumn("Category", width="small"),
@@ -557,8 +579,8 @@ elif st.session_state.step == 2:
             disabled=["File", "Pattern Type"],
             column_config={
                 "적용" : st.column_config.CheckboxColumn("적용", default=True),
-                "KO": st.column_config.TextColumn("KO", width="large"),
-                "EN": st.column_config.TextColumn("EN", width="large"),
+                "KO": st.column_config.TextColumn("KO", width="medium"),
+                "EN": st.column_config.TextColumn("EN", width="medium"),
                 "File": st.column_config.TextColumn("File", width="small"),
                 "Pattern Type": st.column_config.TextColumn("Pattern Type", width="small"),
             },
@@ -605,8 +627,8 @@ elif st.session_state.step == 2:
             disabled=["File", "Pattern Type"],
             column_config={
                 "적용" : st.column_config.CheckboxColumn("적용", default=True),
-                "KO": st.column_config.TextColumn("KO", width="large"),
-                "EN": st.column_config.TextColumn("EN", width="large"),
+                "KO": st.column_config.TextColumn("KO", width="medium"),
+                "EN": st.column_config.TextColumn("EN", width="medium"),
                 "File": st.column_config.TextColumn("File", width="small"),
                 "Pattern Type": st.column_config.TextColumn("Pattern Type", width="small"),
             },
