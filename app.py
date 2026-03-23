@@ -116,24 +116,41 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
+if "pattern_df" not in st.session_state or st.session_state.pattern_df is None:
+    st.session_state.pattern_df = pd.DataFrame(
+        columns=["적용", "KO", "EN", "File", "Note"]
+    )
+
+if "base_pattern_df" not in st.session_state or st.session_state.base_pattern_df is None:
+    st.session_state.base_pattern_df = pd.DataFrame(
+        columns=["적용", "KO", "EN", "File", "Note"]
+    )
 
 def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        df = pd.DataFrame()
+
     out = df.copy()
 
     if "적용" not in out.columns:
         out["적용"] = True
+    else:
+        out["적용"] = out["적용"].fillna(True).astype(bool)
 
     expected_cols = [
         "적용",
         "KO",
         "EN",
         "File",
-        "Pattern Type",
+        "Note",
     ]
 
     for col in expected_cols:
         if col not in out.columns:
-            out[col] = ""
+            if col == "적용":
+                out[col] = True
+            else:
+                out[col] = ""
 
     out = out[expected_cols]
 
