@@ -130,6 +130,9 @@ def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None:
         df = pd.DataFrame()
 
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+
     out = df.copy()
 
     if "적용" not in out.columns:
@@ -336,10 +339,6 @@ def render_summary_pills(product: str, mode: str, cache: bool):
 def sync_glossary_editor():
     edited_df = st.session_state["glossary_editor_widget"].copy()
     st.session_state.glossary_df = prepare_glossary_editor_df(edited_df)
-
-def sync_pattern_editor():
-    edited_df = st.session_state["pattern_editor_widget"].copy()
-    st.session_state.pattern_df = prepare_pattern_editor_df(edited_df)
 
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
 init_session_state()
@@ -557,7 +556,7 @@ elif st.session_state.step == 2:
                     st.session_state.pattern_df = prepare_pattern_editor_df(
                         st.session_state.pattern_df
                     )
-                    st.success(f"{uploaded_pattern_tsv.name}을(를) 문장 패턴에 추가했습니다.")
+                    st.success(f"{uploaded_pattern_tsv.name}을(를) 패턴에 추가했습니다.")
                 except Exception as e:
                     st.error(f"업로드 오류: {e}")
 
@@ -571,22 +570,23 @@ elif st.session_state.step == 2:
 
         st.session_state.pattern_df = prepare_pattern_editor_df(st.session_state.pattern_df)
 
-        st.data_editor(
+        edited_pattern_df = st.data_editor(
             st.session_state.pattern_df,
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
-            disabled=["File", "Pattern Type"],
+            disabled=["File"],
             column_config={
                 "적용": st.column_config.CheckboxColumn("적용", default=True),
                 "KO": st.column_config.TextColumn("KO"),
                 "EN": st.column_config.TextColumn("EN"),
                 "File": st.column_config.TextColumn("File"),
-                "Pattern Type": st.column_config.TextColumn("Pattern Type"),
+                "Note": st.column_config.TextColumn("Note"),
             },
             key="pattern_editor_widget",
-            on_change=sync_pattern_editor,
         )
+
+        st.session_state.pattern_df = prepare_pattern_editor_df(edited_pattern_df)
 
         col_back, col_next = st.columns([1, 1])
 
