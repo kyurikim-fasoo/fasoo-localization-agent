@@ -85,11 +85,11 @@ def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    if "Apply" not in out.columns:
-        out["Apply"] = True
+    if "적용" not in out.columns:
+        out["적용"] = True
 
     expected_cols = [
-        "Apply",
+        "적용",
         "KO",
         "EN",
         "File",
@@ -108,7 +108,7 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = out[expected_cols]
 
     for col in expected_cols:
-        if col != "Apply":
+        if col != "적용":
             out[col] = out[col].fillna("").astype(str)
 
     return out
@@ -117,11 +117,11 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
 def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    if "Apply" not in out.columns:
-        out["Apply"] = True
+    if "적용" not in out.columns:
+        out["적용"] = True
 
     expected_cols = [
-        "Apply",
+        "적용",
         "KO",
         "EN",
         "File",
@@ -135,7 +135,7 @@ def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     out = out[expected_cols]
 
     for col in expected_cols:
-        if col != "Apply":
+        if col != "적용":
             out[col] = out[col].fillna("").astype(str)
 
     return out
@@ -503,7 +503,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File"],
             column_config={
-                "적용" : st.column_config.CheckboxColumn("Apply", default=True),
+                "적용" : st.column_config.CheckboxColumn("적용", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -556,7 +556,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File", "Pattern Type"],
             column_config={
-                "적용" : st.column_config.CheckboxColumn("Apply", default=True),
+                "적용" : st.column_config.CheckboxColumn("적용", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -604,7 +604,7 @@ elif st.session_state.step == 2:
             num_rows="dynamic",
             disabled=["File", "Pattern Type"],
             column_config={
-                "적용" : st.column_config.CheckboxColumn("Apply", default=True),
+                "적용" : st.column_config.CheckboxColumn("적용", default=True),
                 "KO": st.column_config.TextColumn("KO", width="large"),
                 "EN": st.column_config.TextColumn("EN", width="large"),
                 "File": st.column_config.TextColumn("File", width="small"),
@@ -644,24 +644,24 @@ elif st.session_state.step == 3:
 
     glossary_rows = (
     st.session_state.glossary_df[
-        st.session_state.glossary_df["Apply"] == True
+        st.session_state.glossary_df["적용"] == True
     ]
-    .drop(columns=["Apply"])
+    .drop(columns=["적용"])
     .to_dict("records")
     )
     sentence_rows = (
         st.session_state.sentence_df[
-            st.session_state.sentence_df["Apply"] == True
+            st.session_state.sentence_df["적용"] == True
         ]
-        .drop(columns=["Apply"])
+        .drop(columns=["적용"])
         .to_dict("records")
     )
 
     phrase_rows = (
         st.session_state.phrase_df[
-            st.session_state.phrase_df["Apply"] == True
+            st.session_state.phrase_df["적용"] == True
         ]
-        .drop(columns=["Apply"])
+        .drop(columns=["적용"])
         .to_dict("records")
     )
 
