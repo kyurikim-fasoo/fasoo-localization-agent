@@ -18,5 +18,15 @@
       "data/patterns/common.tsv",
       "data/patterns/wrapsody.tsv"
     ]
-  }
+  },
+  "AI-R DLP": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/ai-r_dlp.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/ai-r_dlp.tsv"
+  ]
+}
 }
