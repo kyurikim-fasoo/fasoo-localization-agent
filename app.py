@@ -487,9 +487,9 @@ elif st.session_state.step == 2:
                 except Exception as e:
                     st.error(f"업로드 오류: {e}")
 
-        top_left, top_right = st.columns([8, 1])
+        top_left, top_right = st.columns([6, 2])
         with top_right:
-            if st.button("초기 설정으로 복원", key="reset_glossary"):
+            if st.button("초기 설정으로 복원", key="reset_glossary", use_container_width=True):
                 st.session_state.glossary_df = st.session_state.base_glossary_df.copy()
                 st.session_state.glossary_editor_key += 1
                 st.rerun()
