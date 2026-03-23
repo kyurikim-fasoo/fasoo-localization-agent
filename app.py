@@ -393,7 +393,7 @@ st.markdown(
 )
 
 st.title("Fasoo Localization Agent")
-st.markdown("국문 문서를 자연스러운 영문으로 번역합니다.")
+st.markdown("국문 문서를 영문으로 로컬라이즈합니다.")
 
 config = load_product_config()
 products = list(config.keys())
@@ -406,7 +406,7 @@ if not OPENAI_API_KEY:
 # Step 1
 # ---------------------------------
 if st.session_state.step == 1:
-    st.subheader("Step 1. 기본 설정")
+    st.subheader("Step 1. 기본 정보")
     st.markdown("번역할 텍스트 유형과 제품을 선택하세요.")
 
     default_product_index = 0
@@ -423,7 +423,7 @@ if st.session_state.step == 1:
     )
 
     enable_cache = st.checkbox(
-        "중복된 문장은 이전 번역을 재사용해 속도와 비용을 줄입니다.",
+        "중복된 문장은 재사용해 속도와 비용을 줄입니다.",
         value=st.session_state.enable_cache,
     )
 
@@ -456,19 +456,19 @@ if st.session_state.step == 1:
 # Step 2
 # ---------------------------------
 elif st.session_state.step == 2:
-    st.subheader("Step 2. 용어 및 번역 스타일 선택")
-    st.markdown("번역에 적용할 용어와 표현 방식을 선택하세요.")
-    st.markdown("적용에서 제외할 항목은 행을 삭제하세요. 필요하면 직접 수정하거나 새 항목을 추가할 수 있습니다.")
+    st.subheader("Step 2. 용어 및 패턴 선택")
+    st.markdown("적용할 용어와 패턴을 선택하세요.")
+    st.markdown("적용하지 않을 항목은 체크박스를 해제하세요. 필요시 새 항목을 추가하거나 수정, 삭제할 수 있습니다.")
     render_summary_pills(
         st.session_state.selected_product,
         st.session_state.translation_mode,
         st.session_state.enable_cache,
     )
 
-    tab1, tab2, tab3 = st.tabs(["Glossaries", "Phrase patterns", "Sentence patterns"])
+    tab1, tab2, tab3 = st.tabs(["용어", "구 패턴", "문장 패턴"])
 
     with tab1:
-        st.caption("선택한 용어는 항상 동일하게 번역됩니다.")
+        st.caption("선택한 용어는 항상 동일하게 번역합니다.")
 
         with st.expander("Glossary TSV 업로드", expanded=False):
             uploaded_glossary_tsv = st.file_uploader(
@@ -568,7 +568,7 @@ elif st.session_state.step == 2:
         st.session_state.phrase_df = prepare_pattern_editor_df(edited_phrase_df)
 
     with tab3:
-        st.caption("비슷한 문장이 나오면 아래 예시를 참고해 번역합니다.")
+        st.caption("비슷한 문장이 나오면 아래 패턴을 참고해 번역합니다.")
 
         with st.expander("Sentence pattern TSV 업로드", expanded=False):
             uploaded_sentence_tsv = st.file_uploader(
@@ -625,7 +625,7 @@ elif st.session_state.step == 2:
     with col_next:
         if st.button("다음", use_container_width=True):
             if len(st.session_state.glossary_df) == 0:
-                st.error("적어도 하나의 glossary 항목은 남겨 두어야 합니다.")
+                st.error("적어도 하나의 항목은 남겨 두어야 합니다.")
             else:
                 reset_translation_result()
                 st.session_state.step = 3
@@ -636,7 +636,7 @@ elif st.session_state.step == 2:
 # ---------------------------------
 elif st.session_state.step == 3:
     st.subheader("Step 3. 업로드")
-    st.markdown("번역할 Word 파일을 업로드하거나 끌어서 놓으세요.")
+    st.markdown("로컬라이즈할 Word 파일을 업로드하거나 끌어서 놓으세요.")
     render_summary_pills(
         st.session_state.selected_product,
         st.session_state.translation_mode,
