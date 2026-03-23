@@ -105,7 +105,7 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in expected_cols:
         if col not in out.columns:
-            if col == "적용"
+            if col == "적용":
                 out[col] = True
             else:
                 out[col] = ""
