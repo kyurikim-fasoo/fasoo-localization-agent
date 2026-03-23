@@ -484,180 +484,180 @@ elif st.session_state.step == 2:
 
     tab1, tab2, tab3 = st.tabs(["용어", "구 패턴", "문장 패턴"])
 
-with tab1:
-    st.caption("선택한 용어는 항상 동일하게 번역합니다.")
+    with tab1:
+        st.caption("선택한 용어는 항상 동일하게 번역합니다.")
 
-    with st.expander("TSV 업로드", expanded=False):
-        uploaded_glossary_tsv = st.file_uploader(
-            "TSV 업로드",
-            type=["tsv"],
-            key="uploaded_glossary_tsv",
-            label_visibility="collapsed",
-        )
-        if uploaded_glossary_tsv is not None:
-            try:
-                st.session_state.glossary_df = merge_glossary_upload(
-                    st.session_state.glossary_df,
-                    uploaded_glossary_tsv,
-                )
+        with st.expander("TSV 업로드", expanded=False):
+            uploaded_glossary_tsv = st.file_uploader(
+                "TSV 업로드",
+                type=["tsv"],
+                key="uploaded_glossary_tsv",
+                label_visibility="collapsed",
+            )
+            if uploaded_glossary_tsv is not None:
+                try:
+                    st.session_state.glossary_df = merge_glossary_upload(
+                        st.session_state.glossary_df,
+                        uploaded_glossary_tsv,
+                    )
+                    st.session_state.glossary_df = prepare_glossary_editor_df(
+                        st.session_state.glossary_df
+                    )
+                    st.success(f"{uploaded_glossary_tsv.name}을(를) 용어에 추가했습니다.")
+                except Exception as e:
+                    st.error(f"업로드 오류: {e}")
+
+        top_left, top_right = st.columns([6, 2])
+        with top_right:
+            if st.button("초기 설정으로 복원", key="reset_glossary", use_container_width=True):
                 st.session_state.glossary_df = prepare_glossary_editor_df(
-                    st.session_state.glossary_df
+                    st.session_state.base_glossary_df.copy()
                 )
-                st.success(f"{uploaded_glossary_tsv.name}을(를) 용어에 추가했습니다.")
-            except Exception as e:
-                st.error(f"업로드 오류: {e}")
-
-    top_left, top_right = st.columns([6, 2])
-    with top_right:
-        if st.button("초기 설정으로 복원", key="reset_glossary", use_container_width=True):
-            st.session_state.glossary_df = prepare_glossary_editor_df(
-                st.session_state.base_glossary_df.copy()
-            )
-            st.rerun()
-
-    st.session_state.glossary_df = prepare_glossary_editor_df(
-        st.session_state.glossary_df
-    )
-
-    st.data_editor(
-        st.session_state.glossary_df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
-        disabled=["File"],
-        column_config={
-            "적용": st.column_config.CheckboxColumn("적용", default=True),
-            "KO": st.column_config.TextColumn("KO"),
-            "EN": st.column_config.TextColumn("EN"),
-            "File": st.column_config.TextColumn("File"),
-            "Product": st.column_config.TextColumn("Product"),
-            "Category": st.column_config.TextColumn("Category"),
-            "DNT": st.column_config.TextColumn("DNT"),
-            "Case-sensitive": st.column_config.TextColumn("Case-sensitive"),
-            "Note": st.column_config.TextColumn("Note"),
-            "Def_KO": st.column_config.TextColumn("Def_KO"),
-        },
-        key="glossary_editor_widget",
-        on_change=sync_glossary_editor,
-    )
-
-with tab2:
-    st.caption("비슷한 구(phrase)가 나오면 아래 패턴을 참고해 번역합니다.")
-
-    with st.expander("TSV 업로드", expanded=False):
-        uploaded_phrase_tsv = st.file_uploader(
-            "TSV 업로드",
-            type=["tsv"],
-            key="uploaded_phrase_tsv",
-            label_visibility="collapsed",
-        )
-        if uploaded_phrase_tsv is not None:
-            try:
-                st.session_state.phrase_df = merge_pattern_upload(
-                    st.session_state.phrase_df,
-                    uploaded_phrase_tsv,
-                    "Phrase",
-                )
-                st.session_state.phrase_df = prepare_pattern_editor_df(
-                    st.session_state.phrase_df
-                )
-                st.success(f"{uploaded_phrase_tsv.name}을(를) 구 패턴에 추가했습니다.")
-            except Exception as e:
-                st.error(f"업로드 오류: {e}")
-
-    top_left, top_right = st.columns([6, 2])
-    with top_right:
-        if st.button("초기 설정으로 복원", key="reset_phrase", use_container_width=True):
-            st.session_state.phrase_df = prepare_pattern_editor_df(
-                st.session_state.base_phrase_df.copy()
-            )
-            st.rerun()
-
-    st.session_state.phrase_df = prepare_pattern_editor_df(st.session_state.phrase_df)
-
-    st.data_editor(
-        st.session_state.phrase_df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
-        disabled=["File", "Pattern Type"],
-        column_config={
-            "적용": st.column_config.CheckboxColumn("적용", default=True),
-            "KO": st.column_config.TextColumn("KO"),
-            "EN": st.column_config.TextColumn("EN"),
-            "File": st.column_config.TextColumn("File"),
-            "Pattern Type": st.column_config.TextColumn("Pattern Type"),
-        },
-        key="phrase_editor_widget",
-        on_change=sync_phrase_editor,
-    )
-
-with tab3:
-    st.caption("비슷한 문장이 나오면 아래 패턴을 참고해 번역합니다.")
-
-    with st.expander("TSV 업로드", expanded=False):
-        uploaded_sentence_tsv = st.file_uploader(
-            "TSV 업로드",
-            type=["tsv"],
-            key="uploaded_sentence_tsv",
-            label_visibility="collapsed",
-        )
-        if uploaded_sentence_tsv is not None:
-            try:
-                st.session_state.sentence_df = merge_pattern_upload(
-                    st.session_state.sentence_df,
-                    uploaded_sentence_tsv,
-                    "Sentence",
-                )
-                st.session_state.sentence_df = prepare_pattern_editor_df(
-                    st.session_state.sentence_df
-                )
-                st.success(f"{uploaded_sentence_tsv.name}을(를) 문장 패턴에 추가했습니다.")
-            except Exception as e:
-                st.error(f"업로드 오류: {e}")
-
-    top_left, top_right = st.columns([6, 2])
-    with top_right:
-        if st.button("초기 설정으로 복원", key="reset_sentence", use_container_width=True):
-            st.session_state.sentence_df = prepare_pattern_editor_df(
-                st.session_state.base_sentence_df.copy()
-            )
-            st.rerun()
-
-    st.session_state.sentence_df = prepare_pattern_editor_df(st.session_state.sentence_df)
-
-    st.data_editor(
-        st.session_state.sentence_df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
-        disabled=["File", "Pattern Type"],
-        column_config={
-            "적용": st.column_config.CheckboxColumn("적용", default=True),
-            "KO": st.column_config.TextColumn("KO"),
-            "EN": st.column_config.TextColumn("EN"),
-            "File": st.column_config.TextColumn("File"),
-            "Pattern Type": st.column_config.TextColumn("Pattern Type"),
-        },
-        key="sentence_editor_widget",
-        on_change=sync_sentence_editor,
-    )
-
-    col_back, col_next = st.columns([1, 1])
-
-    with col_back:
-        if st.button("이전", use_container_width=True):
-            st.session_state.step = 1
-            st.rerun()
-
-    with col_next:
-        if st.button("다음", use_container_width=True):
-            if len(st.session_state.glossary_df) == 0:
-                st.error("적어도 하나의 항목은 남겨 두어야 합니다.")
-            else:
-                reset_translation_result()
-                st.session_state.step = 3
                 st.rerun()
+
+        st.session_state.glossary_df = prepare_glossary_editor_df(
+            st.session_state.glossary_df
+        )
+
+        st.data_editor(
+            st.session_state.glossary_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            disabled=["File"],
+            column_config={
+                "적용": st.column_config.CheckboxColumn("적용", default=True),
+                "KO": st.column_config.TextColumn("KO"),
+                "EN": st.column_config.TextColumn("EN"),
+                "File": st.column_config.TextColumn("File"),
+                "Product": st.column_config.TextColumn("Product"),
+                "Category": st.column_config.TextColumn("Category"),
+                "DNT": st.column_config.TextColumn("DNT"),
+                "Case-sensitive": st.column_config.TextColumn("Case-sensitive"),
+                "Note": st.column_config.TextColumn("Note"),
+                "Def_KO": st.column_config.TextColumn("Def_KO"),
+            },
+            key="glossary_editor_widget",
+            on_change=sync_glossary_editor,
+        )
+
+    with tab2:
+        st.caption("비슷한 구(phrase)가 나오면 아래 패턴을 참고해 번역합니다.")
+
+        with st.expander("TSV 업로드", expanded=False):
+            uploaded_phrase_tsv = st.file_uploader(
+                "TSV 업로드",
+                type=["tsv"],
+                key="uploaded_phrase_tsv",
+                label_visibility="collapsed",
+            )
+            if uploaded_phrase_tsv is not None:
+                try:
+                    st.session_state.phrase_df = merge_pattern_upload(
+                        st.session_state.phrase_df,
+                        uploaded_phrase_tsv,
+                        "Phrase",
+                    )
+                    st.session_state.phrase_df = prepare_pattern_editor_df(
+                        st.session_state.phrase_df
+                    )
+                    st.success(f"{uploaded_phrase_tsv.name}을(를) 구 패턴에 추가했습니다.")
+                except Exception as e:
+                    st.error(f"업로드 오류: {e}")
+
+        top_left, top_right = st.columns([6, 2])
+        with top_right:
+            if st.button("초기 설정으로 복원", key="reset_phrase", use_container_width=True):
+                st.session_state.phrase_df = prepare_pattern_editor_df(
+                    st.session_state.base_phrase_df.copy()
+                )
+                st.rerun()
+
+        st.session_state.phrase_df = prepare_pattern_editor_df(st.session_state.phrase_df)
+
+        st.data_editor(
+            st.session_state.phrase_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            disabled=["File", "Pattern Type"],
+            column_config={
+                "적용": st.column_config.CheckboxColumn("적용", default=True),
+                "KO": st.column_config.TextColumn("KO"),
+                "EN": st.column_config.TextColumn("EN"),
+                "File": st.column_config.TextColumn("File"),
+                "Pattern Type": st.column_config.TextColumn("Pattern Type"),
+            },
+            key="phrase_editor_widget",
+            on_change=sync_phrase_editor,
+        )
+
+    with tab3:
+        st.caption("비슷한 문장이 나오면 아래 패턴을 참고해 번역합니다.")
+
+        with st.expander("TSV 업로드", expanded=False):
+            uploaded_sentence_tsv = st.file_uploader(
+                "TSV 업로드",
+                type=["tsv"],
+                key="uploaded_sentence_tsv",
+                label_visibility="collapsed",
+            )
+            if uploaded_sentence_tsv is not None:
+                try:
+                    st.session_state.sentence_df = merge_pattern_upload(
+                        st.session_state.sentence_df,
+                        uploaded_sentence_tsv,
+                        "Sentence",
+                    )
+                    st.session_state.sentence_df = prepare_pattern_editor_df(
+                        st.session_state.sentence_df
+                    )
+                    st.success(f"{uploaded_sentence_tsv.name}을(를) 문장 패턴에 추가했습니다.")
+                except Exception as e:
+                    st.error(f"업로드 오류: {e}")
+
+        top_left, top_right = st.columns([6, 2])
+        with top_right:
+            if st.button("초기 설정으로 복원", key="reset_sentence", use_container_width=True):
+                st.session_state.sentence_df = prepare_pattern_editor_df(
+                    st.session_state.base_sentence_df.copy()
+                )
+                st.rerun()
+
+        st.session_state.sentence_df = prepare_pattern_editor_df(st.session_state.sentence_df)
+
+        st.data_editor(
+            st.session_state.sentence_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            disabled=["File", "Pattern Type"],
+            column_config={
+                "적용": st.column_config.CheckboxColumn("적용", default=True),
+                "KO": st.column_config.TextColumn("KO"),
+                "EN": st.column_config.TextColumn("EN"),
+                "File": st.column_config.TextColumn("File"),
+                "Pattern Type": st.column_config.TextColumn("Pattern Type"),
+            },
+            key="sentence_editor_widget",
+            on_change=sync_sentence_editor,
+        )
+
+        col_back, col_next = st.columns([1, 1])
+
+        with col_back:
+            if st.button("이전", use_container_width=True):
+                st.session_state.step = 1
+                st.rerun()
+
+        with col_next:
+            if st.button("다음", use_container_width=True):
+                if len(st.session_state.glossary_df) == 0:
+                    st.error("적어도 하나의 항목은 남겨 두어야 합니다.")
+                else:
+                    reset_translation_result()
+                    st.session_state.step = 3
+                    st.rerun()
 
 # ---------------------------------
 # Step 3
