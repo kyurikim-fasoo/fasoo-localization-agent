@@ -540,9 +540,9 @@ elif st.session_state.step == 2:
                 except Exception as e:
                     st.error(f"업로드 오류: {e}")
 
-        top_left, top_right = st.columns([8, 1])
+        top_left, top_right = st.columns([6, 2])
         with top_right:
-            if st.button("초기 설정으로 복원", key="reset_phrase"):
+            if st.button("초기 설정으로 복원", key="reset_phrase", use_container_width=True):
                 st.session_state.phrase_df = st.session_state.base_phrase_df.copy()
                 st.session_state.phrase_editor_key += 1
                 st.rerun()
@@ -588,9 +588,9 @@ elif st.session_state.step == 2:
                 except Exception as e:
                     st.error(f"업로드 오류: {e}")
 
-        top_left, top_right = st.columns([8, 1])
+        top_left, top_right = st.columns([6, 2])
         with top_right:
-            if st.button("초기 설정으로 복원", key="reset_sentence"):
+            if st.button("초기 설정으로 복원", key="reset_sentence", use_container_width=True):
                 st.session_state.sentence_df = st.session_state.base_sentence_df.copy()
                 st.session_state.sentence_editor_key += 1
                 st.rerun()
