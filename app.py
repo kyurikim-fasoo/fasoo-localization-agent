@@ -539,6 +539,10 @@ elif st.session_state.step == 2:
             key="glossary_editor_widget",
         )
 
+        st.session_state.pattern_df = prepare_pattern_editor_df(edited_pattern_df)
+
+        col_back, col_next = st.columns([1, 1])
+
         with col_back:
             if st.button("이전", use_container_width=True):
                 st.session_state.step = 1
@@ -552,6 +556,7 @@ elif st.session_state.step == 2:
                     reset_translation_result()
                     st.session_state.step = 3
                     st.rerun()
+
 
     with tab2:
         st.caption("비슷한 패턴이 나오면 아래를 참고해 번역합니다.")
