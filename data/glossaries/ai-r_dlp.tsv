@@ -11,9 +11,16 @@
 저장	Save		ALL	False			
 민감정보	Sensitive data		ALL	False			
 전체	All		ALL	False			
+경고 메시지	Warning message		AI-R DLP	False			
+딥러닝 태그	Deep learning tags		AI-R DLP	False			
+검출 지침	Detection guideline		AI-R DLP	False			
+대외비	Internal data		AI-R DLP	False			
 부서	Group		ALL	False			
 우측 하단	bottom right corner		ALL	False			
 관리자	Administrator		ALL	False			
+이상 행위	Anomaly		AI-R DLP	False			
+첨부 파일	Attachment		AI-R DLP	False			
 우측 상단	top right corner		ALL	False			
+정규식 패턴	Regex patterns		AI-R DLP	False			
 복수 선택 가능	Multiple selections allowed		ALL	False			
 AI-R DLP	AI-R DLP		ALL	True			

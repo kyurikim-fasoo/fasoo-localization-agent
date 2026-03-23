@@ -96,11 +96,9 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
         "EN",
         "File",
         "Product",
-        "Category",
         "DNT",
         "Case-sensitive",
         "Note",
-        "Def_KO",
     ]
 
     for col in expected_cols:
@@ -157,7 +155,7 @@ def load_glossary_table(paths: list[str]) -> pd.DataFrame:
         df = read_tsv_flexible(path)
         df = _ensure_columns(
             df,
-            ["KO", "EN", "Def_KO", "DNT", "Case-sensitive", "Category", "Product", "Note"],
+            ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"],
         )
         df["File"] = path.name
 
@@ -167,11 +165,9 @@ def load_glossary_table(paths: list[str]) -> pd.DataFrame:
                 "EN",
                 "File",
                 "Product",
-                "Category",
                 "DNT",
                 "Case-sensitive",
                 "Note",
-                "Def_KO",
             ]
         ]
         frames.append(df)
@@ -184,11 +180,8 @@ def load_glossary_table(paths: list[str]) -> pd.DataFrame:
                     "EN",
                     "File",
                     "Product",
-                    "Category",
                     "DNT",
                     "Case-sensitive",
-                    "Note",
-                    "Def_KO",
                 ]
             )
         )
@@ -226,21 +219,19 @@ def build_product_tables(product_name: str, config: dict):
     product_info = config[product_name]
 
     glossary_paths = product_info.get("default_glossaries", [])
-    sentence_paths = product_info.get("default_sentence_patterns", [])
-    phrase_paths = product_info.get("default_phrase_patterns", [])
+    pattern_paths = product_info.get("default_patterns", [])
 
     glossary_df = load_glossary_table(glossary_paths)
-    sentence_df = load_pattern_table(sentence_paths, "Sentence")
-    phrase_df = load_pattern_table(phrase_paths, "Phrase")
+    pattern_df = load_pattern_table(pattern_paths, "Pattern")
 
-    return glossary_df, sentence_df, phrase_df
+    return glossary_df, pattern_df
 
 
 def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
     uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
     uploaded_df = _ensure_columns(
         uploaded_df,
-        ["KO", "EN", "Def_KO", "DNT", "Case-sensitive", "Category", "Product", "Note"],
+        ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"],
     )
     uploaded_df["File"] = uploaded_file.name
 
@@ -250,11 +241,9 @@ def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFra
             "EN",
             "File",
             "Product",
-            "Category",
             "DNT",
             "Case-sensitive",
             "Note",
-            "Def_KO",
         ]
     ]
 
@@ -281,17 +270,14 @@ def init_session_state():
         "translation_mode": "매뉴얼",
         "enable_cache": True,
         "glossary_df": None,
-        "sentence_df": None,
-        "phrase_df": None,
+        "pattern_df": None,
         "base_glossary_df": None,
-        "base_sentence_df": None,
-        "base_phrase_df": None,
+        "base_pattern_df": None,
         "last_result": None,
         "last_output_path": None,
         "last_output_filename": None,
         "glossary_editor_key": 0,
-        "phrase_editor_key": 0,
-        "sentence_editor_key": 0,
+        "pattern_editor_key": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -334,13 +320,9 @@ def sync_glossary_editor():
     edited_df = st.session_state["glossary_editor_widget"].copy()
     st.session_state.glossary_df = prepare_glossary_editor_df(edited_df)
 
-def sync_phrase_editor():
-    edited_df = st.session_state["phrase_editor_widget"].copy()
-    st.session_state.phrase_df = prepare_pattern_editor_df(edited_df)
-
-def sync_sentence_editor():
-    edited_df = st.session_state["sentence_editor_widget"].copy()
-    st.session_state.sentence_df = prepare_pattern_editor_df(edited_df)
+def sync_pattern_editor():
+    edited_df = st.session_state["pattern_editor_widget"].copy()
+    st.session_state.pattern_df = prepare_pattern_editor_df(edited_df)
 
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
 init_session_state()
@@ -451,19 +433,16 @@ if st.session_state.step == 1:
         st.session_state.translation_mode = translation_mode
         st.session_state.enable_cache = enable_cache
 
-        glossary_df, sentence_df, phrase_df = build_product_tables(selected_product, config)
+        glossary_df, pattern_df = build_product_tables(selected_product, config)
 
         st.session_state.glossary_df = glossary_df.copy()
-        st.session_state.sentence_df = sentence_df.copy()
-        st.session_state.phrase_df = phrase_df.copy()
+        st.session_state.pattern_df = pattern_df.copy()
 
         st.session_state.base_glossary_df = glossary_df.copy()
-        st.session_state.base_sentence_df = sentence_df.copy()
-        st.session_state.base_phrase_df = phrase_df.copy()
+        st.session_state.base_pattern_df = pattern_df.copy()
 
         st.session_state.glossary_editor_key += 1
-        st.session_state.phrase_editor_key += 1
-        st.session_state.sentence_editor_key += 1
+        st.session_state.pattern_editor_key += 1
 
         reset_translation_result()
         st.session_state.step = 2
@@ -482,7 +461,7 @@ elif st.session_state.step == 2:
         st.session_state.enable_cache,
     )
 
-    tab1, tab2, tab3 = st.tabs(["용어", "구 패턴", "문장 패턴"])
+    tab1, tab2, tab3 = st.tabs(["용어", "패턴"])
 
     with tab1:
         st.caption("선택한 용어는 항상 동일하게 번역합니다.")
@@ -542,41 +521,41 @@ elif st.session_state.step == 2:
         )
 
     with tab2:
-        st.caption("비슷한 구(phrase)가 나오면 아래 패턴을 참고해 번역합니다.")
+        st.caption("비슷한 패턴이 나오면 아래를 참고해 번역합니다.")
 
         with st.expander("TSV 업로드", expanded=False):
-            uploaded_phrase_tsv = st.file_uploader(
+            uploaded_pattern_tsv = st.file_uploader(
                 "TSV 업로드",
                 type=["tsv"],
-                key="uploaded_phrase_tsv",
+                key="uploaded_pattern_tsv",
                 label_visibility="collapsed",
             )
-            if uploaded_phrase_tsv is not None:
+            if uploaded_pattern_tsv is not None:
                 try:
-                    st.session_state.phrase_df = merge_pattern_upload(
-                        st.session_state.phrase_df,
-                        uploaded_phrase_tsv,
-                        "Phrase",
+                    st.session_state.pattern_df = merge_pattern_upload(
+                        st.session_state.pattern_df,
+                        uploaded_pattern_tsv,
+                        "Pattern",
                     )
-                    st.session_state.phrase_df = prepare_pattern_editor_df(
-                        st.session_state.phrase_df
+                    st.session_state.pattern_df = prepare_pattern_editor_df(
+                        st.session_state.pattern_df
                     )
-                    st.success(f"{uploaded_phrase_tsv.name}을(를) 구 패턴에 추가했습니다.")
+                    st.success(f"{uploaded_pattern_tsv.name}을(를) 문장 패턴에 추가했습니다.")
                 except Exception as e:
                     st.error(f"업로드 오류: {e}")
 
         top_left, top_right = st.columns([6, 2])
         with top_right:
-            if st.button("초기 설정으로 복원", key="reset_phrase", use_container_width=True):
-                st.session_state.phrase_df = prepare_pattern_editor_df(
-                    st.session_state.base_phrase_df.copy()
+            if st.button("초기 설정으로 복원", key="reset_pattern", use_container_width=True):
+                st.session_state.pattern_df = prepare_pattern_editor_df(
+                    st.session_state.base_pattern_df.copy()
                 )
                 st.rerun()
 
-        st.session_state.phrase_df = prepare_pattern_editor_df(st.session_state.phrase_df)
+        st.session_state.pattern_df = prepare_pattern_editor_df(st.session_state.pattern_df)
 
         st.data_editor(
-            st.session_state.phrase_df,
+            st.session_state.pattern_df,
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
@@ -588,59 +567,8 @@ elif st.session_state.step == 2:
                 "File": st.column_config.TextColumn("File"),
                 "Pattern Type": st.column_config.TextColumn("Pattern Type"),
             },
-            key="phrase_editor_widget",
-            on_change=sync_phrase_editor,
-        )
-
-    with tab3:
-        st.caption("비슷한 문장이 나오면 아래 패턴을 참고해 번역합니다.")
-
-        with st.expander("TSV 업로드", expanded=False):
-            uploaded_sentence_tsv = st.file_uploader(
-                "TSV 업로드",
-                type=["tsv"],
-                key="uploaded_sentence_tsv",
-                label_visibility="collapsed",
-            )
-            if uploaded_sentence_tsv is not None:
-                try:
-                    st.session_state.sentence_df = merge_pattern_upload(
-                        st.session_state.sentence_df,
-                        uploaded_sentence_tsv,
-                        "Sentence",
-                    )
-                    st.session_state.sentence_df = prepare_pattern_editor_df(
-                        st.session_state.sentence_df
-                    )
-                    st.success(f"{uploaded_sentence_tsv.name}을(를) 문장 패턴에 추가했습니다.")
-                except Exception as e:
-                    st.error(f"업로드 오류: {e}")
-
-        top_left, top_right = st.columns([6, 2])
-        with top_right:
-            if st.button("초기 설정으로 복원", key="reset_sentence", use_container_width=True):
-                st.session_state.sentence_df = prepare_pattern_editor_df(
-                    st.session_state.base_sentence_df.copy()
-                )
-                st.rerun()
-
-        st.session_state.sentence_df = prepare_pattern_editor_df(st.session_state.sentence_df)
-
-        st.data_editor(
-            st.session_state.sentence_df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="dynamic",
-            disabled=["File", "Pattern Type"],
-            column_config={
-                "적용": st.column_config.CheckboxColumn("적용", default=True),
-                "KO": st.column_config.TextColumn("KO"),
-                "EN": st.column_config.TextColumn("EN"),
-                "File": st.column_config.TextColumn("File"),
-                "Pattern Type": st.column_config.TextColumn("Pattern Type"),
-            },
-            key="sentence_editor_widget",
-            on_change=sync_sentence_editor,
+            key="pattern_editor_widget",
+            on_change=sync_pattern_editor,
         )
 
         col_back, col_next = st.columns([1, 1])
@@ -678,17 +606,9 @@ elif st.session_state.step == 3:
     .drop(columns=["적용"])
     .to_dict("records")
     )
-    sentence_rows = (
-        st.session_state.sentence_df[
-            st.session_state.sentence_df["적용"] == True
-        ]
-        .drop(columns=["적용"])
-        .to_dict("records")
-    )
-
-    phrase_rows = (
-        st.session_state.phrase_df[
-            st.session_state.phrase_df["적용"] == True
+    pattern_rows = (
+        st.session_state.pattern_df[
+            st.session_state.pattern_df["적용"] == True
         ]
         .drop(columns=["적용"])
         .to_dict("records")
@@ -749,8 +669,7 @@ elif st.session_state.step == 3:
                     in_path=str(input_path),
                     out_path=str(output_path),
                     glossary_rows=glossary_rows,
-                    sentence_pattern_rows=sentence_rows,
-                    phrase_pattern_rows=phrase_rows,
+                    pattern_rows=pattern_rows,
                     api_key=OPENAI_API_KEY,
                     enable_cache=st.session_state.enable_cache,
                     translation_mode=st.session_state.translation_mode,

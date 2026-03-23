@@ -370,50 +370,38 @@ def tokenize_koreanish(text: str) -> List[str]:
 
 def select_relevant_patterns(
     source_text: str,
-    sentence_patterns: List[Tuple[str, str]],
-    phrase_patterns: List[Tuple[str, str]],
-    max_sentence: int = 3,
-    max_phrase: int = 5,
+    patterns: List[Tuple[str, str]],
+    max_pattern: int = 3,
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
     source_tokens = set(tokenize_koreanish(source_text))
 
-    def score_pattern(ko: str) -> int:
+    def score_patterns(ko: str) -> int:
         pattern_tokens = set(tokenize_koreanish(ko))
         return len(source_tokens & pattern_tokens)
 
-    scored_sentences = []
-    for ko, en in sentence_patterns:
-        score = score_pattern(ko)
+    scored_patterns = []
+    for ko, en in patterns:
+        score = score_patterns(ko)
         if score > 0:
-            scored_sentences.append((score, ko, en))
+            scored_patterns.append((score, ko, en))
 
-    scored_phrases = []
-    for ko, en in phrase_patterns:
-        score = score_pattern(ko)
-        if score > 0:
-            scored_phrases.append((score, ko, en))
+    scored_patterns.sort(key=lambda x: (-x[0], -len(x[1])))
 
-    scored_sentences.sort(key=lambda x: (-x[0], -len(x[1])))
-    scored_phrases.sort(key=lambda x: (-x[0], -len(x[1])))
+    selected_patterns = [(ko, en) for score, ko, en in scored_patterns[:max_pattern]]
 
-    selected_sentences = [(ko, en) for score, ko, en in scored_sentences[:max_sentence]]
-    selected_phrases = [(ko, en) for score, ko, en in scored_phrases[:max_phrase]]
-
-    return selected_sentences, selected_phrases
+    return selected_patterns
 
 
 def translate_paragraph_with_patterns(
     client: OpenAI,
     source_text: str,
-    sentence_examples: List[Tuple[str, str]],
-    phrase_examples: List[Tuple[str, str]],
+    pattern_examples: List[Tuple[str, str]],
     model: str = "gpt-5.2",
     translation_mode: str = "Manual",
 ) -> str:
     global TOTAL_INPUT_TOKENS, TOTAL_CACHED_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_TOKENS
 
-    sentence_block = "\n".join([f"- {ko} -> {en}" for ko, en in sentence_examples]) or "(none)"
-    phrase_block = "\n".join([f"- {ko} -> {en}" for ko, en in phrase_examples]) or "(none)"
+    pattern_block = "\n".join([f"- {ko} -> {en}" for ko, en in pattern_examples]) or "(none)"
 
     if translation_mode == "UI":
         style_rules = """
@@ -436,16 +424,13 @@ Translate Korean to natural, professional English.
 Rules:
 - Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧.
 - Treat glossary placeholders as fixed terms.
-- Use the sentence examples and phrase examples only as reference guidance.
+- Use the pattern examples only as reference guidance.
 - Do not copy irrelevant examples.
 - Avoid repetition and awkward literal wording.
 {style_rules}
 
-Reference sentence examples:
-{sentence_block}
-
-Reference phrase examples:
-{phrase_block}
+Reference pattern examples:
+{pattern_block}
 
 Text to translate:
 {source_text}
@@ -479,8 +464,7 @@ def translate_document(
     in_path: str,
     out_path: str,
     glossary_rows: List[dict],
-    sentence_pattern_rows: List[dict],
-    phrase_pattern_rows: List[dict],
+    pattern_rows: List[dict],
     api_key: str,
     enable_cache: bool = True,
     model: str = "gpt-5.2",
@@ -490,8 +474,7 @@ def translate_document(
     reset_token_counters()
 
     glossary_entries = build_glossary_entries_from_rows(glossary_rows)
-    sentence_patterns = build_pattern_pairs_from_rows(sentence_pattern_rows)
-    phrase_patterns = build_pattern_pairs_from_rows(phrase_pattern_rows)
+    patterns = build_pattern_pairs_from_rows(pattern_rows)
 
     client = OpenAI(api_key=api_key)
     doc = Document(in_path)
@@ -531,17 +514,15 @@ def translate_document(
 
         gl_pre, gl_map = preprocess_with_glossary_placeholders(src, glossary_entries)
 
-        selected_sentence_examples, selected_phrase_examples = select_relevant_patterns(
+        selected_pattern_examples = select_relevant_patterns(
             gl_pre,
-            sentence_patterns,
-            phrase_patterns,
+            patterns,
         )
 
         translated = translate_paragraph_with_patterns(
             client=client,
             source_text=gl_pre,
-            sentence_examples=selected_sentence_examples,
-            phrase_examples=selected_phrase_examples,
+            pattern_examples=selected_pattern_examples,
             model=model,
             translation_mode=translation_mode,
         )
