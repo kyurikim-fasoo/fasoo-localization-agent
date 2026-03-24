@@ -18,6 +18,7 @@ G_PREFIX = "⟦G"
 SUFFIX = "⟧"
 
 KOREAN_RE = re.compile(r"[가-힣]")
+PLACEHOLDER_RE = re.compile(r"⟦G\d+⟧")
 
 
 def reset_token_counters():
@@ -65,11 +66,13 @@ class GlossaryEntry:
 def dedupe_glossary_entries(entries: List[GlossaryEntry]) -> List[GlossaryEntry]:
     seen = set()
     result = []
+
     for e in entries:
-        key = (e.ko, e.en, e.product, e.category, e.note)
+        key = (e.ko, e.en, e.product, e.note)
         if key not in seen:
             seen.add(key)
             result.append(e)
+
     result.sort(key=lambda e: len(e.ko), reverse=True)
     return result
 
@@ -115,7 +118,10 @@ def build_pattern_pairs_from_rows(rows: List[dict]) -> List[Tuple[str, str]]:
     return pairs
 
 
-def preprocess_with_glossary_placeholders(text: str, entries: List[GlossaryEntry]) -> Tuple[str, Dict[str, GlossaryEntry]]:
+def preprocess_with_glossary_placeholders(
+    text: str,
+    entries: List[GlossaryEntry],
+) -> Tuple[str, Dict[str, GlossaryEntry]]:
     out = text
     mapping: Dict[str, GlossaryEntry] = {}
     idx = 0
@@ -213,28 +219,30 @@ def _cap_first_alpha(s: str) -> str:
             return s[:i] + ch.upper() + s[i + 1:]
     return s
 
+
 def repair_bold_markers(text: str) -> str:
     if not text:
         return text
 
-    # ⟦Brule -> ⟦B⟧rule
-    text = re.sub(r"⟦B(?!⟧)", f"{B_OPEN}", text)
+    # 흔한 깨짐 복구
+    text = re.sub(r"⟦\s*B(?!⟧)\s*", B_OPEN, text)
+    text = re.sub(r"⟦\s*/\s*B(?!⟧)\s*", B_CLOSE, text)
 
-    # ⟦/Brule -> ⟦/B⟧rule 같은 비정상 케이스 방지
-    text = re.sub(r"⟦/B(?!⟧)", f"{B_CLOSE}", text)
+    # 반쯤 잘린 경우
+    text = text.replace("⟦/B", B_CLOSE)
 
-    # 혹시 닫는 태그가 아예 사라졌는데 여는 태그만 남은 경우 최소 복구
     open_count = text.count(B_OPEN)
     close_count = text.count(B_CLOSE)
+
     if open_count > close_count:
         text += B_CLOSE
     elif close_count > open_count:
-        # 여는 태그 없이 닫는 태그만 많은 경우는 닫는 태그 제거
         diff = close_count - open_count
         for _ in range(diff):
             text = text.replace(B_CLOSE, "", 1)
 
-    return text    
+    return text
+
 
 def capitalize_bold_segments(text: str) -> str:
     def repl(match):
@@ -247,6 +255,7 @@ def capitalize_bold_segments(text: str) -> str:
         text,
         flags=re.DOTALL,
     )
+
 
 def capitalize_bullet_lines(text: str) -> str:
     lines = text.splitlines()
@@ -281,9 +290,64 @@ def capitalize_bullet_lines(text: str) -> str:
             out_lines.append(indent + pre + rest)
             continue
 
-        out_lines.append(indent + _cap_first_alpha(stripped))
+        # 일반 줄은 건드리지 않음
+        out_lines.append(line)
 
     return "\n".join(out_lines)
+
+
+def _sentence_case_plain_segment(segment: str, first_alpha_done: bool) -> Tuple[str, bool]:
+    if not segment:
+        return segment, first_alpha_done
+
+    chars = list(segment)
+
+    for i, ch in enumerate(chars):
+        if ch.isalpha():
+            if not first_alpha_done:
+                chars[i] = ch.upper()
+                for j in range(i + 1, len(chars)):
+                    if chars[j].isalpha():
+                        chars[j] = chars[j].lower()
+                first_alpha_done = True
+            else:
+                for j in range(i, len(chars)):
+                    if chars[j].isalpha():
+                        chars[j] = chars[j].lower()
+            break
+
+    return "".join(chars), first_alpha_done
+
+
+def normalize_heading_text(text: str) -> str:
+    if not text:
+        return text
+
+    s = text.strip()
+    s = re.sub(r"[.。]+$", "", s)
+
+    # bold marker와 glossary placeholder는 건드리지 않음
+    parts = re.split(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)", s)
+
+    normalized_parts = []
+    first_alpha_done = False
+
+    for part in parts:
+        if not part:
+            normalized_parts.append(part)
+            continue
+
+        if part == B_OPEN or part == B_CLOSE or PLACEHOLDER_RE.fullmatch(part):
+            normalized_parts.append(part)
+            continue
+
+        normalized, first_alpha_done = _sentence_case_plain_segment(part, first_alpha_done)
+        normalized_parts.append(normalized)
+
+    s = "".join(normalized_parts)
+    s = re.sub(r"[ \t]{2,}", " ", s).strip()
+    s = re.sub(r"[.。]+$", "", s)
+    return s
 
 
 def normalize_paragraph_breaks(s: str) -> str:
@@ -311,43 +375,6 @@ def is_heading_paragraph(p) -> bool:
     name = (p.style.name or "").lower()
     return name.startswith("heading") or name in ("title",)
 
-def normalize_heading_text(text: str) -> str:
-    if not text:
-        return text
-
-    # marker 제거 전용 보기용 텍스트가 아니라, marker 포함 상태에서 처리
-    # bold marker는 그대로 두고 문자만 정리
-    s = text.strip()
-
-    # 끝 마침표 제거
-    s = re.sub(r"[.。]+$", "", s)
-
-    # 문장 전체를 sentence case로
-    # 일단 plain text 기준으로 처리
-    parts = re.split(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)})", s)
-
-    normalized_parts = []
-    first_text_done = False
-
-    for part in parts:
-        if part in (B_OPEN, B_CLOSE):
-            normalized_parts.append(part)
-            continue
-
-        if not part:
-            normalized_parts.append(part)
-            continue
-
-        lower = part[:1].upper() + part[1:].lower() if not first_text_done else part.lower()
-        normalized_parts.append(lower)
-        if part.strip():
-            first_text_done = True
-
-    s = "".join(normalized_parts)
-
-    # 이중 공백 정리
-    s = re.sub(r"[ \t]{2,}", " ", s).strip()
-    return s
 
 def paragraph_has_hyperlink(paragraph) -> bool:
     return paragraph._p.xpath(".//w:hyperlink") != []
@@ -381,7 +408,7 @@ def select_relevant_patterns(
     source_text: str,
     patterns: List[Tuple[str, str]],
     max_pattern: int = 3,
-) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+) -> List[Tuple[str, str]]:
     source_tokens = set(tokenize_koreanish(source_text))
 
     def score_patterns(ko: str) -> int:
@@ -397,7 +424,6 @@ def select_relevant_patterns(
     scored_patterns.sort(key=lambda x: (-x[0], -len(x[1])))
 
     selected_patterns = [(ko, en) for score, ko, en in scored_patterns[:max_pattern]]
-
     return selected_patterns
 
 
@@ -412,7 +438,7 @@ def translate_paragraph_with_patterns(
 
     pattern_block = "\n".join([f"- {ko} -> {en}" for ko, en in pattern_examples]) or "(none)"
 
-    if translation_mode == "UI":
+    if translation_mode in {"UI", "UI 텍스트"}:
         style_rules = """
 - Prefer short, direct UI-style English.
 - Keep labels and instructions concise.
@@ -514,6 +540,12 @@ def translate_document(
     for idx, p in enumerate(paras):
         src = marked_texts[idx]
 
+        # 하이퍼링크 문단은 현재 구조상 안전하게 건너뜀
+        if paragraph_has_hyperlink(p):
+            if progress_callback:
+                progress_callback(idx + 1, total_paras)
+            continue
+
         if enable_cache and src in cache:
             translated = cache[src]
             _write_paragraph(p, translated)
@@ -538,20 +570,22 @@ def translate_document(
 
         translated = translated.strip()
         translated = repair_bold_markers(translated)
+
+        if is_heading_paragraph(p):
+            translated = normalize_heading_text(translated)
+
         translated = restore_glossary_placeholders(translated, gl_map or {})
         translated = capitalize_bold_segments(translated)
         translated = capitalize_bullet_lines(translated)
 
         if is_heading_paragraph(p):
-            translated = normalize_heading_text(translated)
+            translated = re.sub(r"[.。]+$", "", translated)
+            translated = _cap_first_alpha(translated)
 
         translated = normalize_paragraph_breaks(translated)
 
         if enable_cache:
             cache[src] = translated
-
-        if is_heading_paragraph(p):
-            translated = normalize_heading_text(translated)
 
         _write_paragraph(p, translated)
 
