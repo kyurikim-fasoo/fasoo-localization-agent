@@ -280,10 +280,17 @@ def repair_bold_markers(text: str) -> str:
     if not text:
         return text
 
-    text = re.sub(r"⟦\s*B(?!⟧)\s*", B_OPEN, text)
-    text = re.sub(r"⟦\s*/\s*B(?!⟧)\s*", B_CLOSE, text)
-    text = text.replace("⟦/B", B_CLOSE)
+    # ⟦Brule -> ⟦B⟧rule
+    text = re.sub(r"⟦B(?=[A-Za-z])", B_OPEN, text)
 
+    # ⟦/Brule -> ⟦/B⟧rule
+    text = re.sub(r"⟦/B(?=[A-Za-z])", B_CLOSE, text)
+
+    # 공백 섞인 깨짐
+    text = re.sub(r"⟦\s*B\s*⟧?", B_OPEN, text)
+    text = re.sub(r"⟦\s*/\s*B\s*⟧?", B_CLOSE, text)
+
+    # 여닫는 개수 불균형 정리
     open_count = text.count(B_OPEN)
     close_count = text.count(B_CLOSE)
 
@@ -294,15 +301,6 @@ def repair_bold_markers(text: str) -> str:
         for _ in range(diff):
             text = text.replace(B_CLOSE, "", 1)
 
-    return text
-
-
-def fix_broken_bold_tokens(text: str) -> str:
-    if not text:
-        return text
-
-    text = re.sub(r"⟦B([A-Za-z])", rf"{B_OPEN}\1", text)
-    text = re.sub(r"⟦/B([A-Za-z])", rf"{B_CLOSE}\1", text)
     return text
 
 
@@ -491,6 +489,36 @@ def normalize_for_scoring(text: str) -> str:
     text = re.sub(r"⟦G\d+⟧", " ", text)
     text = text.replace("~", " ")
     return text
+
+
+def normalize_colon_label_line(text: str) -> str:
+    s = text.strip()
+
+    # 예: rule Name: / regex patterns: / deep learning tags:
+    if ":" not in s:
+        return text
+
+    left, right = s.split(":", 1)
+    left_norm = normalize_ui_label_text(left.strip())
+    left_norm = _cap_first_alpha(left_norm)
+
+    return f"{left_norm}: {right.strip()}" if right.strip() else f"{left_norm}:"
+
+
+def looks_like_heading_text(text: str) -> bool:
+    s = strip_bold_markers(text).strip()
+
+    if not s:
+        return False
+    if "\n" in s:
+        return False
+    if len(s) > 60:
+        return False
+    if s.endswith(":"):
+        return False
+
+    # 짧고 독립적인 구/명사형/명령형 문장
+    return True
 
 
 def tokenize_koreanish(text: str) -> List[str]:
@@ -691,7 +719,6 @@ def translate_document(
         # 1) marker 복구
         translated = translated.strip()
         translated = repair_bold_markers(translated)
-        translated = fix_broken_bold_tokens(translated)
 
         # 2) glossary 복원 먼저
         translated = restore_glossary_placeholders(translated, gl_map or {})
@@ -700,16 +727,18 @@ def translate_document(
         if contains_korean(translated):
             translated = translate_remaining_korean(client, translated, model=model)
             translated = repair_bold_markers(translated)
-            translated = fix_broken_bold_tokens(translated)
 
         # 4) heading / UI 후처리
-        if is_heading_paragraph(p):
+        is_heading = is_heading_paragraph(p) or looks_like_heading_text(src)
+
+        if is_heading:
             translated = normalize_heading_text(translated)
             translated = normalize_ui_label_text(translated)
             translated = _cap_first_alpha(translated)
             translated = re.sub(r"[.。]+$", "", translated)
         else:
             translated = normalize_ui_in_bold_segments(translated)
+            translated = normalize_colon_label_line(translated)
 
         translated = capitalize_bullet_lines(translated)
         translated = normalize_paragraph_breaks(translated)
