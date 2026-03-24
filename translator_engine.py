@@ -69,6 +69,16 @@ UI_LOWER_WORDS = {
     "values",
     "result",
     "results",
+    "data",
+    "items",
+    "item",
+    "dialog",
+    "window",
+    "button",
+    "buttons",
+    "criteria",
+    "class",
+    "level",
 }
 
 
@@ -141,7 +151,6 @@ def build_glossary_entries_from_rows(rows: List[dict]) -> List[GlossaryEntry]:
             )
         )
 
-    # 긴 용어 먼저
     deduped: List[GlossaryEntry] = []
     seen = set()
     for e in entries:
@@ -288,6 +297,15 @@ def repair_bold_markers(text: str) -> str:
     return text
 
 
+def fix_broken_bold_tokens(text: str) -> str:
+    if not text:
+        return text
+
+    text = re.sub(r"⟦B([A-Za-z])", rf"{B_OPEN}\1", text)
+    text = re.sub(r"⟦/B([A-Za-z])", rf"{B_CLOSE}\1", text)
+    return text
+
+
 def _split_preserving_markers(text: str) -> List[str]:
     return MARKER_SPLIT_RE.split(text)
 
@@ -349,7 +367,7 @@ def normalize_ui_label_text(text: str) -> str:
 
             if not first_alpha_word_seen:
                 first_alpha_word_seen = True
-                return word  # 그대로 유지
+                return word
 
             if lower in UI_LOWER_WORDS:
                 return lower
@@ -421,7 +439,6 @@ def capitalize_bullet_lines(text: str) -> str:
             out_lines.append(indent + pre + rest)
             continue
 
-        # 일반 줄은 건드리지 않음
         out_lines.append(line)
 
     return "\n".join(out_lines)
@@ -572,6 +589,37 @@ Text to translate:
     return resp.output_text.strip()
 
 
+def translate_remaining_korean(
+    client: OpenAI,
+    text: str,
+    model: str = "gpt-5.2",
+) -> str:
+    if not contains_korean(text):
+        return text
+
+    prompt = f"""
+Translate any remaining Korean in the text into natural English.
+
+Rules:
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧.
+- Do not change text that is already good English.
+- Only translate the remaining Korean parts.
+- Do not force title case.
+
+Text:
+{text}
+""".strip()
+
+    resp = client.responses.create(
+        model=model,
+        input=prompt,
+        reasoning={"effort": "low"},
+        text={"verbosity": "low"},
+    )
+
+    return resp.output_text.strip()
+
+
 def translate_document(
     in_path: str,
     out_path: str,
@@ -640,13 +688,21 @@ def translate_document(
             translation_mode=translation_mode,
         )
 
+        # 1) marker 복구
         translated = translated.strip()
         translated = repair_bold_markers(translated)
+        translated = fix_broken_bold_tokens(translated)
 
-        # 👉 먼저 glossary 복원
+        # 2) glossary 복원 먼저
         translated = restore_glossary_placeholders(translated, gl_map or {})
 
-        # 👉 그 다음 heading/UI 처리
+        # 3) 남은 한국어 있으면 한 번 더 정리
+        if contains_korean(translated):
+            translated = translate_remaining_korean(client, translated, model=model)
+            translated = repair_bold_markers(translated)
+            translated = fix_broken_bold_tokens(translated)
+
+        # 4) heading / UI 후처리
         if is_heading_paragraph(p):
             translated = normalize_heading_text(translated)
             translated = normalize_ui_label_text(translated)
