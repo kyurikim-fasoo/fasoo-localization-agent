@@ -349,7 +349,7 @@ def normalize_ui_label_text(text: str) -> str:
 
             if not first_alpha_word_seen:
                 first_alpha_word_seen = True
-                return _cap_first_alpha(lower)
+                return word  # 그대로 유지
 
             if lower in UI_LOWER_WORDS:
                 return lower
@@ -643,15 +643,12 @@ def translate_document(
         translated = translated.strip()
         translated = repair_bold_markers(translated)
 
-        # 헤딩은 placeholder 상태에서 먼저 sentence case
-        # DNT / case-sensitive는 placeholder로 보호됨
-        if is_heading_paragraph(p):
-            translated = normalize_heading_text(translated)
-
+        # 👉 먼저 glossary 복원
         translated = restore_glossary_placeholders(translated, gl_map or {})
 
-        # UI 조합 규칙: 헤딩 전체 / 일반 문단의 bold 구간만
+        # 👉 그 다음 heading/UI 처리
         if is_heading_paragraph(p):
+            translated = normalize_heading_text(translated)
             translated = normalize_ui_label_text(translated)
             translated = _cap_first_alpha(translated)
             translated = re.sub(r"[.。]+$", "", translated)
