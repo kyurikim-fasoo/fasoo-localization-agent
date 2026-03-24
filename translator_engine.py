@@ -404,6 +404,10 @@ def normalize_ui_in_bold_segments(text: str) -> str:
     )
 
 
+def fix_indefinite_articles(text: str) -> str:
+    return re.sub(r"\b([Aa])\s+([aeiouAEIOU])", r"\1n \2", text)
+
+
 def capitalize_bullet_lines(text: str) -> str:
     lines = text.splitlines()
     out_lines = []
@@ -492,17 +496,16 @@ def normalize_for_scoring(text: str) -> str:
 
 
 def normalize_colon_label_line(text: str) -> str:
-    s = text.strip()
+    def repl(match):
+        label = match.group(1)
+        rest = match.group(2)
 
-    # 예: rule Name: / regex patterns: / deep learning tags:
-    if ":" not in s:
-        return text
+        label_norm = normalize_ui_label_text(label.strip())
+        label_norm = _cap_first_alpha(label_norm)
 
-    left, right = s.split(":", 1)
-    left_norm = normalize_ui_label_text(left.strip())
-    left_norm = _cap_first_alpha(left_norm)
+        return f"{label_norm}: {rest.strip()}"
 
-    return f"{left_norm}: {right.strip()}" if right.strip() else f"{left_norm}:"
+    return re.sub(r"^([^:\n]+):\s*(.*)", repl, text)
 
 
 def looks_like_heading_text(text: str) -> bool:
@@ -512,13 +515,17 @@ def looks_like_heading_text(text: str) -> bool:
         return False
     if "\n" in s:
         return False
-    if len(s) > 60:
+    if len(s) > 50:
         return False
     if s.endswith(":"):
         return False
 
-    # 짧고 독립적인 구/명사형/명령형 문장
-    return True
+    # 🔥 핵심 추가
+    words = s.split()
+    if len(words) <= 3:
+        return True
+
+    return False
 
 
 def tokenize_koreanish(text: str) -> List[str]:
@@ -735,10 +742,11 @@ def translate_document(
             translated = normalize_heading_text(translated)
             translated = normalize_ui_label_text(translated)
             translated = _cap_first_alpha(translated)
-            translated = re.sub(r"[.。]+$", "", translated)
+            translated = re.sub(r"\.\s*$", "", translated)
         else:
             translated = normalize_ui_in_bold_segments(translated)
 
+        translated = fix_indefinite_articles(translated)
         translated = capitalize_bullet_lines(translated)
         translated = normalize_paragraph_breaks(translated)
 
