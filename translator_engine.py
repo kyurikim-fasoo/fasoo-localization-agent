@@ -58,10 +58,8 @@ def _clean(v: Any) -> str:
 class GlossaryEntry:
     ko: str
     en: str
-    def_ko: str
     dnt: bool
     case_sensitive: bool
-    category: str
     product: str
     note: str
 
@@ -91,10 +89,8 @@ def build_glossary_entries_from_rows(rows: List[dict]) -> List[GlossaryEntry]:
             GlossaryEntry(
                 ko=ko,
                 en=en,
-                def_ko=_clean(r.get("Def_KO")),
-                dnt=_marked(r.get("DNT")),
-                case_sensitive=_marked(r.get("Case-sensitive")),
-                category=_clean(r.get("Category")),
+                dnt=_to_bool(r.get("DNT")),
+                case_sensitive=_to_bool(r.get("Case-sensitive")),
                 product=_clean(r.get("Product")),
                 note=_clean(r.get("Note")),
             )
@@ -136,67 +132,12 @@ def preprocess_with_glossary_placeholders(text: str, entries: List[GlossaryEntry
     return out, mapping
 
 
-def _is_sentence_start_char(prev_char: str) -> bool:
-    if prev_char == "":
-        return True
-    return prev_char in ".!?\n\r•\u2022"
-
-
-def _is_bullet_line_start(text: str, pos: int) -> bool:
-    line_start = text.rfind("\n", 0, pos) + 1
-    prefix = text[line_start:pos].lstrip()
-
-    for bp in ("- ", "• ", "∙ ", "* "):
-        if prefix.startswith(bp):
-            return True
-
-    if re.match(r"^\d+[\.\)]\s+", prefix):
-        return True
-
-    return False
-
-
-def _apply_case_non_case_sensitive(en: str, should_capitalize: bool) -> str:
-    if not en:
-        return en
-
-    if en.replace(" ", "").isupper():
-        return en
-
-    if not en[0].isalpha():
-        return en
-
-    if should_capitalize:
-        return en[0].upper() + en[1:]
-    return en[0].lower() + en[1:]
-
-
 def restore_glossary_placeholders(text: str, mapping: Dict[str, GlossaryEntry]) -> str:
     out = text
 
     for ph, entry in mapping.items():
-        while True:
-            pos = out.find(ph)
-            if pos < 0:
-                break
-
-            prev_char = ""
-            j = pos - 1
-            while j >= 0:
-                if out[j].isspace():
-                    j -= 1
-                    continue
-                prev_char = out[j]
-                break
-
-            at_sentence_start = _is_sentence_start_char(prev_char) or _is_bullet_line_start(out, pos)
-
-            if entry.dnt or entry.case_sensitive:
-                repl = entry.en
-            else:
-                repl = _apply_case_non_case_sensitive(entry.en, should_capitalize=at_sentence_start)
-
-            out = out[:pos] + repl + out[pos + len(ph):]
+        repl = entry.en  # DNT든 아니든 glossary EN 그대로 복원
+        out = out.replace(ph, repl)
 
     out = re.sub(r"\s+([.,;:!?])", r"\1", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
@@ -275,6 +216,17 @@ def _cap_first_alpha(s: str) -> str:
             return s[:i] + ch.upper() + s[i + 1:]
     return s
 
+def capitalize_bold_segments(text: str) -> str:
+    def repl(match):
+        inner = match.group(1)
+        return B_OPEN + _cap_first_alpha(inner) + B_CLOSE
+
+    return re.sub(
+        re.escape(B_OPEN) + r"(.*?)" + re.escape(B_CLOSE),
+        repl,
+        text,
+        flags=re.DOTALL,
+    )
 
 def capitalize_bullet_lines(text: str) -> str:
     lines = text.splitlines()
@@ -529,6 +481,7 @@ def translate_document(
 
         translated = translated.strip()
         translated = restore_glossary_placeholders(translated, gl_map or {})
+        translated = capitalize_bold_segments(translated)
         translated = capitalize_bullet_lines(translated)
         translated = normalize_paragraph_breaks(translated)
 
@@ -549,3 +502,9 @@ def translate_document(
         "total_tokens": TOTAL_TOKENS,
         "paragraphs_translated": total_paras,
     }
+
+def _to_bool(v: Any) -> bool:
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in {"true", "y", "yes", "1"}

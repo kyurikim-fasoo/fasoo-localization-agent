@@ -102,11 +102,9 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
         "EN",
         "File",
         "Product",
-        "Category",
         "DNT",
         "Case-sensitive",
         "Note",
-        "Def_KO",
     ]
 
     for col in expected_cols:
@@ -530,14 +528,14 @@ elif st.session_state.step == 2:
                 "EN": st.column_config.TextColumn("EN"),
                 "File": st.column_config.TextColumn("File"),
                 "Product": st.column_config.TextColumn("Product"),
-                "Category": st.column_config.TextColumn("Category"),
                 "DNT": st.column_config.TextColumn("DNT"),
                 "Case-sensitive": st.column_config.TextColumn("Case-sensitive"),
                 "Note": st.column_config.TextColumn("Note"),
-                "Def_KO": st.column_config.TextColumn("Def_KO"),
             },
             key="glossary_editor_widget",
         )
+
+        st.session_state.glossary_df = prepare_glossary_editor_df(edited_glossary_df)
 
     with tab2:
         st.caption("비슷한 패턴이 나오면 아래를 참고해 번역합니다.")
