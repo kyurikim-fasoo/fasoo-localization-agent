@@ -199,11 +199,76 @@ def preprocess_with_glossary_placeholders(
     return out, mapping
 
 
-def restore_glossary_placeholders(text: str, mapping: Dict[str, GlossaryEntry]) -> str:
+def _is_at_sentence_or_bold_start(text_before: str) -> bool:
+    """
+    Return True if the position immediately after text_before is the start of
+    a sentence or the start of a bold segment — i.e. the restored term should
+    be capitalized.
+
+    Rules:
+    - Nothing before → start of text → capitalize.
+    - Last non-space character is sentence-ending punctuation (.  !  ?) → capitalize.
+    - text_before ends with the bold-open marker ⟦B⟧ (after stripping trailing
+      spaces) → we are the first word inside a bold segment → capitalize.
+    """
+    s = text_before.rstrip()
+    if not s:
+        return True
+    if s[-1] in ".!?":
+        return True
+    if s.endswith(B_OPEN):
+        return True
+    return False
+
+
+def restore_glossary_placeholders(
+    text: str,
+    mapping: Dict[str, GlossaryEntry],
+) -> str:
+    """
+    Restore each glossary placeholder with position-aware capitalisation.
+
+    - DNT or Case-sensitive entries: always inserted exactly as stored in EN.
+    - Normal entries (lowercase EN in glossary):
+        • Capitalise the first letter when the placeholder sits at the very
+          start of the text, immediately after sentence-ending punctuation,
+          or immediately after the bold-open marker ⟦B⟧.
+        • Lower-case otherwise.
+
+    This means glossary EN values should always be stored in lowercase.
+    The function handles capitalisation automatically based on context.
+    """
     out = text
 
     for ph, entry in mapping.items():
-        out = out.replace(ph, entry.en)
+        # Fixed casing: DNT or explicitly case-sensitive terms are never touched.
+        if entry.dnt or entry.case_sensitive:
+            out = out.replace(ph, entry.en)
+            continue
+
+        # Variable casing: process each occurrence independently so we can
+        # inspect what precedes that specific occurrence.
+        result = ""
+        remaining = out
+        while True:
+            idx = remaining.find(ph)
+            if idx == -1:
+                result += remaining
+                break
+
+            # Everything accumulated so far + text up to this placeholder
+            # gives us the "before" context for position detection.
+            before = result + remaining[:idx]
+            at_start = _is_at_sentence_or_bold_start(before)
+
+            en = entry.en
+            if en:
+                en = en[0].upper() + en[1:] if at_start else en[0].lower() + en[1:]
+
+            result += remaining[:idx] + en
+            remaining = remaining[idx + len(ph):]
+
+        out = result
 
     out = re.sub(r"\s+([.,;:!?])", r"\1", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
@@ -394,6 +459,17 @@ def normalize_heading_text(text: str) -> str:
 
 
 def normalize_ui_in_bold_segments(text: str) -> str:
+    """
+    Normalise each bold segment as a UI label: first alpha word kept as-is
+    (already cased correctly by restore step), subsequent words lowercased
+    if they are in UI_LOWER_WORDS, and the whole segment has its first alpha
+    character capitalised.
+
+    NOTE: Each bold segment is normalised independently, so a term restored
+    at the start of a bold segment is already capitalised by
+    restore_glossary_placeholders; this function only normalises the
+    surrounding plain words inside the segment.
+    """
     def repl(match):
         inner = match.group(1)
         inner = normalize_ui_label_text(inner)
@@ -426,12 +502,12 @@ def capitalize_bullet_lines(text: str) -> str:
             continue
 
         stripped = line.lstrip()
-        indent = line[:len(line) - len(stripped)]
+        indent = line[: len(line) - len(stripped)]
 
         handled = False
         for bp in bullet_prefixes:
             if stripped.startswith(bp):
-                rest = stripped[len(bp):]
+                rest = stripped[len(bp) :]
                 rest = _cap_first_alpha(rest)
                 out_lines.append(indent + bp + rest)
                 handled = True
@@ -441,8 +517,8 @@ def capitalize_bullet_lines(text: str) -> str:
 
         m = num_prefix_re.match(stripped)
         if m:
-            pre = stripped[:m.end()]
-            rest = stripped[m.end():]
+            pre = stripped[: m.end()]
+            rest = stripped[m.end() :]
             rest = _cap_first_alpha(rest)
             out_lines.append(indent + pre + rest)
             continue
@@ -567,7 +643,9 @@ def translate_paragraph_with_patterns(
 ) -> str:
     global TOTAL_INPUT_TOKENS, TOTAL_CACHED_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_TOKENS
 
-    pattern_block = "\n".join([f"- {ko} -> {en}" for ko, en in pattern_examples]) or "(none)"
+    pattern_block = (
+        "\n".join([f"- {ko} -> {en}" for ko, en in pattern_examples]) or "(none)"
+    )
 
     if translation_mode in {"UI", "UI 텍스트"}:
         style_rules = """
@@ -589,16 +667,16 @@ Translate Korean to natural, professional English.
 
 Rules:
 - Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧.
-- Treat glossary placeholders as fixed terms.
+- Treat ⟦G#⟧ placeholders as fixed, already-translated terms — do NOT translate or guess their meaning.
 - Use the pattern examples only as reference guidance.
 - Do not copy irrelevant examples.
 - Avoid repetition and awkward literal wording.
 - Do not force title case.
 - For headings, concise phrase-style English is preferred.
-- NEVER merge markers with words.
-- "⟦B⟧rule" is correct, but "⟦Brule" is invalid.
+- NEVER merge markers with words. "⟦B⟧rule" is correct; "⟦Brule" is invalid.
 - Keep markers as separate tokens.
-
+- Output ONLY the translated text. No explanation, no extra lines.
+{style_rules}
 Reference pattern examples:
 {pattern_block}
 
@@ -646,6 +724,7 @@ Rules:
 - Do not change text that is already good English.
 - Only translate the remaining Korean parts.
 - Do not force title case.
+- Output ONLY the translated text. No explanation, no extra lines.
 
 Text:
 {text}
@@ -734,16 +813,18 @@ def translate_document(
         # 1) marker 복구
         translated = repair_bold_markers(translated)
 
-        # 2) glossary 복원 먼저
+        # 2) glossary 복원 (위치 기반 대소문자 적용)
         translated = restore_glossary_placeholders(translated, gl_map or {})
 
-        # 3) colon label normalize 먼저
+        # 3) colon label normalize
         translated = normalize_colon_label_line(translated)
 
         # 4) 남은 한국어 fallback 번역
         if contains_korean(translated):
             translated = translate_remaining_korean(client, translated, model=model)
             translated = repair_bold_markers(translated)
+            # fallback 번역 후에도 glossary 용어가 한국어로 남아 있을 수 있으므로 재복원
+            translated = restore_glossary_placeholders(translated, gl_map or {})
             translated = normalize_colon_label_line(translated)
 
         # 5) heading 판단: source + translated 둘 다 사용

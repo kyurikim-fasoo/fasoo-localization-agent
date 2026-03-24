@@ -13,8 +13,11 @@ from translator_engine import translate_document
 load_dotenv()
 
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-COST_PER_1K_TOKENS = float(
-    st.secrets.get("MODEL_COST_PER_1K_TOKENS", os.getenv("MODEL_COST_PER_1K_TOKENS", "0.01"))
+COST_PER_1K_INPUT_TOKENS = float(
+    st.secrets.get("MODEL_COST_PER_1K_INPUT_TOKENS", os.getenv("MODEL_COST_PER_1K_INPUT_TOKENS", "0.005"))
+)
+COST_PER_1K_OUTPUT_TOKENS = float(
+    st.secrets.get("MODEL_COST_PER_1K_OUTPUT_TOKENS", os.getenv("MODEL_COST_PER_1K_OUTPUT_TOKENS", "0.015"))
 )
 
 BASE_DIR = Path(__file__).parent
@@ -26,6 +29,10 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
+# ─────────────────────────────────────────────
+# Config / file helpers
+# ─────────────────────────────────────────────
+
 def load_product_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -34,7 +41,6 @@ def load_product_config():
 def read_tsv_flexible(path: Path) -> pd.DataFrame:
     encodings_to_try = ["utf-16", "utf-8-sig", "utf-8", "cp949", "euc-kr"]
     last_error = None
-
     for enc in encodings_to_try:
         try:
             df = pd.read_csv(path, sep="\t", encoding=enc)
@@ -42,7 +48,6 @@ def read_tsv_flexible(path: Path) -> pd.DataFrame:
             return df
         except Exception as e:
             last_error = e
-
     raise RuntimeError(f"Failed to read TSV: {path}. Last error: {last_error}")
 
 
@@ -50,7 +55,6 @@ def read_uploaded_tsv_flexible(uploaded_file) -> pd.DataFrame:
     raw = uploaded_file.getvalue()
     encodings_to_try = ["utf-16", "utf-8-sig", "utf-8", "cp949", "euc-kr"]
     last_error = None
-
     for enc in encodings_to_try:
         try:
             text = raw.decode(enc)
@@ -59,19 +63,21 @@ def read_uploaded_tsv_flexible(uploaded_file) -> pd.DataFrame:
             return df
         except Exception as e:
             last_error = e
-
     raise RuntimeError(f"Failed to read uploaded TSV: {uploaded_file.name}. Last error: {last_error}")
 
 
-def save_uploaded_file(uploaded_file, save_dir: Path):
+def save_uploaded_file(uploaded_file, save_dir: Path) -> Path:
     save_path = save_dir / uploaded_file.name
     with open(save_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     return save_path
 
 
-def estimate_cost_usd(total_tokens: int, rate_per_1k_tokens: float = COST_PER_1K_TOKENS) -> float:
-    return round((total_tokens / 1000) * rate_per_1k_tokens, 4)
+def estimate_cost_usd(input_tokens: int, output_tokens: int) -> float:
+    """Input/output 토큰 비용을 분리해 계산합니다."""
+    cost = (input_tokens / 1000 * COST_PER_1K_INPUT_TOKENS) + \
+           (output_tokens / 1000 * COST_PER_1K_OUTPUT_TOKENS)
+    return round(cost, 4)
 
 
 def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -82,37 +88,26 @@ def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return out
 
 
+# ─────────────────────────────────────────────
+# DataFrame helpers
+# ─────────────────────────────────────────────
+
 def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None:
         df = pd.DataFrame()
-
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
 
     out = df.copy()
 
-    if "적용" not in out.columns:
-        out["적용"] = True
-    else:
-        out["적용"] = out["적용"].fillna(True).astype(bool)
-
-    expected_cols = [
-        "적용",
-        "KO",
-        "EN",
-        "File",
-        "Product",
-        "DNT",
-        "Case-sensitive",
-        "Note",
-    ]
+    expected_cols = ["적용", "KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"]
 
     for col in expected_cols:
         if col not in out.columns:
-            if col == "적용":
-                out[col] = True
-            else:
-                out[col] = ""
+            out[col] = True if col == "적용" else ""
+
+    if "적용" in out.columns:
+        out["적용"] = out["적용"].fillna(True).astype(bool)
 
     out = out[expected_cols]
 
@@ -122,44 +117,23 @@ def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-if "pattern_df" not in st.session_state or st.session_state.pattern_df is None:
-    st.session_state.pattern_df = pd.DataFrame(
-        columns=["적용", "KO", "EN", "File", "Note"]
-    )
-
-if "base_pattern_df" not in st.session_state or st.session_state.base_pattern_df is None:
-    st.session_state.base_pattern_df = pd.DataFrame(
-        columns=["적용", "KO", "EN", "File", "Note"]
-    )
 
 def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None:
         df = pd.DataFrame()
-
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
 
     out = df.copy()
 
-    if "적용" not in out.columns:
-        out["적용"] = True
-    else:
-        out["적용"] = out["적용"].fillna(True).astype(bool)
-
-    expected_cols = [
-        "적용",
-        "KO",
-        "EN",
-        "File",
-        "Note",
-    ]
+    expected_cols = ["적용", "KO", "EN", "File", "Note"]
 
     for col in expected_cols:
         if col not in out.columns:
-            if col == "적용":
-                out[col] = True
-            else:
-                out[col] = ""
+            out[col] = True if col == "적용" else ""
+
+    if "적용" in out.columns:
+        out["적용"] = out["적용"].fillna(True).astype(bool)
 
     out = out[expected_cols]
 
@@ -172,133 +146,86 @@ def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_glossary_table(paths: list[str]) -> pd.DataFrame:
     frames = []
-
     for rel_path in paths:
         path = BASE_DIR / rel_path
         if not path.exists():
             continue
-
         df = read_tsv_flexible(path)
-        df = _ensure_columns(
-            df,
-            ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"],
-        )
+        df = _ensure_columns(df, ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"])
         df["File"] = path.name
-
-        df = df[
-            [
-                "KO",
-                "EN",
-                "File",
-                "Product",
-                "DNT",
-                "Case-sensitive",
-                "Note",
-            ]
-        ]
+        df = df[["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"]]
         frames.append(df)
 
     if not frames:
         return prepare_glossary_editor_df(
-            pd.DataFrame(
-                columns=[
-                    "KO",
-                    "EN",
-                    "File",
-                    "Product",
-                    "DNT",
-                    "Case-sensitive",
-                ]
-            )
+            pd.DataFrame(columns=["KO", "EN", "File", "Product", "DNT", "Case-sensitive"])
         )
 
-    result = pd.concat(frames, ignore_index=True)
-    return prepare_glossary_editor_df(result)
+    return prepare_glossary_editor_df(pd.concat(frames, ignore_index=True))
 
 
-def load_pattern_table(paths: list[str], pattern_type: str) -> pd.DataFrame:
+def load_pattern_table(paths: list[str]) -> pd.DataFrame:
     frames = []
-
     for rel_path in paths:
         path = BASE_DIR / rel_path
         if not path.exists():
             continue
-
         df = read_tsv_flexible(path)
-        df = _ensure_columns(df, ["KO", "EN"])
+        df = _ensure_columns(df, ["KO", "EN", "Note"])
         df["File"] = path.name
-        df["Pattern Type"] = pattern_type
-
-        df = df[["KO", "EN", "File", "Pattern Type"]]
+        df = df[["KO", "EN", "File", "Note"]]
         frames.append(df)
 
     if not frames:
-        return prepare_pattern_editor_df(
-            pd.DataFrame(columns=["KO", "EN", "File", "Pattern Type"])
-        )
+        return prepare_pattern_editor_df(pd.DataFrame(columns=["KO", "EN", "File", "Note"]))
 
-    result = pd.concat(frames, ignore_index=True)
-    return prepare_pattern_editor_df(result)
+    return prepare_pattern_editor_df(pd.concat(frames, ignore_index=True))
 
 
 def build_product_tables(product_name: str, config: dict):
     product_info = config[product_name]
-
-    glossary_paths = product_info.get("default_glossaries", [])
-    pattern_paths = product_info.get("default_patterns", [])
-
-    glossary_df = load_glossary_table(glossary_paths)
-    pattern_df = load_pattern_table(pattern_paths, "Pattern")
-
+    glossary_df = load_glossary_table(product_info.get("default_glossaries", []))
+    pattern_df = load_pattern_table(product_info.get("default_patterns", []))
     return glossary_df, pattern_df
 
 
 def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
     uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
-    uploaded_df = _ensure_columns(
-        uploaded_df,
-        ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"],
-    )
+    uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"])
     uploaded_df["File"] = uploaded_file.name
-
-    uploaded_df = uploaded_df[
-        [
-            "KO",
-            "EN",
-            "File",
-            "Product",
-            "DNT",
-            "Case-sensitive",
-            "Note",
-        ]
-    ]
-
-    merged = pd.concat([current_df, uploaded_df], ignore_index=True)
-    return prepare_glossary_editor_df(merged)
+    uploaded_df = uploaded_df[["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"]]
+    return prepare_glossary_editor_df(pd.concat([current_df, uploaded_df], ignore_index=True))
 
 
-def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file, pattern_type: str) -> pd.DataFrame:
+def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
     uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
-    uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN"])
+    uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN", "Note"])
     uploaded_df["File"] = uploaded_file.name
-    uploaded_df["Pattern Type"] = pattern_type
+    uploaded_df = uploaded_df[["KO", "EN", "File", "Note"]]
+    return prepare_pattern_editor_df(pd.concat([current_df, uploaded_df], ignore_index=True))
 
-    uploaded_df = uploaded_df[["KO", "EN", "File", "Pattern Type"]]
 
-    merged = pd.concat([current_df, uploaded_df], ignore_index=True)
-    return prepare_pattern_editor_df(merged)
+def make_default_output_filename(product: str, source_name: str) -> str:
+    source_stem = Path(source_name).stem
+    safe_product = product.strip().replace(" ", "_")
+    return f"{source_stem}_{safe_product}_en.docx"
 
+
+# ─────────────────────────────────────────────
+# Session state
+# ─────────────────────────────────────────────
 
 def init_session_state():
+    """모든 session_state 초기값을 한 곳에서 관리합니다."""
     defaults = {
         "step": 1,
         "selected_product": None,
         "translation_mode": "매뉴얼",
         "enable_cache": True,
         "glossary_df": None,
-        "pattern_df": None,
+        "pattern_df": prepare_pattern_editor_df(None),   # ← 전역 중복 초기화 제거
         "base_glossary_df": None,
-        "base_pattern_df": None,
+        "base_pattern_df": prepare_pattern_editor_df(None),
         "last_result": None,
         "last_output_path": None,
         "last_output_filename": None,
@@ -316,24 +243,25 @@ def reset_translation_result():
     st.session_state.last_output_filename = None
 
 
-def make_default_output_filename(product: str, source_name: str) -> str:
-    source_stem = Path(source_name).stem
-    safe_product = product.strip().replace(" ", "_")
-    return f"{source_stem}_{safe_product}_en.docx"
-
+# ─────────────────────────────────────────────
+# UI helpers
+# ─────────────────────────────────────────────
 
 def render_summary_pills(product: str, mode: str, cache: bool):
     cache_text = "켜짐" if cache else "꺼짐"
     st.markdown(
         f"""
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin: 0 0 16px 0;">
-            <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px; background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
+            <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px;
+                         background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
                 <strong>제품</strong> {product}
             </span>
-            <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px; background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
+            <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px;
+                         background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
                 <strong>텍스트 유형</strong> {mode}
             </span>
-            <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px; background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
+            <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px;
+                         background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
                 <strong>중복 재사용</strong> {cache_text}
             </span>
         </div>
@@ -341,6 +269,10 @@ def render_summary_pills(product: str, mode: str, cache: bool):
         unsafe_allow_html=True,
     )
 
+
+# ─────────────────────────────────────────────
+# Page config & global styles
+# ─────────────────────────────────────────────
 
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
 init_session_state()
@@ -419,9 +351,11 @@ if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY를 찾을 수 없습니다.")
     st.stop()
 
-# ---------------------------------
-# Step 1
-# ---------------------------------
+
+# ─────────────────────────────────────────────
+# Step 1 — 기본 정보
+# ─────────────────────────────────────────────
+
 if st.session_state.step == 1:
     st.subheader("Step 1. 기본 정보")
     st.markdown("번역할 텍스트 유형과 제품을 선택하세요.")
@@ -455,7 +389,6 @@ if st.session_state.step == 1:
 
         st.session_state.glossary_df = glossary_df.copy()
         st.session_state.pattern_df = pattern_df.copy()
-
         st.session_state.base_glossary_df = glossary_df.copy()
         st.session_state.base_pattern_df = pattern_df.copy()
 
@@ -466,9 +399,10 @@ if st.session_state.step == 1:
         st.session_state.step = 2
         st.rerun()
 
-# ---------------------------------
-# Step 2
-# ---------------------------------
+
+# ─────────────────────────────────────────────
+# Step 2 — 용어 및 패턴 선택
+# ─────────────────────────────────────────────
 
 elif st.session_state.step == 2:
     st.subheader("Step 2. 용어 및 패턴 선택")
@@ -481,6 +415,7 @@ elif st.session_state.step == 2:
 
     tab1, tab2 = st.tabs(["용어", "패턴"])
 
+    # ── 용어 탭 ──────────────────────────────
     with tab1:
         st.caption("선택한 용어는 항상 동일하게 번역합니다.")
 
@@ -497,24 +432,19 @@ elif st.session_state.step == 2:
                         st.session_state.glossary_df,
                         uploaded_glossary_tsv,
                     )
-                    st.session_state.glossary_df = prepare_glossary_editor_df(
-                        st.session_state.glossary_df
-                    )
                     st.success(f"{uploaded_glossary_tsv.name}을(를) 용어에 추가했습니다.")
                 except Exception as e:
                     st.error(f"업로드 오류: {e}")
 
-        top_left, top_right = st.columns([6, 2])
-        with top_right:
+        _, col_reset = st.columns([6, 2])
+        with col_reset:
             if st.button("초기 설정으로 복원", key="reset_glossary", use_container_width=True):
                 st.session_state.glossary_df = prepare_glossary_editor_df(
                     st.session_state.base_glossary_df.copy()
                 )
                 st.rerun()
 
-        st.session_state.glossary_df = prepare_glossary_editor_df(
-            st.session_state.glossary_df
-        )
+        st.session_state.glossary_df = prepare_glossary_editor_df(st.session_state.glossary_df)
 
         edited_glossary_df = st.data_editor(
             st.session_state.glossary_df,
@@ -534,9 +464,9 @@ elif st.session_state.step == 2:
             },
             key="glossary_editor_widget",
         )
-
         st.session_state.glossary_df = prepare_glossary_editor_df(edited_glossary_df)
 
+    # ── 패턴 탭 ──────────────────────────────
     with tab2:
         st.caption("비슷한 패턴이 나오면 아래를 참고해 번역합니다.")
 
@@ -552,17 +482,13 @@ elif st.session_state.step == 2:
                     st.session_state.pattern_df = merge_pattern_upload(
                         st.session_state.pattern_df,
                         uploaded_pattern_tsv,
-                        "Pattern",
-                    )
-                    st.session_state.pattern_df = prepare_pattern_editor_df(
-                        st.session_state.pattern_df
                     )
                     st.success(f"{uploaded_pattern_tsv.name}을(를) 패턴에 추가했습니다.")
                 except Exception as e:
                     st.error(f"업로드 오류: {e}")
 
-        top_left, top_right = st.columns([6, 2])
-        with top_right:
+        _, col_reset = st.columns([6, 2])
+        with col_reset:
             if st.button("초기 설정으로 복원", key="reset_pattern", use_container_width=True):
                 st.session_state.pattern_df = prepare_pattern_editor_df(
                     st.session_state.base_pattern_df.copy()
@@ -586,28 +512,28 @@ elif st.session_state.step == 2:
             },
             key="pattern_editor_widget",
         )
-
         st.session_state.pattern_df = prepare_pattern_editor_df(edited_pattern_df)
 
-        col_back, col_next = st.columns([1, 1])
+    # ── 이전 / 다음 버튼 (탭 바깥) ───────────
+    st.markdown("---")
+    col_back, col_next = st.columns(2)
 
-        with col_back:
-            if st.button("이전", use_container_width=True):
-                st.session_state.step = 1
-                st.rerun()
+    with col_back:
+        if st.button("이전", use_container_width=True):
+            st.session_state.step = 1
+            st.rerun()
 
-        with col_next:
-            if st.button("다음", use_container_width=True):
-                if len(st.session_state.glossary_df) == 0:
-                    st.error("적어도 하나의 항목은 남겨 두어야 합니다.")
-                else:
-                    reset_translation_result()
-                    st.session_state.step = 3
-                    st.rerun()
+    with col_next:
+        if st.button("다음", use_container_width=True):
+            reset_translation_result()
+            st.session_state.step = 3
+            st.rerun()
 
-# ---------------------------------
-# Step 3
-# ---------------------------------
+
+# ─────────────────────────────────────────────
+# Step 3 — 파일 업로드 & 번역
+# ─────────────────────────────────────────────
+
 elif st.session_state.step == 3:
     st.subheader("Step 3. 업로드")
     st.markdown("로컬라이즈할 Word 파일을 업로드하거나 끌어서 놓으세요.")
@@ -618,33 +544,14 @@ elif st.session_state.step == 3:
     )
 
     glossary_rows = (
-    st.session_state.glossary_df[
-        st.session_state.glossary_df["적용"] == True
-    ]
-    .drop(columns=["적용"])
-    .to_dict("records")
-    )
-    pattern_rows = (
-        st.session_state.pattern_df[
-            st.session_state.pattern_df["적용"] == True
-        ]
+        st.session_state.glossary_df[st.session_state.glossary_df["적용"] == True]
         .drop(columns=["적용"])
         .to_dict("records")
     )
-
-    st.markdown(
-        """
-        <div style="
-            text-align:center;
-            font-size:20px;
-            font-weight:600;
-            color:#57606a;
-            margin-bottom:12px;
-        ">
-            파일을 끌어다 놓거나 클릭해 업로드하세요
-        </div>
-        """,
-        unsafe_allow_html=True,
+    pattern_rows = (
+        st.session_state.pattern_df[st.session_state.pattern_df["적용"] == True]
+        .drop(columns=["적용"])
+        .to_dict("records")
     )
 
     uploaded_docx = st.file_uploader(
@@ -653,7 +560,8 @@ elif st.session_state.step == 3:
         label_visibility="collapsed",
     )
 
-    col_back, col_translate = st.columns([1, 1])
+    st.markdown("---")
+    col_back, col_translate = st.columns(2)
 
     with col_back:
         if st.button("이전", use_container_width=True):
@@ -661,9 +569,15 @@ elif st.session_state.step == 3:
             st.rerun()
 
     with col_translate:
-        translate_clicked = st.button("번역 시작", type="primary", use_container_width=True)
+        translate_clicked = st.button(
+            "번역 시작",
+            type="primary",
+            use_container_width=True,
+            disabled=(uploaded_docx is None),   # 파일 없으면 비활성화
+        )
 
     if translate_clicked:
+        # 파일 필수 체크 (disabled로 대부분 막히지만 안전장치)
         if uploaded_docx is None:
             st.error("Word 파일을 업로드하세요.")
         else:
@@ -703,9 +617,11 @@ elif st.session_state.step == 3:
             except Exception as e:
                 st.error(f"오류: {e}")
 
-# ---------------------------------
-# Step 4
-# ---------------------------------
+
+# ─────────────────────────────────────────────
+# Step 4 — 결과 & 다운로드
+# ─────────────────────────────────────────────
+
 elif st.session_state.step == 4:
     st.subheader("Step 4. 다운로드")
 
@@ -718,11 +634,21 @@ elif st.session_state.step == 4:
         st.session_state.step = 1
         st.rerun()
 
-    estimated_cost = estimate_cost_usd(result["total_tokens"])
+    # input/output 토큰 분리 비용 계산
+    estimated_cost = estimate_cost_usd(
+        result.get("input_tokens", 0),
+        result.get("output_tokens", 0),
+    )
 
     st.success("로컬라이즈가 완료되었습니다.")
     st.write("### 결과")
-    st.write(f"**토큰 사용량:** {result['total_tokens']:,} (약 ${estimated_cost})")
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("입력 토큰", f"{result.get('input_tokens', 0):,}")
+    col_b.metric("출력 토큰", f"{result.get('output_tokens', 0):,}")
+    col_c.metric("예상 비용", f"${estimated_cost}")
+
+    st.markdown("")
 
     with open(output_path, "rb") as f:
         st.download_button(
@@ -734,7 +660,8 @@ elif st.session_state.step == 4:
             use_container_width=True,
         )
 
-    col_prev, col_restart = st.columns([1, 1])
+    st.markdown("---")
+    col_prev, col_restart = st.columns(2)
 
     with col_prev:
         if st.button("이전", use_container_width=True):
