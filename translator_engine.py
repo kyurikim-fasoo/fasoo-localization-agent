@@ -280,26 +280,30 @@ def repair_bold_markers(text: str) -> str:
     if not text:
         return text
 
-    # ⟦Brule -> ⟦B⟧rule
-    text = re.sub(r"⟦B(?=[A-Za-z])", B_OPEN, text)
+    # 1. ⟦Brule → ⟦B⟧rule
+    text = re.sub(r"⟦B([A-Za-z])", r"⟦B⟧\1", text)
 
-    # ⟦/Brule -> ⟦/B⟧rule
-    text = re.sub(r"⟦/B(?=[A-Za-z])", B_CLOSE, text)
+    # 2. ⟦/Brule → ⟦/B⟧rule
+    text = re.sub(r"⟦/B([A-Za-z])", r"⟦/B⟧\1", text)
 
-    # 공백 섞인 깨짐
-    text = re.sub(r"⟦\s*B\s*⟧?", B_OPEN, text)
-    text = re.sub(r"⟦\s*/\s*B\s*⟧?", B_CLOSE, text)
+    # 3. ⟦B rule → ⟦B⟧rule
+    text = re.sub(r"⟦B\s+", "⟦B⟧", text)
 
-    # 여닫는 개수 불균형 정리
-    open_count = text.count(B_OPEN)
-    close_count = text.count(B_CLOSE)
+    # 4. ⟦/B rule → ⟦/B⟧rule
+    text = re.sub(r"⟦/B\s+", "⟦/B⟧", text)
 
-    if open_count > close_count:
-        text += B_CLOSE
-    elif close_count > open_count:
-        diff = close_count - open_count
-        for _ in range(diff):
-            text = text.replace(B_CLOSE, "", 1)
+    # 5. 잘못된 닫힘 제거 (⟧/B⟧ → ⟦/B⟧)
+    text = re.sub(r"⟧/B⟧", "⟦/B⟧", text)
+
+    # 6. 개수 맞추기
+    opens = text.count("⟦B⟧")
+    closes = text.count("⟦/B⟧")
+
+    if opens > closes:
+        text += "⟦/B⟧"
+    elif closes > opens:
+        for _ in range(closes - opens):
+            text = text.replace("⟦/B⟧", "", 1)
 
     return text
 
@@ -500,11 +504,13 @@ def normalize_for_scoring(text: str) -> str:
 def normalize_colon_label_line(text: str) -> str:
     def repl(match):
         label = match.group(1)
+
         label_norm = normalize_ui_label_text(label.strip())
         label_norm = _cap_first_alpha(label_norm)
+
         return f"{label_norm}:"
 
-    return re.sub(r"\b([A-Za-z][A-Za-z0-9 ]+):", repl, text)
+    return re.sub(r"\b([A-Za-z][A-Za-z0-9 ]{1,50}):", repl, text)
 
 
 def looks_like_heading_text(text: str) -> bool:
