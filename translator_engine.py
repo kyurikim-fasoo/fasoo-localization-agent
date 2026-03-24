@@ -405,7 +405,9 @@ def normalize_ui_in_bold_segments(text: str) -> str:
 
 
 def fix_indefinite_articles(text: str) -> str:
-    return re.sub(r"\b([Aa])\s+([aeiouAEIOU])", r"\1n \2", text)
+    text = re.sub(r"\b([Aa])\s+([aeiouAEIOU])", r"\1n \2", text)
+    text = re.sub(r"\b[Aa]n\s+([bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ])", r"A \1", text)
+    return text
 
 
 def capitalize_bullet_lines(text: str) -> str:
@@ -498,14 +500,11 @@ def normalize_for_scoring(text: str) -> str:
 def normalize_colon_label_line(text: str) -> str:
     def repl(match):
         label = match.group(1)
-        rest = match.group(2)
-
         label_norm = normalize_ui_label_text(label.strip())
         label_norm = _cap_first_alpha(label_norm)
+        return f"{label_norm}:"
 
-        return f"{label_norm}: {rest.strip()}"
-
-    return re.sub(r"^([^:\n]+):\s*(.*)", repl, text)
+    return re.sub(r"\b([A-Za-z][A-Za-z0-9 ]+):", repl, text)
 
 
 def looks_like_heading_text(text: str) -> bool:
@@ -520,7 +519,6 @@ def looks_like_heading_text(text: str) -> bool:
     if s.endswith(":"):
         return False
 
-    # 🔥 핵심 추가
     words = s.split()
     if len(words) <= 3:
         return True
@@ -591,7 +589,9 @@ Rules:
 - Avoid repetition and awkward literal wording.
 - Do not force title case.
 - For headings, concise phrase-style English is preferred.
-{style_rules}
+- NEVER merge markers with words.
+- "⟦B⟧rule" is correct, but "⟦Brule" is invalid.
+- Keep markers as separate tokens.
 
 Reference pattern examples:
 {pattern_block}
@@ -723,29 +723,42 @@ def translate_document(
             translation_mode=translation_mode,
         )
 
-        # 1) marker 복구
         translated = translated.strip()
+
+        # 1) marker 복구
         translated = repair_bold_markers(translated)
 
         # 2) glossary 복원 먼저
         translated = restore_glossary_placeholders(translated, gl_map or {})
+
+        # 3) colon label normalize 먼저
         translated = normalize_colon_label_line(translated)
 
-        # 3) 남은 한국어 있으면 한 번 더 정리
+        # 4) 남은 한국어 fallback 번역
         if contains_korean(translated):
             translated = translate_remaining_korean(client, translated, model=model)
+            translated = repair_bold_markers(translated)
+            translated = normalize_colon_label_line(translated)
 
-        # 4) heading / UI 후처리
-        is_heading = is_heading_paragraph(p) or looks_like_heading_text(translated)
+        # 5) heading 판단: source + translated 둘 다 사용
+        is_heading = (
+            is_heading_paragraph(p)
+            or looks_like_heading_text(src)
+            or looks_like_heading_text(translated)
+        )
 
+        # 6) heading / 일반 문단 후처리
         if is_heading:
             translated = normalize_heading_text(translated)
             translated = normalize_ui_label_text(translated)
             translated = _cap_first_alpha(translated)
-            translated = re.sub(r"\.\s*$", "", translated)
+            translated = translated.rstrip()
+            if translated.endswith("."):
+                translated = translated[:-1]
         else:
             translated = normalize_ui_in_bold_segments(translated)
 
+        # 7) 마지막 품질 보정
         translated = fix_indefinite_articles(translated)
         translated = capitalize_bullet_lines(translated)
         translated = normalize_paragraph_breaks(translated)
