@@ -36,13 +36,11 @@ def make_marker(prefix: str, i: int) -> str:
     return f"{prefix}{i}{SUFFIX}"
 
 
-def _marked(v: Any) -> bool:
+def _to_bool(v: Any) -> bool:
     if v is None:
         return False
-    s = str(v).strip()
-    if s == "" or s.lower() == "nan":
-        return False
-    return True
+    s = str(v).strip().lower()
+    return s in {"true", "y", "yes", "1"}
 
 
 def _clean(v: Any) -> str:
@@ -136,8 +134,7 @@ def restore_glossary_placeholders(text: str, mapping: Dict[str, GlossaryEntry]) 
     out = text
 
     for ph, entry in mapping.items():
-        repl = entry.en  # DNT든 아니든 glossary EN 그대로 복원
-        out = out.replace(ph, repl)
+        out = out.replace(ph, entry.en)
 
     out = re.sub(r"\s+([.,;:!?])", r"\1", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
@@ -216,6 +213,29 @@ def _cap_first_alpha(s: str) -> str:
             return s[:i] + ch.upper() + s[i + 1:]
     return s
 
+def repair_bold_markers(text: str) -> str:
+    if not text:
+        return text
+
+    # ⟦Brule -> ⟦B⟧rule
+    text = re.sub(r"⟦B(?!⟧)", f"{B_OPEN}", text)
+
+    # ⟦/Brule -> ⟦/B⟧rule 같은 비정상 케이스 방지
+    text = re.sub(r"⟦/B(?!⟧)", f"{B_CLOSE}", text)
+
+    # 혹시 닫는 태그가 아예 사라졌는데 여는 태그만 남은 경우 최소 복구
+    open_count = text.count(B_OPEN)
+    close_count = text.count(B_CLOSE)
+    if open_count > close_count:
+        text += B_CLOSE
+    elif close_count > open_count:
+        # 여는 태그 없이 닫는 태그만 많은 경우는 닫는 태그 제거
+        diff = close_count - open_count
+        for _ in range(diff):
+            text = text.replace(B_CLOSE, "", 1)
+
+    return text    
+
 def capitalize_bold_segments(text: str) -> str:
     def repl(match):
         inner = match.group(1)
@@ -291,6 +311,43 @@ def is_heading_paragraph(p) -> bool:
     name = (p.style.name or "").lower()
     return name.startswith("heading") or name in ("title",)
 
+def normalize_heading_text(text: str) -> str:
+    if not text:
+        return text
+
+    # marker 제거 전용 보기용 텍스트가 아니라, marker 포함 상태에서 처리
+    # bold marker는 그대로 두고 문자만 정리
+    s = text.strip()
+
+    # 끝 마침표 제거
+    s = re.sub(r"[.。]+$", "", s)
+
+    # 문장 전체를 sentence case로
+    # 일단 plain text 기준으로 처리
+    parts = re.split(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)})", s)
+
+    normalized_parts = []
+    first_text_done = False
+
+    for part in parts:
+        if part in (B_OPEN, B_CLOSE):
+            normalized_parts.append(part)
+            continue
+
+        if not part:
+            normalized_parts.append(part)
+            continue
+
+        lower = part[:1].upper() + part[1:].lower() if not first_text_done else part.lower()
+        normalized_parts.append(lower)
+        if part.strip():
+            first_text_done = True
+
+    s = "".join(normalized_parts)
+
+    # 이중 공백 정리
+    s = re.sub(r"[ \t]{2,}", " ", s).strip()
+    return s
 
 def paragraph_has_hyperlink(paragraph) -> bool:
     return paragraph._p.xpath(".//w:hyperlink") != []
@@ -480,13 +537,21 @@ def translate_document(
         )
 
         translated = translated.strip()
+        translated = repair_bold_markers(translated)
         translated = restore_glossary_placeholders(translated, gl_map or {})
         translated = capitalize_bold_segments(translated)
         translated = capitalize_bullet_lines(translated)
+
+        if is_heading_paragraph(p):
+            translated = normalize_heading_text(translated)
+
         translated = normalize_paragraph_breaks(translated)
 
         if enable_cache:
             cache[src] = translated
+
+        if is_heading_paragraph(p):
+            translated = normalize_heading_text(translated)
 
         _write_paragraph(p, translated)
 
@@ -502,9 +567,3 @@ def translate_document(
         "total_tokens": TOTAL_TOKENS,
         "paragraphs_translated": total_paras,
     }
-
-def _to_bool(v: Any) -> bool:
-    if v is None:
-        return False
-    s = str(v).strip().lower()
-    return s in {"true", "y", "yes", "1"}
