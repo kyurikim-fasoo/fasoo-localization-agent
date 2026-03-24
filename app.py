@@ -720,13 +720,13 @@ elif st.session_state.step == 4:
 
     estimated_cost = estimate_cost_usd(result["total_tokens"])
 
-    st.success("번역이 완료되었습니다.")
+    st.success("로컬라이즈가 완료되었습니다.")
     st.write("### 결과")
     st.write(f"**토큰 사용량:** {result['total_tokens']:,} (약 ${estimated_cost})")
 
     with open(output_path, "rb") as f:
         st.download_button(
-            label="번역 파일 다운로드",
+            label="문서 다운로드",
             data=f,
             file_name=output_filename,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -742,7 +742,7 @@ elif st.session_state.step == 4:
             st.rerun()
 
     with col_restart:
-        if st.button("다시 시작", use_container_width=True):
+        if st.button("처음으로 돌아가기", use_container_width=True):
             reset_translation_result()
             st.session_state.step = 1
             st.rerun()

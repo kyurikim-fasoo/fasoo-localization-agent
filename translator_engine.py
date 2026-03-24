@@ -722,14 +722,14 @@ def translate_document(
 
         # 2) glossary 복원 먼저
         translated = restore_glossary_placeholders(translated, gl_map or {})
+        translated = normalize_colon_label_line(translated)
 
         # 3) 남은 한국어 있으면 한 번 더 정리
         if contains_korean(translated):
             translated = translate_remaining_korean(client, translated, model=model)
-            translated = repair_bold_markers(translated)
 
         # 4) heading / UI 후처리
-        is_heading = is_heading_paragraph(p) or looks_like_heading_text(src)
+        is_heading = is_heading_paragraph(p) or looks_like_heading_text(translated)
 
         if is_heading:
             translated = normalize_heading_text(translated)
@@ -738,7 +738,6 @@ def translate_document(
             translated = re.sub(r"[.。]+$", "", translated)
         else:
             translated = normalize_ui_in_bold_segments(translated)
-            translated = normalize_colon_label_line(translated)
 
         translated = capitalize_bullet_lines(translated)
         translated = normalize_paragraph_breaks(translated)
