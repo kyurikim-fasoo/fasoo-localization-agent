@@ -224,11 +224,8 @@ def repair_bold_markers(text: str) -> str:
     if not text:
         return text
 
-    # 흔한 깨짐 복구
     text = re.sub(r"⟦\s*B(?!⟧)\s*", B_OPEN, text)
     text = re.sub(r"⟦\s*/\s*B(?!⟧)\s*", B_CLOSE, text)
-
-    # 반쯤 잘린 경우
     text = text.replace("⟦/B", B_CLOSE)
 
     open_count = text.count(B_OPEN)
@@ -255,6 +252,39 @@ def capitalize_bold_segments(text: str) -> str:
         text,
         flags=re.DOTALL,
     )
+
+
+def normalize_for_scoring(text: str) -> str:
+    text = text.replace(B_OPEN, " ").replace(B_CLOSE, " ")
+    text = re.sub(r"⟦G\d+⟧", " ", text)
+    text = text.replace("~", " ")
+    return text
+
+
+def tokenize_koreanish(text: str) -> List[str]:
+    norm = normalize_for_scoring(text)
+    return re.findall(r"[가-힣A-Za-z0-9]+", norm)
+
+
+def select_relevant_patterns(
+    source_text: str,
+    patterns: List[Tuple[str, str]],
+    max_pattern: int = 3,
+) -> List[Tuple[str, str]]:
+    source_tokens = set(tokenize_koreanish(source_text))
+
+    def score_patterns(ko: str) -> int:
+        pattern_tokens = set(tokenize_koreanish(ko))
+        return len(source_tokens & pattern_tokens)
+
+    scored_patterns = []
+    for ko, en in patterns:
+        score = score_patterns(ko)
+        if score > 0:
+            scored_patterns.append((score, ko, en))
+
+    scored_patterns.sort(key=lambda x: (-x[0], -len(x[1])))
+    return [(ko, en) for score, ko, en in scored_patterns[:max_pattern]]
 
 
 def capitalize_bullet_lines(text: str) -> str:
@@ -290,33 +320,138 @@ def capitalize_bullet_lines(text: str) -> str:
             out_lines.append(indent + pre + rest)
             continue
 
-        # 일반 줄은 건드리지 않음
         out_lines.append(line)
 
     return "\n".join(out_lines)
 
 
-def _sentence_case_plain_segment(segment: str, first_alpha_done: bool) -> Tuple[str, bool]:
-    if not segment:
-        return segment, first_alpha_done
+def _split_preserving_markers(text: str) -> List[str]:
+    pattern = rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|{PLACEHOLDER_RE.pattern})"
+    return re.split(pattern, text)
 
-    chars = list(segment)
 
-    for i, ch in enumerate(chars):
-        if ch.isalpha():
-            if not first_alpha_done:
-                chars[i] = ch.upper()
-                for j in range(i + 1, len(chars)):
-                    if chars[j].isalpha():
-                        chars[j] = chars[j].lower()
-                first_alpha_done = True
-            else:
-                for j in range(i, len(chars)):
-                    if chars[j].isalpha():
-                        chars[j] = chars[j].lower()
-            break
+def _has_alpha(text: str) -> bool:
+    return any(ch.isalpha() for ch in text)
 
-    return "".join(chars), first_alpha_done
+
+def _sentence_case_text_preserving_placeholders(text: str) -> str:
+    parts = _split_preserving_markers(text)
+    out = []
+    first_alpha_done = False
+
+    for part in parts:
+        if not part:
+            out.append(part)
+            continue
+
+        if part == B_OPEN or part == B_CLOSE or PLACEHOLDER_RE.fullmatch(part):
+            out.append(part)
+            continue
+
+        chars = list(part)
+
+        if not first_alpha_done:
+            for i, ch in enumerate(chars):
+                if ch.isalpha():
+                    chars[i] = ch.upper()
+                    for j in range(i + 1, len(chars)):
+                        if chars[j].isalpha():
+                            chars[j] = chars[j].lower()
+                    first_alpha_done = True
+                    break
+            out.append("".join(chars))
+        else:
+            lowered = []
+            for ch in chars:
+                lowered.append(ch.lower() if ch.isalpha() else ch)
+            out.append("".join(lowered))
+
+    return "".join(out)
+
+
+UI_LOWER_WORDS = {
+    "name",
+    "names",
+    "list",
+    "lists",
+    "detail",
+    "details",
+    "setting",
+    "settings",
+    "information",
+    "field",
+    "fields",
+    "filter",
+    "filters",
+    "menu",
+    "menus",
+    "tab",
+    "tabs",
+    "status",
+    "type",
+    "types",
+    "history",
+    "option",
+    "options",
+    "message",
+    "messages",
+    "group",
+    "groups",
+    "owner",
+    "owners",
+    "user",
+    "users",
+    "rule",
+    "rules",
+    "policy",
+    "policies",
+    "log",
+    "logs",
+    "guideline",
+    "guidelines",
+    "pattern",
+    "patterns",
+    "tag",
+    "tags",
+    "value",
+    "values",
+    "result",
+    "results",
+}
+
+
+def normalize_ui_label_text(text: str) -> str:
+    parts = _split_preserving_markers(text)
+    out = []
+    first_alpha_word_seen = False
+    word_re = re.compile(r"[A-Za-z][A-Za-z0-9/-]*")
+
+    for part in parts:
+        if not part:
+            out.append(part)
+            continue
+
+        if part == B_OPEN or part == B_CLOSE or PLACEHOLDER_RE.fullmatch(part):
+            out.append(part)
+            continue
+
+        def repl(match):
+            nonlocal first_alpha_word_seen
+            word = match.group(0)
+            lower = word.lower()
+
+            if not first_alpha_word_seen:
+                first_alpha_word_seen = True
+                return word
+
+            if lower in UI_LOWER_WORDS:
+                return lower
+
+            return word
+
+        out.append(word_re.sub(repl, part))
+
+    return "".join(out)
 
 
 def normalize_heading_text(text: str) -> str:
@@ -325,26 +460,7 @@ def normalize_heading_text(text: str) -> str:
 
     s = text.strip()
     s = re.sub(r"[.。]+$", "", s)
-
-    # bold marker와 glossary placeholder는 건드리지 않음
-    parts = re.split(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)", s)
-
-    normalized_parts = []
-    first_alpha_done = False
-
-    for part in parts:
-        if not part:
-            normalized_parts.append(part)
-            continue
-
-        if part == B_OPEN or part == B_CLOSE or PLACEHOLDER_RE.fullmatch(part):
-            normalized_parts.append(part)
-            continue
-
-        normalized, first_alpha_done = _sentence_case_plain_segment(part, first_alpha_done)
-        normalized_parts.append(normalized)
-
-    s = "".join(normalized_parts)
+    s = _sentence_case_text_preserving_placeholders(s)
     s = re.sub(r"[ \t]{2,}", " ", s).strip()
     s = re.sub(r"[.。]+$", "", s)
     return s
@@ -392,41 +508,6 @@ def _write_paragraph(p, translated_marked: str) -> None:
     marked_text_to_runs(p, translated_marked)
 
 
-def normalize_for_scoring(text: str) -> str:
-    text = text.replace(B_OPEN, " ").replace(B_CLOSE, " ")
-    text = re.sub(r"⟦G\d+⟧", " ", text)
-    text = text.replace("~", " ")
-    return text
-
-
-def tokenize_koreanish(text: str) -> List[str]:
-    norm = normalize_for_scoring(text)
-    return re.findall(r"[가-힣A-Za-z0-9]+", norm)
-
-
-def select_relevant_patterns(
-    source_text: str,
-    patterns: List[Tuple[str, str]],
-    max_pattern: int = 3,
-) -> List[Tuple[str, str]]:
-    source_tokens = set(tokenize_koreanish(source_text))
-
-    def score_patterns(ko: str) -> int:
-        pattern_tokens = set(tokenize_koreanish(ko))
-        return len(source_tokens & pattern_tokens)
-
-    scored_patterns = []
-    for ko, en in patterns:
-        score = score_patterns(ko)
-        if score > 0:
-            scored_patterns.append((score, ko, en))
-
-    scored_patterns.sort(key=lambda x: (-x[0], -len(x[1])))
-
-    selected_patterns = [(ko, en) for score, ko, en in scored_patterns[:max_pattern]]
-    return selected_patterns
-
-
 def translate_paragraph_with_patterns(
     client: OpenAI,
     source_text: str,
@@ -462,6 +543,7 @@ Rules:
 - Use the pattern examples only as reference guidance.
 - Do not copy irrelevant examples.
 - Avoid repetition and awkward literal wording.
+- For headings or labels, do not force title case unless the source clearly requires it.
 {style_rules}
 
 Reference pattern examples:
@@ -540,7 +622,6 @@ def translate_document(
     for idx, p in enumerate(paras):
         src = marked_texts[idx]
 
-        # 하이퍼링크 문단은 현재 구조상 안전하게 건너뜀
         if paragraph_has_hyperlink(p):
             if progress_callback:
                 progress_callback(idx + 1, total_paras)
@@ -554,11 +635,7 @@ def translate_document(
             continue
 
         gl_pre, gl_map = preprocess_with_glossary_placeholders(src, glossary_entries)
-
-        selected_pattern_examples = select_relevant_patterns(
-            gl_pre,
-            patterns,
-        )
+        selected_pattern_examples = select_relevant_patterns(gl_pre, patterns)
 
         translated = translate_paragraph_with_patterns(
             client=client,
@@ -571,6 +648,8 @@ def translate_document(
         translated = translated.strip()
         translated = repair_bold_markers(translated)
 
+        # 헤딩은 glossary placeholder 상태에서 먼저 sentence case 적용
+        # 그래야 DNT / case-sensitive를 억지로 소문자화하지 않음
         if is_heading_paragraph(p):
             translated = normalize_heading_text(translated)
 
@@ -578,9 +657,12 @@ def translate_document(
         translated = capitalize_bold_segments(translated)
         translated = capitalize_bullet_lines(translated)
 
+        # UI 조합 규칙 후처리
         if is_heading_paragraph(p):
+            translated = normalize_ui_label_text(translated)
             translated = re.sub(r"[.。]+$", "", translated)
-            translated = _cap_first_alpha(translated)
+        else:
+            translated = normalize_ui_label_text(translated)
 
         translated = normalize_paragraph_breaks(translated)
 
