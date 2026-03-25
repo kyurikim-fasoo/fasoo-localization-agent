@@ -560,6 +560,11 @@ def paragraph_has_hyperlink(paragraph) -> bool:
 
 def _write_paragraph(p, translated_marked: str) -> None:
     if is_heading_paragraph(p) and not paragraph_has_hyperlink(p):
+        # Safety net: headings must never end with a period, even if upstream
+        # normalization missed it (e.g. dot added by LLM after marker restoration).
+        translated_marked = translated_marked.rstrip()
+        if translated_marked.endswith("."):
+            translated_marked = translated_marked[:-1].rstrip()
         marked_text_to_runs(p, translated_marked)
         return
 
@@ -578,15 +583,39 @@ def normalize_for_scoring(text: str) -> str:
 
 
 def normalize_colon_label_line(text: str) -> str:
-    def repl(match):
-        label = match.group(1)
+    """
+    Normalize 'Label:' patterns so the label reads correctly as a UI element name.
 
-        label_norm = normalize_ui_label_text(label.strip())
+    Handles two structures:
+    1. Plain label before colon:  'rule Name:'         -> 'Rule name:'
+    2. Bold-close + plain word:   '⟦B⟧Rule⟦/B⟧ Name:' -> '⟦B⟧Rule⟦/B⟧ name:'
+       (the plain word after ⟦/B⟧ is a continuation of the bold label and must be
+       lowercased when it is a UI_LOWER_WORD)
+
+    The two passes run in order; Pass 2 skips any position already handled by Pass 1
+    to prevent re-capitalising words that were just lowercased.
+    """
+    # Pass 1 — lowercase UI_LOWER_WORDS that sit between ⟦/B⟧ and ':'
+    def _lower_after_bold(m):
+        return m.group(1) + (m.group(2).lower() if m.group(2).lower() in UI_LOWER_WORDS else m.group(2)) + m.group(3)
+
+    pass1 = re.sub(
+        rf"({re.escape(B_CLOSE)}\s+)([A-Za-z][A-Za-z0-9]*)(\s*:)",
+        _lower_after_bold,
+        text,
+    )
+
+    # Pass 2 — normalize plain (non-bold-wrapped) labels before ':'
+    # Skip positions that are immediately preceded by ⟦/B⟧ (already handled by Pass 1)
+    def repl(m):
+        before = pass1[: m.start()]
+        if re.search(rf"{re.escape(B_CLOSE)}\s*$", before):
+            return m.group(0)   # already handled — leave untouched
+        label_norm = normalize_ui_label_text(m.group(1).strip())
         label_norm = _cap_first_alpha(label_norm)
-
         return f"{label_norm}:"
 
-    return re.sub(r"\b([A-Za-z][A-Za-z0-9 ]{1,50}):", repl, text)
+    return re.sub(r"\b([A-Za-z][A-Za-z0-9 ]{1,50}):", repl, pass1)
 
 
 def looks_like_heading_text(text: str) -> bool:
