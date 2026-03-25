@@ -408,98 +408,70 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict[str, Any]]:
     return "".join(parts), drawing_map
 
 
-def _set_run_text(r_elem, text: str, is_bold: bool) -> None:
-    """Set w:t text and sync w:b bold on a single run element."""
-    t_elem = _lxml_text_elem(r_elem)
-    if t_elem is None:
-        return
-    t_elem.text = text
-    if text and (text[0] == " " or text[-1] == " "):
-        t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
-    else:
-        t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
-    rPr = r_elem.find(f"{{{_W}}}rPr")
-    if rPr is None:
-        if is_bold:
-            rPr = etree.SubElement(r_elem, f"{{{_W}}}rPr")
-            etree.SubElement(rPr, f"{{{_W}}}b")
-            r_elem.insert(0, rPr)
-    else:
-        b_elem = rPr.find(f"{{{_W}}}b")
-        if is_bold and b_elem is None:
-            etree.SubElement(rPr, f"{{{_W}}}b")
-        elif not is_bold and b_elem is not None:
-            rPr.remove(b_elem)
-
-
 def _write_paragraph_inplace(p_elem, translated_marked: str, drawing_map: Dict) -> None:
     """
     Write translated text back into the paragraph XML in-place.
 
-    Strategy
-    --------
-    1. Split the translated text at ⟦D#⟧ drawing placeholders into *text groups*
-       (the text that should appear before / between / after each drawing).
-    2. Split the paragraph runs at non-text (drawing/symbol) runs into matching
-       *run groups*.
-    3. For each text group, concatenate all its segments and write the result
-       into the LAST text run of the corresponding run group.  Every earlier run
-       in the group is cleared.  This keeps the drawing runs exactly where they
-       are in the XML tree, so icons appear at the correct position in the output.
-
     Rules
     -----
-    * Only w:t content and w:b bold are touched.  Everything else — w:drawing,
-      w:sym, w:hyperlink wrappers, rPr colour/font — is preserved as-is.
-    * If translated_marked has fewer ⟦D#⟧ markers than the paragraph has drawing
-      runs, the extra drawing runs stay in place with their surrounding text runs
-      cleared.
+    * Only w:t content is touched — w:drawing, w:sym, w:hyperlink wrappers,
+      rPr colour/font settings, etc. are ALL preserved exactly as-is.
+    * Bold (w:b) is updated to match the translated_marked bold markers.
+    * Drawing placeholders ⟦D#⟧ in translated_marked are ignored during
+      text distribution (the drawing runs stay in their original XML position).
+    * If there are more translated text segments than text runs, excess text
+      is appended to the last run.
+    * Runs with no matching translated segment have their w:t cleared.
     """
-    all_runs = _lxml_all_runs(p_elem)
-    if not all_runs:
+    segments = _parse_marked_segments(translated_marked)
+    # Only text segments drive the run-filling loop; drawing placeholders are skipped
+    text_segments = [(b, t) for b, t in segments if b != "drawing"]
+
+    text_runs = [r for r in _lxml_all_runs(p_elem) if _lxml_text_elem(r) is not None]
+
+    if not text_runs:
         return
 
-    segments = _parse_marked_segments(translated_marked)
+    n_runs = len(text_runs)
+    seg_idx = 0
 
-    # Build ordered text-slot / drawing-slot list from the translated segments
-    text_slots: List[List[Tuple]] = []   # each entry = [(is_bold, text), ...]
-    current: List[Tuple] = []
-    for seg in segments:
-        if seg[0] == "drawing":
-            text_slots.append(current)
-            current = []
+    for run_idx, r in enumerate(text_runs):
+        t_elem = _lxml_text_elem(r)
+        rPr   = r.find(f"{{{_W}}}rPr")
+
+        if seg_idx >= len(text_segments):
+            t_elem.text = ""
+            t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
+            continue
+
+        if run_idx == n_runs - 1:
+            # Last run: absorb all remaining text segments
+            text      = "".join(t for _, t in text_segments[seg_idx:])
+            is_bold_s = text_segments[seg_idx][0]
         else:
-            current.append(seg)
-    text_slots.append(current)
+            is_bold_s, text = text_segments[seg_idx]
+            seg_idx += 1
 
-    # Split paragraph runs into groups separated by non-text (drawing) runs
-    run_groups: List[List] = []
-    current_group: List = []
-    for r in all_runs:
-        if _run_is_non_text(r):
-            run_groups.append(current_group)
-            current_group = []
+        t_elem.text = text
+
+        # Preserve leading/trailing whitespace
+        if text and (text[0] == " " or text[-1] == " "):
+            t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
         else:
-            if _lxml_text_elem(r) is not None:
-                current_group.append(r)
-    run_groups.append(current_group)
+            t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
 
-    # Assign each text slot to the matching run group
-    for gi, group in enumerate(run_groups):
-        slot = text_slots[gi] if gi < len(text_slots) else []
-
-        # Clear all runs except the last one
-        for r in group[:-1]:
-            t_elem = _lxml_text_elem(r)
-            if t_elem is not None:
-                t_elem.text = ""
-                t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
-
-        if group:
-            last_r = group[-1]
-            combined = "".join(t for _, t in slot)
-            is_b     = slot[0][0] if slot else False
-            _set_run_text(last_r, combined, is_b)
+        # Update bold
+        if rPr is None:
+            if is_bold_s:
+                rPr = etree.SubElement(r, f"{{{_W}}}rPr")
+                etree.SubElement(rPr, f"{{{_W}}}b")
+                r.insert(0, rPr)
+        else:
+            b_elem = rPr.find(f"{{{_W}}}b")
+            if is_bold_s and b_elem is None:
+                etree.SubElement(rPr, f"{{{_W}}}b")
+            elif not is_bold_s and b_elem is not None:
+                rPr.remove(b_elem)
 
 
 def strip_bold_markers(text: str) -> str:
