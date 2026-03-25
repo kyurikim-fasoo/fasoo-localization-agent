@@ -3,7 +3,12 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Iterable, Optional, Callable, Any
 
 from docx import Document
+from lxml import etree
 from openai import OpenAI
+
+# OOXML namespace constants
+_W        = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_XML_SPACE = "http://www.w3.org/XML/1998/namespace"
 
 
 TOTAL_INPUT_TOKENS = 0
@@ -15,10 +20,13 @@ B_OPEN = "⟦B⟧"
 B_CLOSE = "⟦/B⟧"
 
 G_PREFIX = "⟦G"
+D_PREFIX = "⟦D"
 SUFFIX = "⟧"
 
 KOREAN_RE = re.compile(r"[가-힣]")
 PLACEHOLDER_RE = re.compile(r"⟦G\d+⟧")
+DRAWING_PH_RE = re.compile(r"⟦D\d+⟧")
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧)")
 MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)")
 
 UI_LOWER_WORDS = {
@@ -101,7 +109,9 @@ def reset_token_counters():
 
 
 def contains_korean(text: str) -> bool:
-    return bool(text and KOREAN_RE.search(text))
+    # Strip drawing placeholders before checking — they are not translatable text
+    clean = DRAWING_PH_RE.sub("", text) if text else text
+    return bool(clean and KOREAN_RE.search(clean))
 
 
 def make_marker(prefix: str, i: int) -> str:
@@ -275,56 +285,193 @@ def restore_glossary_placeholders(
     return out.strip()
 
 
-def paragraph_to_marked_text(paragraph) -> str:
-    parts = []
-    in_bold = False
+def _lxml_all_runs(p_elem):
+    """Return every w:r in the paragraph in document order,
+    including those nested inside w:hyperlink."""
+    return p_elem.findall(f".//{{{_W}}}r")
 
-    for run in paragraph.runs:
-        t = run.text or ""
-        if not t:
+
+def _lxml_run_is_bold(r_elem) -> bool:
+    """True when the run carries an active w:b element."""
+    rPr = r_elem.find(f"{{{_W}}}rPr")
+    if rPr is None:
+        return False
+    b = rPr.find(f"{{{_W}}}b")
+    if b is None:
+        return False
+    val = b.get(f"{{{_W}}}val")
+    return val not in ("false", "0", "False")
+
+
+def _lxml_text_elem(r_elem):
+    """Return the w:t child element of a run, or None."""
+    return r_elem.find(f"{{{_W}}}t")
+
+
+def _run_is_non_text(r_elem) -> bool:
+    """True when the run contains a drawing, symbol, or embedded object
+    (i.e. an icon) rather than translatable text."""
+    return any(
+        r_elem.find(f"{{{_W}}}{tag}") is not None
+        for tag in ("drawing", "sym", "object", "pict")
+    )
+
+
+def _parse_marked_segments(marked: str) -> List[Tuple]:
+    """Split a marked string into (is_bold_or_drawing_sentinel, text) pairs.
+
+    Drawing placeholders ⟦D0⟧ are returned as ('drawing', '⟦D0⟧') tuples so
+    the write-back step can skip them when assigning text to runs.
+    """
+    segments: List[Tuple] = []
+    tokens = ALL_MARKER_RE.split(marked)
+    bold = False
+    buf: List[str] = []
+
+    for tok in tokens:
+        if tok == B_OPEN:
+            if buf:
+                segments.append((False, "".join(buf)))
+                buf = []
+            bold = True
+        elif tok == B_CLOSE:
+            if buf:
+                segments.append((True, "".join(buf)))
+                buf = []
+            bold = False
+        elif DRAWING_PH_RE.fullmatch(tok):
+            if buf:
+                segments.append((bold, "".join(buf)))
+                buf = []
+            segments.append(("drawing", tok))
+        elif tok:
+            buf.append(tok)
+
+    if buf:
+        segments.append((bold, "".join(buf)))
+
+    return [(b, t) for b, t in segments if t]
+
+
+def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict[str, Any]]:
+    """
+    Extract paragraph text with ⟦B⟧…⟦/B⟧ bold markers AND ⟦D0⟧ drawing
+    placeholders, reading all w:r elements via lxml (including those inside
+    w:hyperlink nodes).
+
+    Returns
+    -------
+    marked_text : str
+        Text with bold and drawing markers ready for the LLM.
+    drawing_map : dict
+        Mapping of placeholder string (e.g. '⟦D0⟧') -> lxml run element,
+        used only for reference; the runs stay in place in the XML tree.
+    """
+    parts: List[str] = []
+    in_bold = False
+    d_idx = 0
+    drawing_map: Dict[str, Any] = {}
+
+    for r in _lxml_all_runs(paragraph._p):
+        if _run_is_non_text(r):
+            # Close bold if open, then emit a drawing placeholder
+            if in_bold:
+                parts.append(B_CLOSE)
+                in_bold = False
+            ph = f"{D_PREFIX}{d_idx}{SUFFIX}"
+            parts.append(ph)
+            drawing_map[ph] = r
+            d_idx += 1
             continue
 
-        is_bold = bool(run.bold)
+        t_elem = _lxml_text_elem(r)
+        if t_elem is None:
+            continue
+
+        text = t_elem.text or ""
+        if not text:
+            continue
+
+        is_bold = _lxml_run_is_bold(r)
         if is_bold and not in_bold:
             parts.append(B_OPEN)
             in_bold = True
-        if (not is_bold) and in_bold:
+        elif not is_bold and in_bold:
             parts.append(B_CLOSE)
             in_bold = False
 
-        parts.append(t)
+        parts.append(text)
 
     if in_bold:
         parts.append(B_CLOSE)
 
-    return "".join(parts)
+    return "".join(parts), drawing_map
 
 
-def clear_paragraph_runs(paragraph) -> None:
-    p = paragraph._p
-    for r in list(paragraph.runs):
-        p.remove(r._r)
+def _write_paragraph_inplace(p_elem, translated_marked: str, drawing_map: Dict) -> None:
+    """
+    Write translated text back into the paragraph XML in-place.
 
+    Rules
+    -----
+    * Only w:t content is touched — w:drawing, w:sym, w:hyperlink wrappers,
+      rPr colour/font settings, etc. are ALL preserved exactly as-is.
+    * Bold (w:b) is updated to match the translated_marked bold markers.
+    * Drawing placeholders ⟦D#⟧ in translated_marked are ignored during
+      text distribution (the drawing runs stay in their original XML position).
+    * If there are more translated text segments than text runs, excess text
+      is appended to the last run.
+    * Runs with no matching translated segment have their w:t cleared.
+    """
+    segments = _parse_marked_segments(translated_marked)
+    # Only text segments drive the run-filling loop; drawing placeholders are skipped
+    text_segments = [(b, t) for b, t in segments if b != "drawing"]
 
-def marked_text_to_runs(paragraph, marked_text: str) -> None:
-    clear_paragraph_runs(paragraph)
+    text_runs = [r for r in _lxml_all_runs(p_elem) if _lxml_text_elem(r) is not None]
 
-    tokens = re.split(r"(⟦B⟧|⟦/B⟧)", marked_text)
-    bold = False
+    if not text_runs:
+        return
 
-    for tok in tokens:
-        if tok is None or tok == "":
+    n_runs = len(text_runs)
+    seg_idx = 0
+
+    for run_idx, r in enumerate(text_runs):
+        t_elem = _lxml_text_elem(r)
+        rPr   = r.find(f"{{{_W}}}rPr")
+
+        if seg_idx >= len(text_segments):
+            t_elem.text = ""
+            t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
             continue
-        if tok == B_OPEN:
-            bold = True
-            continue
-        if tok == B_CLOSE:
-            bold = False
-            continue
 
-        run = paragraph.add_run(tok)
-        if bold:
-            run.bold = True
+        if run_idx == n_runs - 1:
+            # Last run: absorb all remaining text segments
+            text      = "".join(t for _, t in text_segments[seg_idx:])
+            is_bold_s = text_segments[seg_idx][0]
+        else:
+            is_bold_s, text = text_segments[seg_idx]
+            seg_idx += 1
+
+        t_elem.text = text
+
+        # Preserve leading/trailing whitespace
+        if text and (text[0] == " " or text[-1] == " "):
+            t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
+        else:
+            t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
+
+        # Update bold
+        if rPr is None:
+            if is_bold_s:
+                rPr = etree.SubElement(r, f"{{{_W}}}rPr")
+                etree.SubElement(rPr, f"{{{_W}}}b")
+                r.insert(0, rPr)
+        else:
+            b_elem = rPr.find(f"{{{_W}}}b")
+            if is_bold_s and b_elem is None:
+                etree.SubElement(rPr, f"{{{_W}}}b")
+            elif not is_bold_s and b_elem is not None:
+                rPr.remove(b_elem)
 
 
 def strip_bold_markers(text: str) -> str:
@@ -558,21 +705,20 @@ def paragraph_has_hyperlink(paragraph) -> bool:
     return paragraph._p.xpath(".//w:hyperlink") != []
 
 
-def _write_paragraph(p, translated_marked: str) -> None:
-    if is_heading_paragraph(p) and not paragraph_has_hyperlink(p):
-        # Safety net: headings must never end with a period, even if upstream
-        # normalization missed it (e.g. dot added by LLM after marker restoration).
+def _write_paragraph(p, translated_marked: str, drawing_map: Optional[Dict] = None) -> None:
+    """Write translated text into the paragraph, preserving all XML structure.
+
+    Always uses in-place w:t replacement so that hyperlink wrappers, drawing
+    runs, rPr colour/font attributes, and every other non-text element survives
+    unchanged.  Only w:t content and w:b bold flags are updated.
+    """
+    if is_heading_paragraph(p):
+        # Headings must never end with a period.
         translated_marked = translated_marked.rstrip()
         if translated_marked.endswith("."):
             translated_marked = translated_marked[:-1].rstrip()
-        marked_text_to_runs(p, translated_marked)
-        return
 
-    if paragraph_has_hyperlink(p):
-        set_paragraph_text_preserve_style(p, translated_marked)
-        return
-
-    marked_text_to_runs(p, translated_marked)
+    _write_paragraph_inplace(p._p, translated_marked, drawing_map or {})
 
 
 def normalize_for_scoring(text: str) -> str:
@@ -695,8 +841,9 @@ def translate_paragraph_with_patterns(
 Translate Korean to natural, professional English.
 
 Rules:
-- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧.
-- Treat ⟦G#⟧ placeholders as fixed, already-translated terms — do NOT translate or guess their meaning.
+- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧.
+- ⟦G#⟧ = fixed glossary term — do NOT translate.
+- ⟦D#⟧ = inline icon/image — keep it exactly where it naturally fits in the translated sentence.
 - Use the pattern examples only as reference guidance.
 - Do not copy irrelevant examples.
 - Avoid repetition and awkward literal wording.
@@ -793,11 +940,11 @@ def translate_document(
     marked_texts: List[str] = []
 
     for p in iter_all_paragraphs(doc):
-        marked_ko = paragraph_to_marked_text(p)
+        marked_ko, drawing_map = paragraph_to_marked_text(p)
         if not contains_korean(marked_ko):
             continue
         paras.append(p)
-        marked_texts.append(marked_ko)
+        marked_texts.append((marked_ko, drawing_map))
 
     total_paras = len(paras)
 
@@ -812,16 +959,11 @@ def translate_document(
         }
 
     for idx, p in enumerate(paras):
-        src = marked_texts[idx]
-
-        if paragraph_has_hyperlink(p):
-            if progress_callback:
-                progress_callback(idx + 1, total_paras)
-            continue
+        src, drawing_map = marked_texts[idx]
 
         if enable_cache and src in cache:
             translated = cache[src]
-            _write_paragraph(p, translated)
+            _write_paragraph(p, translated, drawing_map)
             if progress_callback:
                 progress_callback(idx + 1, total_paras)
             continue
@@ -882,7 +1024,7 @@ def translate_document(
         if enable_cache:
             cache[src] = translated
 
-        _write_paragraph(p, translated)
+        _write_paragraph(p, translated, drawing_map)
 
         if progress_callback:
             progress_callback(idx + 1, total_paras)
