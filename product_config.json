@@ -1,5 +1,5 @@
 {
-  "Common": {
+  "제품 공통": {
   "default_glossaries": [
     "data/glossaries/common.tsv"
   ],
@@ -15,6 +15,56 @@
   "default_patterns": [
     "data/patterns/common.tsv",
     "data/patterns/fed.tsv"
+  ]
+},
+  "FXM": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/fxm.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/fxm.tsv"
+  ]
+},
+  "FSS": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/fss.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/fss.tsv"
+  ]
+},
+  "FDR": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/fdr.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/fdr.tsv"
+  ]
+},
+  "공통 서버": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/common-server.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/common-server.tsv"
+  ]
+},
+  "DSPM": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/dspm.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/dspm.tsv"
   ]
 },
   "FSP": {
@@ -37,6 +87,56 @@
       "data/patterns/wrapsody.tsv"
     ]
   },
+    "eCo": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/eco.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/eco.tsv"
+  ]
+},
+  "Fireside": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/fireside.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/fireside.tsv"
+  ]
+},
+  "Mind-SAT": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/mind-sat.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/mind-sat.tsv"
+  ]
+},
+  "Ellm": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/ellm.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/ellm.tsv"
+  ]
+},
+  "AI-r Privacy": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/ai-r_privacy.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/ai-r_privacy.tsv"
+  ]
+},
   "AI-R DLP": {
   "default_glossaries": [
     "data/glossaries/common.tsv",
@@ -45,6 +145,16 @@
   "default_patterns": [
     "data/patterns/common.tsv",
     "data/patterns/ai-r_dlp.tsv"
+  ]
+},
+  "API": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/api.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/api.tsv"
   ]
 }
 }
