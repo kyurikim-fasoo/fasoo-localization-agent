@@ -408,70 +408,156 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict[str, Any]]:
     return "".join(parts), drawing_map
 
 
+def _set_run_text(r_elem, text: str, is_bold: bool) -> None:
+    """Set w:t text and sync w:b bold on a single run element."""
+    t_elem = _lxml_text_elem(r_elem)
+    if t_elem is None:
+        return
+    t_elem.text = text
+    if text and (text[0] == " " or text[-1] == " "):
+        t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
+    else:
+        t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
+    rPr = r_elem.find(f"{{{_W}}}rPr")
+    if rPr is None:
+        if is_bold:
+            rPr = etree.SubElement(r_elem, f"{{{_W}}}rPr")
+            etree.SubElement(rPr, f"{{{_W}}}b")
+            r_elem.insert(0, rPr)
+    else:
+        b_elem = rPr.find(f"{{{_W}}}b")
+        if is_bold and b_elem is None:
+            etree.SubElement(rPr, f"{{{_W}}}b")
+        elif not is_bold and b_elem is not None:
+            rPr.remove(b_elem)
+
+
 def _write_paragraph_inplace(p_elem, translated_marked: str, drawing_map: Dict) -> None:
     """
-    Write translated text back into the paragraph XML in-place.
+    Write translated text back into the paragraph XML using a three-path strategy.
 
-    Rules
-    -----
-    * Only w:t content is touched — w:drawing, w:sym, w:hyperlink wrappers,
-      rPr colour/font settings, etc. are ALL preserved exactly as-is.
-    * Bold (w:b) is updated to match the translated_marked bold markers.
-    * Drawing placeholders ⟦D#⟧ in translated_marked are ignored during
-      text distribution (the drawing runs stay in their original XML position).
-    * If there are more translated text segments than text runs, excess text
-      is appended to the last run.
-    * Runs with no matching translated segment have their w:t cleared.
+    PATH 1 — Drawing paragraph (has w:drawing / w:sym runs)
+        Split runs into groups around drawing runs.
+        Put the combined text of each group into its FIRST text run, clear others.
+        Drawing runs are never touched — they stay at their original XML position,
+        so icons appear at the correct location in the output.
+
+    PATH 2 — Hyperlink paragraph (has w:hyperlink, no drawings)
+        Distribute translated plain text proportionally across all existing text
+        runs (by character-count ratio of the originals).  This preserves the
+        run count so hyperlink inner runs keep their text and link styling.
+
+    PATH 3 — Plain paragraph (no drawings, no hyperlinks)
+        Clone the rPr formatting template from the first text run, remove all
+        direct w:r children, then rebuild one run per (is_bold, text) segment
+        each carrying the cloned rPr (plus w:b when bold).  This is the most
+        reliable approach for paragraphs with mixed bold/non-bold text.
     """
-    segments = _parse_marked_segments(translated_marked)
-    # Only text segments drive the run-filling loop; drawing placeholders are skipped
-    text_segments = [(b, t) for b, t in segments if b != "drawing"]
+    import copy as _copy
 
-    text_runs = [r for r in _lxml_all_runs(p_elem) if _lxml_text_elem(r) is not None]
-
-    if not text_runs:
+    all_runs = _lxml_all_runs(p_elem)
+    if not all_runs:
         return
 
-    n_runs = len(text_runs)
-    seg_idx = 0
+    has_drawing   = any(_run_is_non_text(r) for r in all_runs)
+    has_hyperlink = p_elem.find(f".//{{{_W}}}hyperlink") is not None
 
-    for run_idx, r in enumerate(text_runs):
-        t_elem = _lxml_text_elem(r)
-        rPr   = r.find(f"{{{_W}}}rPr")
+    # ── PATH 1: Drawing paragraph ──────────────────────────────────────────
+    if has_drawing:
+        segments = _parse_marked_segments(translated_marked)
+        text_slots: List[List[Tuple]] = []
+        current: List[Tuple] = []
+        for seg in segments:
+            if seg[0] == "drawing":
+                text_slots.append(current)
+                current = []
+            else:
+                current.append(seg)
+        text_slots.append(current)
 
-        if seg_idx >= len(text_segments):
-            t_elem.text = ""
-            t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
-            continue
+        run_groups: List[List] = []
+        cur_group: List = []
+        for r in all_runs:
+            if _run_is_non_text(r):
+                run_groups.append(cur_group)
+                cur_group = []
+            elif _lxml_text_elem(r) is not None:
+                cur_group.append(r)
+        run_groups.append(cur_group)
 
-        if run_idx == n_runs - 1:
-            # Last run: absorb all remaining text segments
-            text      = "".join(t for _, t in text_segments[seg_idx:])
-            is_bold_s = text_segments[seg_idx][0]
-        else:
-            is_bold_s, text = text_segments[seg_idx]
-            seg_idx += 1
+        for gi, group in enumerate(run_groups):
+            slot = text_slots[gi] if gi < len(text_slots) else []
+            combined = "".join(t for _, t in slot)
+            is_b = slot[0][0] if slot else False
+            for ri, r in enumerate(group):
+                _set_run_text(r, combined if ri == 0 else "", is_b if ri == 0 else False)
+        return
 
+    # ── PATH 2: Hyperlink paragraph ────────────────────────────────────────
+    if has_hyperlink:
+        text_runs = [r for r in all_runs if _lxml_text_elem(r) is not None]
+        if not text_runs:
+            return
+        plain = re.sub(r"⟦[^⟧]+⟧", "", translated_marked).strip()
+        orig_texts = [(_lxml_text_elem(r).text or "") for r in text_runs]
+        orig_total = sum(len(t) for t in orig_texts)
+        if orig_total == 0:
+            _set_run_text(text_runs[0], plain, False)
+            return
+        remaining = plain
+        for i, r in enumerate(text_runs[:-1]):
+            share = round(len(plain) * len(orig_texts[i]) / orig_total)
+            share = max(0, min(share, len(remaining)))
+            chunk = remaining[:share]
+            # Try to break at a word boundary
+            if share < len(remaining) and remaining[share:share+1] not in ("", " "):
+                sp = chunk.rfind(" ")
+                if sp > 0:
+                    chunk = chunk[:sp + 1]
+            _set_run_text(r, chunk, _lxml_run_is_bold(r))
+            remaining = remaining[len(chunk):]
+        _set_run_text(text_runs[-1], remaining.strip(), _lxml_run_is_bold(text_runs[-1]))
+        return
+
+    # ── PATH 3: Plain paragraph — rebuild runs with rPr template ──────────
+    # Collect rPr template (without w:b) from first text run
+    text_runs = [r for r in all_runs if _lxml_text_elem(r) is not None]
+    rPr_template = None
+    for r in text_runs:
+        rPr_cand = r.find(f"{{{_W}}}rPr")
+        if rPr_cand is not None:
+            rPr_template = _copy.deepcopy(rPr_cand)
+            b = rPr_template.find(f"{{{_W}}}b")
+            if b is not None:
+                rPr_template.remove(b)
+            break
+
+    # Remove all direct w:r children (keeps pPr, bookmarks, etc.)
+    for r in list(p_elem.findall(f"{{{_W}}}r")):
+        p_elem.remove(r)
+
+    # Rebuild one run per text segment, each with the cloned rPr
+    segments = _parse_marked_segments(translated_marked)
+    text_segs = [(b, t) for b, t in segments if b != "drawing"]
+
+    pPr = p_elem.find(f"{{{_W}}}pPr")
+    insert_idx = (list(p_elem).index(pPr) + 1) if pPr is not None else 0
+
+    for i, (is_b, text) in enumerate(text_segs):
+        r = etree.Element(f"{{{_W}}}r")
+        if rPr_template is not None:
+            rPr_new = _copy.deepcopy(rPr_template)
+            if is_b:
+                etree.SubElement(rPr_new, f"{{{_W}}}b")
+            r.append(rPr_new)
+        elif is_b:
+            rPr_new = etree.SubElement(r, f"{{{_W}}}rPr")
+            etree.SubElement(rPr_new, f"{{{_W}}}b")
+        t_elem = etree.SubElement(r, f"{{{_W}}}t")
         t_elem.text = text
-
-        # Preserve leading/trailing whitespace
         if text and (text[0] == " " or text[-1] == " "):
             t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
-        else:
-            t_elem.attrib.pop(f"{{{_XML_SPACE}}}space", None)
-
-        # Update bold
-        if rPr is None:
-            if is_bold_s:
-                rPr = etree.SubElement(r, f"{{{_W}}}rPr")
-                etree.SubElement(rPr, f"{{{_W}}}b")
-                r.insert(0, rPr)
-        else:
-            b_elem = rPr.find(f"{{{_W}}}b")
-            if is_bold_s and b_elem is None:
-                etree.SubElement(rPr, f"{{{_W}}}b")
-            elif not is_bold_s and b_elem is not None:
-                rPr.remove(b_elem)
+        p_elem.insert(insert_idx + i, r)
 
 
 def strip_bold_markers(text: str) -> str:
