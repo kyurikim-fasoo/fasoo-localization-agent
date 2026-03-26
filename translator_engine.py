@@ -689,20 +689,21 @@ def repair_bold_markers(text: str) -> str:
 
 def normalize_bold_spaces(text: str) -> str:
     """
-    Remove spurious spaces that accumulate at bold-marker boundaries.
+    Remove spurious spaces that accumulate at bold-marker boundaries,
+    then collapse any remaining double-spaces to single spaces.
 
-    The LLM sometimes outputs "click ⟦B⟧ Rule ⟦/B⟧." (spaces inside markers)
-    which produces double-spaces and leading-space artifacts in the final text.
+    The LLM sometimes outputs "click ⟦B⟧ Rule ⟦/B⟧." or
+    "click  ⟦B⟧Rule⟦/B⟧." — both produce double-space artifacts.
 
-    Rules:
-    - Strip whitespace immediately after ⟦B⟧  → "⟦B⟧ Rule" → "⟦B⟧Rule"
-    - Strip whitespace immediately before ⟦/B⟧ → "Rule ⟦/B⟧" → "Rule⟦/B⟧"
-
-    Adjacent runs will still be separated by the space that belongs to the
-    surrounding plain text, so no words run together.
+    Steps
+    -----
+    1. Strip whitespace immediately after  ⟦B⟧  → "⟦B⟧ Rule" → "⟦B⟧Rule"
+    2. Strip whitespace immediately before ⟦/B⟧ → "Rule ⟦/B⟧" → "Rule⟦/B⟧"
+    3. Collapse any remaining consecutive spaces to a single space.
     """
     text = re.sub(r"⟦B⟧\s+", B_OPEN, text)
     text = re.sub(r"\s+⟦/B⟧", B_CLOSE, text)
+    text = re.sub(r"  +", " ", text)
     return text
 
 
@@ -861,6 +862,24 @@ def capitalize_bullet_lines(text: str) -> str:
     return "\n".join(out_lines)
 
 
+def restore_sentence_period(translated: str, source: str) -> str:
+    """
+    If the source sentence ended with a period and the translation does not
+    end with any terminal punctuation, append a period.
+
+    The LLM occasionally drops the trailing period when the sentence ends with
+    a glossary placeholder (e.g. 'Enter ⟦B⟧basic information⟦/B⟧' → no '.').
+    """
+    src_stripped = source.rstrip()
+    if not src_stripped.endswith("."):
+        return translated          # source had no period — nothing to restore
+
+    tr = translated.rstrip()
+    if tr and tr[-1] not in ".!?:;":
+        translated = tr + "."
+    return translated
+
+
 def normalize_paragraph_breaks(s: str) -> str:
     if not s:
         return s
@@ -947,6 +966,13 @@ def normalize_colon_label_line(text: str) -> str:
 
 
 def looks_like_heading_text(text: str) -> bool:
+    """Heuristic: does this look like a heading rather than a body sentence?
+
+    Korean source sentences are often short (≤ 3 words) even when they are
+    step instructions ("기본 정보를 입력합니다."), so we suppress heading
+    detection when the text contains Korean characters.  Only apply the
+    short-text heuristic to already-translated (English) text.
+    """
     s = strip_bold_markers(text).strip()
 
     if not s:
@@ -956,6 +982,10 @@ def looks_like_heading_text(text: str) -> bool:
     if len(s) > 50:
         return False
     if s.endswith(":"):
+        return False
+    # Korean text: never treat as heading via this heuristic —
+    # Korean step instructions are naturally short (≤ 3 words).
+    if KOREAN_RE.search(s):
         return False
 
     words = s.split()
@@ -1185,11 +1215,12 @@ def translate_document(
             translated = restore_glossary_placeholders(translated, gl_map or {})
             translated = normalize_colon_label_line(translated)
 
-        # 5) heading 판단: source + translated 둘 다 사용
+        # 5) heading 판단: 스타일 기반 + 소스 텍스트 기반 (번역문은 사용하지 않음)
+        # looks_like_heading_text는 한국어 소스에서는 False를 반환하므로
+        # 실제 Heading 스타일이 없는 단락은 heading으로 처리하지 않음.
         is_heading = (
             is_heading_paragraph(p)
             or looks_like_heading_text(src)
-            or looks_like_heading_text(translated)
         )
 
         # 6) heading / 일반 문단 후처리
@@ -1202,10 +1233,13 @@ def translate_document(
                 translated = translated[:-1]
         else:
             translated = normalize_ui_in_bold_segments(translated)
+            # Cap first alpha in the whole sentence (catches leading bold terms)
+            translated = _cap_first_alpha(translated)
 
         # 7) 마지막 품질 보정
         translated = fix_indefinite_articles(translated)
         translated = capitalize_bullet_lines(translated)
+        translated = restore_sentence_period(translated, src)
         translated = normalize_paragraph_breaks(translated)
 
         if enable_cache:
