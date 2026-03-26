@@ -1,3 +1,4 @@
+import copy
 import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Iterable, Optional, Callable, Any
@@ -26,7 +27,9 @@ SUFFIX = "⟧"
 KOREAN_RE = re.compile(r"[가-힣]")
 PLACEHOLDER_RE = re.compile(r"⟦G\d+⟧")
 DRAWING_PH_RE = re.compile(r"⟦D\d+⟧")
-ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧)")
+H_OPEN_RE    = re.compile(r"⟦H(\d+)⟧")
+H_CLOSE_RE   = re.compile(r"⟦/H(\d+)⟧")
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧)")
 MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)")
 
 UI_LOWER_WORDS = {
@@ -318,94 +321,162 @@ def _run_is_non_text(r_elem) -> bool:
 
 
 def _parse_marked_segments(marked: str) -> List[Tuple]:
-    """Split a marked string into (is_bold_or_drawing_sentinel, text) pairs.
+    """Split a marked string into typed segments.
 
-    Drawing placeholders ⟦D0⟧ are returned as ('drawing', '⟦D0⟧') tuples so
-    the write-back step can skip them when assigning text to runs.
+    Returns list of (type, text) where type is one of:
+      False          — plain non-bold text
+      True           — plain bold text
+      'drawing'      — drawing placeholder (text = '⟦D0⟧')
+      ('h', int)     — text inside hyperlink <int>
     """
     segments: List[Tuple] = []
     tokens = ALL_MARKER_RE.split(marked)
     bold = False
+    in_hl: Optional[int] = None
     buf: List[str] = []
+
+    def _flush() -> None:
+        if not buf:
+            return
+        text = "".join(buf)
+        if in_hl is not None:
+            segments.append((("h", in_hl), text))
+        else:
+            segments.append((bold, text))
+        buf.clear()
 
     for tok in tokens:
         if tok == B_OPEN:
-            if buf:
-                segments.append((False, "".join(buf)))
-                buf = []
-            bold = True
+            _flush(); bold = True
         elif tok == B_CLOSE:
-            if buf:
-                segments.append((True, "".join(buf)))
-                buf = []
-            bold = False
+            _flush(); bold = False
         elif DRAWING_PH_RE.fullmatch(tok):
-            if buf:
-                segments.append((bold, "".join(buf)))
-                buf = []
-            segments.append(("drawing", tok))
+            _flush(); segments.append(("drawing", tok))
+        elif H_OPEN_RE.fullmatch(tok):
+            _flush(); in_hl = int(H_OPEN_RE.match(tok).group(1))
+        elif H_CLOSE_RE.fullmatch(tok):
+            _flush(); in_hl = None
         elif tok:
             buf.append(tok)
 
-    if buf:
-        segments.append((bold, "".join(buf)))
-
+    _flush()
     return [(b, t) for b, t in segments if t]
 
 
-def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict[str, Any]]:
+def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
     """
-    Extract paragraph text with ⟦B⟧…⟦/B⟧ bold markers AND ⟦D0⟧ drawing
-    placeholders, reading all w:r elements via lxml (including those inside
-    w:hyperlink nodes).
+    Extract paragraph text with:
+    - ⟦B⟧…⟦/B⟧  bold markers
+    - ⟦D0⟧        inline drawing placeholders
+    - ⟦H0⟧…⟦/H0⟧ hyperlink span markers (so the LLM can keep link text together)
+
+    Walks *direct children* of w:p so hyperlink nodes are handled as a unit
+    rather than mixing their inner runs with regular paragraph runs.
 
     Returns
     -------
-    marked_text : str
-        Text with bold and drawing markers ready for the LLM.
-    drawing_map : dict
-        Mapping of placeholder string (e.g. '⟦D0⟧') -> lxml run element,
-        used only for reference; the runs stay in place in the XML tree.
+    marked_text   : str
+    drawing_map   : {placeholder_str: lxml_run_element}
+    hyperlink_map : {index: {'elem': w:hyperlink_element, 'runs': [run_elements]}}
     """
+    p_elem = paragraph._p
     parts: List[str] = []
     in_bold = False
     d_idx = 0
+    h_idx = 0
     drawing_map: Dict[str, Any] = {}
+    hyperlink_map: Dict[int, Any] = {}
 
-    for r in _lxml_all_runs(paragraph._p):
-        if _run_is_non_text(r):
-            # Close bold if open, then emit a drawing placeholder
+    for child in p_elem:
+        ctag = child.tag.split("}")[1] if "}" in child.tag else child.tag
+
+        if ctag == "r":
+            if _run_is_non_text(child):
+                if in_bold:
+                    parts.append(B_CLOSE)
+                    in_bold = False
+                ph = f"{D_PREFIX}{d_idx}{SUFFIX}"
+                parts.append(ph)
+                drawing_map[ph] = child
+                d_idx += 1
+                continue
+            t_elem = _lxml_text_elem(child)
+            if t_elem is None:
+                continue
+            text = t_elem.text or ""
+            if not text:
+                continue
+            is_bold = _lxml_run_is_bold(child)
+            if is_bold and not in_bold:
+                parts.append(B_OPEN)
+                in_bold = True
+            elif not is_bold and in_bold:
+                parts.append(B_CLOSE)
+                in_bold = False
+            parts.append(text)
+
+        elif ctag == "hyperlink":
+            # Emit ⟦H0⟧…⟦/H0⟧ around the hyperlink's concatenated text
             if in_bold:
                 parts.append(B_CLOSE)
                 in_bold = False
-            ph = f"{D_PREFIX}{d_idx}{SUFFIX}"
-            parts.append(ph)
-            drawing_map[ph] = r
-            d_idx += 1
-            continue
-
-        t_elem = _lxml_text_elem(r)
-        if t_elem is None:
-            continue
-
-        text = t_elem.text or ""
-        if not text:
-            continue
-
-        is_bold = _lxml_run_is_bold(r)
-        if is_bold and not in_bold:
-            parts.append(B_OPEN)
-            in_bold = True
-        elif not is_bold and in_bold:
-            parts.append(B_CLOSE)
-            in_bold = False
-
-        parts.append(text)
+            hl_runs = child.findall(f"{{{_W}}}r")
+            hl_text = "".join(
+                r.find(f"{{{_W}}}t").text or ""
+                for r in hl_runs
+                if r.find(f"{{{_W}}}t") is not None
+            )
+            if hl_text:
+                parts.append(f"⟦H{h_idx}⟧")
+                parts.append(hl_text)
+                parts.append(f"⟦/H{h_idx}⟧")
+                hyperlink_map[h_idx] = {"elem": child, "runs": hl_runs}
+                h_idx += 1
 
     if in_bold:
         parts.append(B_CLOSE)
 
-    return "".join(parts), drawing_map
+    return "".join(parts), drawing_map, hyperlink_map
+
+
+# Per-run styling tags that must NOT be inherited by rebuilt runs —
+# each segment carries its own bold/italic/etc. from the translated markers.
+_FORMATTING_TAGS = frozenset(
+    {"b", "bCs", "i", "iCs", "u", "strike", "dstrike", "highlight", "rStyle"}
+)
+
+
+def _make_rPr_template(rPr_src):
+    """Clone an rPr element keeping only structural properties (font, size,
+    colour, spacing…) and stripping per-character styling (bold, italic,
+    underline, rStyle) so the template can be safely reused across segments
+    with different formatting."""
+    if rPr_src is None:
+        return None
+    tmpl = copy.deepcopy(rPr_src)
+    for tag in _FORMATTING_TAGS:
+        el = tmpl.find(f"{{{_W}}}{tag}")
+        if el is not None:
+            tmpl.remove(el)
+    return tmpl
+
+
+def _make_run(rPr_template, text: str, is_bold: bool):
+    """Create a fresh w:r with a cloned rPr template, bold flag, and text."""
+    r = etree.Element(f"{{{_W}}}r")
+    if rPr_template is not None:
+        rPr_new = copy.deepcopy(rPr_template)
+        if is_bold:
+            etree.SubElement(rPr_new, f"{{{_W}}}b")
+        r.append(rPr_new)
+    elif is_bold:
+        rPr_new = etree.SubElement(r, f"{{{_W}}}rPr")
+        etree.SubElement(rPr_new, f"{{{_W}}}b")
+    t_elem = etree.SubElement(r, f"{{{_W}}}t")
+    t_elem.text = text
+    if text and (text[0] == " " or text[-1] == " "):
+        t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
+    return r
 
 
 def _set_run_text(r_elem, text: str, is_bold: bool) -> None:
@@ -432,42 +503,37 @@ def _set_run_text(r_elem, text: str, is_bold: bool) -> None:
             rPr.remove(b_elem)
 
 
-def _write_paragraph_inplace(p_elem, translated_marked: str, drawing_map: Dict) -> None:
+def _write_paragraph_inplace(p_elem, translated_marked: str,
+                             drawing_map: Dict, hyperlink_map: Dict) -> None:
     """
-    Write translated text back into the paragraph XML using a three-path strategy.
+    Write translated text back into the paragraph XML — three-path strategy.
 
-    PATH 1 — Drawing paragraph (has w:drawing / w:sym runs)
-        Split runs into groups around drawing runs.
-        Put the combined text of each group into its FIRST text run, clear others.
-        Drawing runs are never touched — they stay at their original XML position,
-        so icons appear at the correct location in the output.
+    PATH 1 — Drawing paragraph
+        Groups runs around drawing elements; first run of each group gets the
+        combined translated text for that segment; drawing runs stay untouched.
 
-    PATH 2 — Hyperlink paragraph (has w:hyperlink, no drawings)
-        Distribute translated plain text proportionally across all existing text
-        runs (by character-count ratio of the originals).  This preserves the
-        run count so hyperlink inner runs keep their text and link styling.
+    PATH 2 — Hyperlink paragraph
+        ⟦H0⟧…⟦/H0⟧ text → written into the hyperlink's first inner run.
+        Plain text → direct w:r children rebuilt from a clean rPr template,
+        inserted at positions that preserve the before/after-hyperlink order.
 
-    PATH 3 — Plain paragraph (no drawings, no hyperlinks)
-        Clone the rPr formatting template from the first text run, remove all
-        direct w:r children, then rebuild one run per (is_bold, text) segment
-        each carrying the cloned rPr (plus w:b when bold).  This is the most
-        reliable approach for paragraphs with mixed bold/non-bold text.
+    PATH 3 — Plain paragraph
+        rPr template cloned from first run (stripping per-segment styling).
+        All direct w:r removed; rebuilt one per (bold, text) segment.
     """
-    import copy as _copy
-
     all_runs = _lxml_all_runs(p_elem)
     if not all_runs:
         return
 
     has_drawing   = any(_run_is_non_text(r) for r in all_runs)
-    has_hyperlink = p_elem.find(f".//{{{_W}}}hyperlink") is not None
+    has_hyperlink = bool(hyperlink_map)
 
-    # ── PATH 1: Drawing paragraph ──────────────────────────────────────────
+    # ── PATH 1: Drawing ────────────────────────────────────────────────────
     if has_drawing:
-        segments = _parse_marked_segments(translated_marked)
+        segs = _parse_marked_segments(translated_marked)
         text_slots: List[List[Tuple]] = []
         current: List[Tuple] = []
-        for seg in segments:
+        for seg in segs:
             if seg[0] == "drawing":
                 text_slots.append(current)
                 current = []
@@ -486,78 +552,93 @@ def _write_paragraph_inplace(p_elem, translated_marked: str, drawing_map: Dict) 
         run_groups.append(cur_group)
 
         for gi, group in enumerate(run_groups):
-            slot = text_slots[gi] if gi < len(text_slots) else []
+            slot    = text_slots[gi] if gi < len(text_slots) else []
             combined = "".join(t for _, t in slot)
-            is_b = slot[0][0] if slot else False
+            is_b    = slot[0][0] if slot else False
             for ri, r in enumerate(group):
                 _set_run_text(r, combined if ri == 0 else "", is_b if ri == 0 else False)
         return
 
-    # ── PATH 2: Hyperlink paragraph ────────────────────────────────────────
+    # ── PATH 2: Hyperlink ──────────────────────────────────────────────────
     if has_hyperlink:
-        text_runs = [r for r in all_runs if _lxml_text_elem(r) is not None]
-        if not text_runs:
-            return
-        plain = re.sub(r"⟦[^⟧]+⟧", "", translated_marked).strip()
-        orig_texts = [(_lxml_text_elem(r).text or "") for r in text_runs]
-        orig_total = sum(len(t) for t in orig_texts)
-        if orig_total == 0:
-            _set_run_text(text_runs[0], plain, False)
-            return
-        remaining = plain
-        for i, r in enumerate(text_runs[:-1]):
-            share = round(len(plain) * len(orig_texts[i]) / orig_total)
-            share = max(0, min(share, len(remaining)))
-            chunk = remaining[:share]
-            # Try to break at a word boundary
-            if share < len(remaining) and remaining[share:share+1] not in ("", " "):
-                sp = chunk.rfind(" ")
-                if sp > 0:
-                    chunk = chunk[:sp + 1]
-            _set_run_text(r, chunk, _lxml_run_is_bold(r))
-            remaining = remaining[len(chunk):]
-        _set_run_text(text_runs[-1], remaining.strip(), _lxml_run_is_bold(text_runs[-1]))
+        segs = _parse_marked_segments(translated_marked)
+
+        # rPr template from the first direct-child run
+        direct_runs = p_elem.findall(f"{{{_W}}}r")
+        rPr_tmpl = None
+        for r in direct_runs:
+            c = r.find(f"{{{_W}}}rPr")
+            if c is not None:
+                rPr_tmpl = _make_rPr_template(c)
+                break
+
+        # Write hyperlink text → first inner run of each hyperlink, clear rest
+        for hi, hl_info in hyperlink_map.items():
+            hl_runs = hl_info["runs"]
+            hl_text = "".join(
+                t for b, t in segs if isinstance(b, tuple) and b == ("h", hi)
+            )
+            if hl_runs:
+                _set_run_text(hl_runs[0], hl_text, False)
+                for r in hl_runs[1:]:
+                    _set_run_text(r, "", False)
+
+        # Split plain segs at hyperlink boundaries
+        groups: List[List[Tuple]] = []
+        cur: List[Tuple] = []
+        for b, t in segs:
+            if isinstance(b, tuple) and b[0] == "h":
+                groups.append(cur)
+                cur = []
+            elif b != "drawing":
+                cur.append((b, t))
+        groups.append(cur)
+        # groups[0] = before hl[0], groups[1] = between hl[0] and hl[1], …
+
+        # Collect hyperlink elements in document order
+        hl_elems = [
+            child for child in p_elem
+            if (child.tag.split("}")[1] if "}" in child.tag else child.tag) == "hyperlink"
+            and any(info["elem"] is child for info in hyperlink_map.values())
+        ]
+
+        # Remove all direct w:r children
+        for r in list(p_elem.findall(f"{{{_W}}}r")):
+            p_elem.remove(r)
+
+        # Insert rebuilt runs before/after each hyperlink element
+        for gi, group_segs in enumerate(groups):
+            if gi < len(hl_elems):
+                hl_elem = hl_elems[gi]
+                hl_pos  = list(p_elem).index(hl_elem)
+                for j, (is_b, text) in enumerate(group_segs):
+                    p_elem.insert(hl_pos + j, _make_run(rPr_tmpl, text, is_b))
+                    hl_pos += 1
+            else:
+                for is_b, text in group_segs:
+                    p_elem.append(_make_run(rPr_tmpl, text, is_b))
         return
 
-    # ── PATH 3: Plain paragraph — rebuild runs with rPr template ──────────
-    # Collect rPr template (without w:b) from first text run
+    # ── PATH 3: Plain paragraph ────────────────────────────────────────────
     text_runs = [r for r in all_runs if _lxml_text_elem(r) is not None]
-    rPr_template = None
+    rPr_tmpl = None
     for r in text_runs:
-        rPr_cand = r.find(f"{{{_W}}}rPr")
-        if rPr_cand is not None:
-            rPr_template = _copy.deepcopy(rPr_cand)
-            b = rPr_template.find(f"{{{_W}}}b")
-            if b is not None:
-                rPr_template.remove(b)
+        c = r.find(f"{{{_W}}}rPr")
+        if c is not None:
+            rPr_tmpl = _make_rPr_template(c)
             break
 
-    # Remove all direct w:r children (keeps pPr, bookmarks, etc.)
     for r in list(p_elem.findall(f"{{{_W}}}r")):
         p_elem.remove(r)
 
-    # Rebuild one run per text segment, each with the cloned rPr
-    segments = _parse_marked_segments(translated_marked)
-    text_segs = [(b, t) for b, t in segments if b != "drawing"]
+    segs = _parse_marked_segments(translated_marked)
+    text_segs = [(b, t) for b, t in segs if b != "drawing"]
 
-    pPr = p_elem.find(f"{{{_W}}}pPr")
-    insert_idx = (list(p_elem).index(pPr) + 1) if pPr is not None else 0
+    pPr       = p_elem.find(f"{{{_W}}}pPr")
+    ins_idx   = (list(p_elem).index(pPr) + 1) if pPr is not None else 0
 
     for i, (is_b, text) in enumerate(text_segs):
-        r = etree.Element(f"{{{_W}}}r")
-        if rPr_template is not None:
-            rPr_new = _copy.deepcopy(rPr_template)
-            if is_b:
-                etree.SubElement(rPr_new, f"{{{_W}}}b")
-            r.append(rPr_new)
-        elif is_b:
-            rPr_new = etree.SubElement(r, f"{{{_W}}}rPr")
-            etree.SubElement(rPr_new, f"{{{_W}}}b")
-        t_elem = etree.SubElement(r, f"{{{_W}}}t")
-        t_elem.text = text
-        if text and (text[0] == " " or text[-1] == " "):
-            t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
-        p_elem.insert(insert_idx + i, r)
+        p_elem.insert(ins_idx + i, _make_run(rPr_tmpl, text, is_b))
 
 
 def strip_bold_markers(text: str) -> str:
@@ -791,20 +872,16 @@ def paragraph_has_hyperlink(paragraph) -> bool:
     return paragraph._p.xpath(".//w:hyperlink") != []
 
 
-def _write_paragraph(p, translated_marked: str, drawing_map: Optional[Dict] = None) -> None:
-    """Write translated text into the paragraph, preserving all XML structure.
-
-    Always uses in-place w:t replacement so that hyperlink wrappers, drawing
-    runs, rPr colour/font attributes, and every other non-text element survives
-    unchanged.  Only w:t content and w:b bold flags are updated.
-    """
+def _write_paragraph(p, translated_marked: str,
+                     drawing_map: Optional[Dict] = None,
+                     hyperlink_map: Optional[Dict] = None) -> None:
+    """Write translated text into the paragraph, preserving all XML structure."""
     if is_heading_paragraph(p):
-        # Headings must never end with a period.
         translated_marked = translated_marked.rstrip()
         if translated_marked.endswith("."):
             translated_marked = translated_marked[:-1].rstrip()
 
-    _write_paragraph_inplace(p._p, translated_marked, drawing_map or {})
+    _write_paragraph_inplace(p._p, translated_marked, drawing_map or {}, hyperlink_map or {})
 
 
 def normalize_for_scoring(text: str) -> str:
@@ -927,9 +1004,10 @@ def translate_paragraph_with_patterns(
 Translate Korean to natural, professional English.
 
 Rules:
-- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧.
+- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧.
 - ⟦G#⟧ = fixed glossary term — do NOT translate.
-- ⟦D#⟧ = inline icon/image — keep it exactly where it naturally fits in the translated sentence.
+- ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
+- ⟦H#⟧…⟦/H#⟧ = hyperlink span — translate the text inside, keep the markers around it.
 - Use the pattern examples only as reference guidance.
 - Do not copy irrelevant examples.
 - Avoid repetition and awkward literal wording.
@@ -1026,11 +1104,11 @@ def translate_document(
     marked_texts: List[str] = []
 
     for p in iter_all_paragraphs(doc):
-        marked_ko, drawing_map = paragraph_to_marked_text(p)
+        marked_ko, drawing_map, hyperlink_map = paragraph_to_marked_text(p)
         if not contains_korean(marked_ko):
             continue
         paras.append(p)
-        marked_texts.append((marked_ko, drawing_map))
+        marked_texts.append((marked_ko, drawing_map, hyperlink_map))
 
     total_paras = len(paras)
 
@@ -1045,11 +1123,11 @@ def translate_document(
         }
 
     for idx, p in enumerate(paras):
-        src, drawing_map = marked_texts[idx]
+        src, drawing_map, hyperlink_map = marked_texts[idx]
 
         if enable_cache and src in cache:
             translated = cache[src]
-            _write_paragraph(p, translated, drawing_map)
+            _write_paragraph(p, translated, drawing_map, hyperlink_map)
             if progress_callback:
                 progress_callback(idx + 1, total_paras)
             continue
@@ -1110,7 +1188,7 @@ def translate_document(
         if enable_cache:
             cache[src] = translated
 
-        _write_paragraph(p, translated, drawing_map)
+        _write_paragraph(p, translated, drawing_map, hyperlink_map)
 
         if progress_callback:
             progress_callback(idx + 1, total_paras)
