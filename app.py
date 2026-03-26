@@ -248,7 +248,7 @@ def reset_translation_result():
 # ─────────────────────────────────────────────
 
 def render_summary_pills(product: str, mode: str, cache: bool):
-    cache_text = "켜짐" if cache else "꺼짐"
+    cache_text = "사용" if cache else "사용 안 함"
     st.markdown(
         f"""
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin: 0 0 16px 0;">
@@ -262,7 +262,7 @@ def render_summary_pills(product: str, mode: str, cache: bool):
             </span>
             <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px;
                          background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
-                <strong>중복 재사용</strong> {cache_text}
+                <strong>캐시</strong> {cache_text}
             </span>
         </div>
         """,
@@ -401,7 +401,7 @@ if st.session_state.step == 1:
 
 
 # ─────────────────────────────────────────────
-# Step 2 — 용어 및 패턴 선택
+# Step 2 — 용어 및 패턴
 # ─────────────────────────────────────────────
 
 elif st.session_state.step == 2:

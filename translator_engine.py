@@ -687,6 +687,25 @@ def repair_bold_markers(text: str) -> str:
     return text
 
 
+def normalize_bold_spaces(text: str) -> str:
+    """
+    Remove spurious spaces that accumulate at bold-marker boundaries.
+
+    The LLM sometimes outputs "click ⟦B⟧ Rule ⟦/B⟧." (spaces inside markers)
+    which produces double-spaces and leading-space artifacts in the final text.
+
+    Rules:
+    - Strip whitespace immediately after ⟦B⟧  → "⟦B⟧ Rule" → "⟦B⟧Rule"
+    - Strip whitespace immediately before ⟦/B⟧ → "Rule ⟦/B⟧" → "Rule⟦/B⟧"
+
+    Adjacent runs will still be separated by the space that belongs to the
+    surrounding plain text, so no words run together.
+    """
+    text = re.sub(r"⟦B⟧\s+", B_OPEN, text)
+    text = re.sub(r"\s+⟦/B⟧", B_CLOSE, text)
+    return text
+
+
 def _split_preserving_markers(text: str) -> List[str]:
     return MARKER_SPLIT_RE.split(text)
 
@@ -1148,6 +1167,9 @@ def translate_document(
         # 1) marker 복구
         translated = repair_bold_markers(translated)
 
+        # 1-b) bold 경계 공백 제거 (LLM이 ⟦B⟧ Rule ⟦/B⟧처럼 마커 안에 공백을 넣는 경우)
+        translated = normalize_bold_spaces(translated)
+
         # 2) glossary 복원 (위치 기반 대소문자 적용)
         translated = restore_glossary_placeholders(translated, gl_map or {})
 
@@ -1158,6 +1180,7 @@ def translate_document(
         if contains_korean(translated):
             translated = translate_remaining_korean(client, translated, model=model)
             translated = repair_bold_markers(translated)
+            translated = normalize_bold_spaces(translated)
             # fallback 번역 후에도 glossary 용어가 한국어로 남아 있을 수 있으므로 재복원
             translated = restore_glossary_placeholders(translated, gl_map or {})
             translated = normalize_colon_label_line(translated)

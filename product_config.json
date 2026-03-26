@@ -1,4 +1,22 @@
 {
+  "Common": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv"
+  ]
+},
+  "FED": {
+  "default_glossaries": [
+    "data/glossaries/common.tsv",
+    "data/glossaries/fed.tsv"
+  ],
+  "default_patterns": [
+    "data/patterns/common.tsv",
+    "data/patterns/fed.tsv"
+  ]
+},
   "FSP": {
     "default_glossaries": [
       "data/glossaries/common.tsv",
