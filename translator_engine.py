@@ -29,7 +29,9 @@ PLACEHOLDER_RE = re.compile(r"⟦G\d+⟧")
 DRAWING_PH_RE = re.compile(r"⟦D\d+⟧")
 H_OPEN_RE    = re.compile(r"⟦H(\d+)⟧")
 H_CLOSE_RE   = re.compile(r"⟦/H(\d+)⟧")
-ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧)")
+HL_OPEN_RE   = re.compile(r"⟦HL:([a-zA-Z]+)⟧")
+HL_CLOSE     = "⟦/HL⟧"
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧)")
 MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)")
 
 UI_LOWER_WORDS = {
@@ -316,6 +318,21 @@ def _lxml_all_runs(p_elem):
     return p_elem.findall(f".//{{{_W}}}r")
 
 
+def _run_is_comment_ref(r_elem) -> bool:
+    """True for the w:r that holds w:commentReference (the comment bubble icon).
+    This run must NEVER be deleted or rebuilt."""
+    return r_elem.find(f"{{{_W}}}commentReference") is not None
+
+
+def _run_highlight_val(r_elem) -> Optional[str]:
+    """Return the highlight colour string (e.g. 'yellow') or None."""
+    rPr = r_elem.find(f"{{{_W}}}rPr")
+    if rPr is None:
+        return None
+    hl = rPr.find(f"{{{_W}}}highlight")
+    return hl.get(f"{{{_W}}}val") if hl is not None else None
+
+
 def _lxml_run_is_bold(r_elem) -> bool:
     """True when the run carries an active w:b element."""
     rPr = r_elem.find(f"{{{_W}}}rPr")
@@ -346,25 +363,26 @@ def _parse_marked_segments(marked: str) -> List[Tuple]:
     """Split a marked string into typed segments.
 
     Returns list of (type, text) where type is one of:
-      False          — plain non-bold text
-      True           — plain bold text
-      'drawing'      — drawing placeholder (text = '⟦D0⟧')
-      ('h', int)     — text inside hyperlink <int>
+      {'bold': bool, 'hl': str|None}  — plain text with formatting
+      'drawing'                         — drawing placeholder
+      ('h', int)                        — text inside hyperlink <int>
     """
     segments: List[Tuple] = []
     tokens = ALL_MARKER_RE.split(marked)
-    bold = False
-    in_hl: Optional[int] = None
+    bold   = False
+    in_hl:    Optional[str] = None
     buf: List[str] = []
+
+    in_hlink: Optional[int] = None
 
     def _flush() -> None:
         if not buf:
             return
         text = "".join(buf)
-        if in_hl is not None:
-            segments.append((("h", in_hl), text))
+        if in_hlink is not None:
+            segments.append((("h", in_hlink), text))
         else:
-            segments.append((bold, text))
+            segments.append(({"bold": bold, "hl": in_hl}, text))
         buf.clear()
 
     for tok in tokens:
@@ -375,8 +393,12 @@ def _parse_marked_segments(marked: str) -> List[Tuple]:
         elif DRAWING_PH_RE.fullmatch(tok):
             _flush(); segments.append(("drawing", tok))
         elif H_OPEN_RE.fullmatch(tok):
-            _flush(); in_hl = int(H_OPEN_RE.match(tok).group(1))
+            _flush(); in_hlink = int(H_OPEN_RE.match(tok).group(1))
         elif H_CLOSE_RE.fullmatch(tok):
+            _flush(); in_hlink = None
+        elif HL_OPEN_RE.fullmatch(tok):
+            _flush(); in_hl = HL_OPEN_RE.match(tok).group(1)
+        elif tok == HL_CLOSE:
             _flush(); in_hl = None
         elif tok:
             buf.append(tok)
@@ -404,6 +426,7 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
     p_elem = paragraph._p
     parts: List[str] = []
     in_bold = False
+    in_hl: Optional[str] = None
     d_idx = 0
     h_idx = 0
     drawing_map: Dict[str, Any] = {}
@@ -413,14 +436,13 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
         ctag = child.tag.split("}")[1] if "}" in child.tag else child.tag
 
         if ctag == "r":
+            if _run_is_comment_ref(child):
+                continue
             if _run_is_non_text(child):
-                if in_bold:
-                    parts.append(B_CLOSE)
-                    in_bold = False
+                if in_bold: parts.append(B_CLOSE); in_bold = False
+                if in_hl:   parts.append(HL_CLOSE); in_hl = None
                 ph = f"{D_PREFIX}{d_idx}{SUFFIX}"
-                parts.append(ph)
-                drawing_map[ph] = child
-                d_idx += 1
+                parts.append(ph); drawing_map[ph] = child; d_idx += 1
                 continue
             t_elem = _lxml_text_elem(child)
             if t_elem is None:
@@ -429,19 +451,20 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
             if not text:
                 continue
             is_bold = _lxml_run_is_bold(child)
+            hl_val  = _run_highlight_val(child)
+            if in_hl is not None and hl_val != in_hl:
+                parts.append(HL_CLOSE); in_hl = None
+            if hl_val is not None and in_hl is None:
+                parts.append(f"⟦HL:{hl_val}⟧"); in_hl = hl_val
             if is_bold and not in_bold:
-                parts.append(B_OPEN)
-                in_bold = True
+                parts.append(B_OPEN); in_bold = True
             elif not is_bold and in_bold:
-                parts.append(B_CLOSE)
-                in_bold = False
+                parts.append(B_CLOSE); in_bold = False
             parts.append(text)
 
         elif ctag == "hyperlink":
-            # Emit ⟦H0⟧…⟦/H0⟧ around the hyperlink's concatenated text
-            if in_bold:
-                parts.append(B_CLOSE)
-                in_bold = False
+            if in_bold: parts.append(B_CLOSE); in_bold = False
+            if in_hl:   parts.append(HL_CLOSE); in_hl = None
             hl_runs = child.findall(f"{{{_W}}}r")
             hl_text = "".join(
                 r.find(f"{{{_W}}}t").text or ""
@@ -449,14 +472,12 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
                 if r.find(f"{{{_W}}}t") is not None
             )
             if hl_text:
-                parts.append(f"⟦H{h_idx}⟧")
-                parts.append(hl_text)
-                parts.append(f"⟦/H{h_idx}⟧")
+                parts.append(f"⟦H{h_idx}⟧"); parts.append(hl_text); parts.append(f"⟦/H{h_idx}⟧")
                 hyperlink_map[h_idx] = {"elem": child, "runs": hl_runs}
                 h_idx += 1
 
-    if in_bold:
-        parts.append(B_CLOSE)
+    if in_bold: parts.append(B_CLOSE)
+    if in_hl:   parts.append(HL_CLOSE)
 
     return "".join(parts), drawing_map, hyperlink_map
 
@@ -482,20 +503,32 @@ def _make_rPr_template(rPr_src):
         el = tmpl.find(f"{{{_W}}}{tag}")
         if el is not None:
             tmpl.remove(el)
+    hl = tmpl.find(f"{{{_W}}}highlight")
+    if hl is not None:
+        tmpl.remove(hl)
     return tmpl
 
 
-def _make_run(rPr_template, text: str, is_bold: bool):
+def _make_run(rPr_template, text: str, props):
     """Create a fresh w:r with a cloned rPr template, bold flag, and text."""
+    is_bold = props.get("bold", False) if isinstance(props, dict) else bool(props)
+    hl_val  = props.get("hl",   None)  if isinstance(props, dict) else None
     r = etree.Element(f"{{{_W}}}r")
     if rPr_template is not None:
         rPr_new = copy.deepcopy(rPr_template)
         if is_bold:
             etree.SubElement(rPr_new, f"{{{_W}}}b")
+        if hl_val:
+            hl_el = etree.SubElement(rPr_new, f"{{{_W}}}highlight")
+            hl_el.set(f"{{{_W}}}val", hl_val)
         r.append(rPr_new)
-    elif is_bold:
+    elif is_bold or hl_val:
         rPr_new = etree.SubElement(r, f"{{{_W}}}rPr")
-        etree.SubElement(rPr_new, f"{{{_W}}}b")
+        if is_bold:
+            etree.SubElement(rPr_new, f"{{{_W}}}b")
+        if hl_val:
+            hl_el = etree.SubElement(rPr_new, f"{{{_W}}}highlight")
+            hl_el.set(f"{{{_W}}}val", hl_val)
     t_elem = etree.SubElement(r, f"{{{_W}}}t")
     t_elem.text = text
     if text and (text[0] == " " or text[-1] == " "):
@@ -587,10 +620,11 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
     if has_hyperlink:
         segs = _parse_marked_segments(translated_marked)
 
-        # rPr template from the first direct-child run
-        direct_runs = p_elem.findall(f"{{{_W}}}r")
+        # rPr template from the first non-commentRef direct-child run
         rPr_tmpl = None
-        for r in direct_runs:
+        for r in p_elem.findall(f"{{{_W}}}r"):
+            if _run_is_comment_ref(r):
+                continue
             c = r.find(f"{{{_W}}}rPr")
             if c is not None:
                 rPr_tmpl = _make_rPr_template(c)
@@ -626,8 +660,10 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
             and any(info["elem"] is child for info in hyperlink_map.values())
         ]
 
-        # Remove all direct w:r children
-        for r in list(p_elem.findall(f"{{{_W}}}r")):
+        # Remove only regular (non-commentRef) direct runs
+        direct_runs  = p_elem.findall(f"{{{_W}}}r")
+        cmt_ref_runs = [r for r in direct_runs if _run_is_comment_ref(r)]
+        for r in [r for r in direct_runs if not _run_is_comment_ref(r)]:
             p_elem.remove(r)
 
         # Insert rebuilt runs before/after each hyperlink element
@@ -635,34 +671,45 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
             if gi < len(hl_elems):
                 hl_elem = hl_elems[gi]
                 hl_pos  = list(p_elem).index(hl_elem)
-                for j, (is_b, text) in enumerate(group_segs):
-                    p_elem.insert(hl_pos + j, _make_run(rPr_tmpl, text, is_b))
+                for j, (props, text) in enumerate(group_segs):
+                    p_elem.insert(hl_pos + j, _make_run(rPr_tmpl, text, props))
                     hl_pos += 1
             else:
-                for is_b, text in group_segs:
-                    p_elem.append(_make_run(rPr_tmpl, text, is_b))
+                for props, text in group_segs:
+                    if cmt_ref_runs:
+                        cmt_pos = list(p_elem).index(cmt_ref_runs[0])
+                        p_elem.insert(cmt_pos, _make_run(rPr_tmpl, text, props))
+                    else:
+                        p_elem.append(_make_run(rPr_tmpl, text, props))
         return
 
     # ── PATH 3: Plain paragraph ────────────────────────────────────────────
-    text_runs = [r for r in all_runs if _lxml_text_elem(r) is not None]
+    direct_runs  = p_elem.findall(f"{{{_W}}}r")
+    cmt_ref_runs = [r for r in direct_runs if _run_is_comment_ref(r)]
+    regular_runs = [r for r in direct_runs if not _run_is_comment_ref(r)]
+
     rPr_tmpl = None
-    for r in text_runs:
+    for r in regular_runs:
         c = r.find(f"{{{_W}}}rPr")
         if c is not None:
             rPr_tmpl = _make_rPr_template(c)
             break
 
-    for r in list(p_elem.findall(f"{{{_W}}}r")):
+    for r in regular_runs:
         p_elem.remove(r)
 
     segs = _parse_marked_segments(translated_marked)
     text_segs = [(b, t) for b, t in segs if b != "drawing"]
 
-    pPr       = p_elem.find(f"{{{_W}}}pPr")
-    ins_idx   = (list(p_elem).index(pPr) + 1) if pPr is not None else 0
-
-    for i, (is_b, text) in enumerate(text_segs):
-        p_elem.insert(ins_idx + i, _make_run(rPr_tmpl, text, is_b))
+    for i, (props, text) in enumerate(text_segs):
+        r = _make_run(rPr_tmpl, text, props)
+        if cmt_ref_runs:
+            cmt_pos = list(p_elem).index(cmt_ref_runs[0])
+            p_elem.insert(cmt_pos + i, r)
+        else:
+            pPr     = p_elem.find(f"{{{_W}}}pPr")
+            ins_idx = (list(p_elem).index(pPr) + 1) if pPr is not None else 0
+            p_elem.insert(ins_idx + i, r)
 
 
 def strip_bold_markers(text: str) -> str:
@@ -1083,11 +1130,13 @@ def translate_paragraph_with_patterns(
 Translate Korean to natural, professional English.
 
 Rules:
-- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧.
+- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧.
 - ⟦G#⟧ placeholders are FIXED glossary terms. Output them BYTE-FOR-BYTE unchanged.
   NEVER translate, paraphrase, expand, or substitute a ⟦G#⟧ placeholder with any word.
 - ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
 - ⟦H#⟧…⟦/H#⟧ = hyperlink span — translate the text inside, keep the markers around it.
+- ⟦HL:colour⟧…⟦/HL⟧ = highlighted text — translate the inside and keep the markers
+  around the same semantic content in the translation.
 - If the source contains existing English words or phrases, leave them EXACTLY as-is.
   Do NOT rephrase, reword, or "improve" any English that is already present.
 - Use the pattern examples only as reference guidance.
