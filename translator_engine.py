@@ -198,15 +198,37 @@ def preprocess_with_glossary_placeholders(
     text: str,
     entries: List[GlossaryEntry],
 ) -> Tuple[str, Dict[str, GlossaryEntry]]:
+    """
+    Replace glossary KO terms in *text* with ⟦G0⟧ … placeholders.
+
+    Uses a regex that normalises internal whitespace (\s+) so that terms
+    like '민감 정보' still match even when the paragraph runs were merged
+    with a different number of spaces (or a zero-width space, thin space, etc.).
+    Longer KO terms are tried first (entries are pre-sorted by length desc)
+    to avoid a short term swallowing part of a longer one.
+    """
     out = text
     mapping: Dict[str, GlossaryEntry] = {}
     idx = 0
 
     for entry in entries:
-        if entry.ko and entry.ko in out:
+        if not entry.ko:
+            continue
+
+        # Build a pattern that matches the KO term with flexible internal whitespace.
+        # Each space in the glossary key becomes \s+ so ' 민감 정보 ' matches
+        # '민감정보', '민감  정보', etc.
+        escaped_parts = [re.escape(part) for part in entry.ko.split()]
+        pattern = r"\s*".join(escaped_parts) if escaped_parts else re.escape(entry.ko)
+
+        # Quick pre-check: at least the first word must be present
+        if escaped_parts and not re.search(escaped_parts[0], out):
+            continue
+
+        if re.search(pattern, out):
             ph = make_marker(G_PREFIX, idx)
             idx += 1
-            out = out.replace(entry.ko, ph)
+            out = re.sub(pattern, ph, out)
             mapping[ph] = entry
 
     return out, mapping
@@ -442,7 +464,9 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
 # Per-run styling tags that must NOT be inherited by rebuilt runs —
 # each segment carries its own bold/italic/etc. from the translated markers.
 _FORMATTING_TAGS = frozenset(
-    {"b", "bCs", "i", "iCs", "u", "strike", "dstrike", "highlight", "rStyle"}
+    # "highlight" is intentionally excluded so that highlighted text keeps
+    # its background colour after run rebuilding.
+    {"b", "bCs", "i", "iCs", "u", "strike", "dstrike", "rStyle"}
 )
 
 
@@ -1027,6 +1051,7 @@ def translate_paragraph_with_patterns(
     pattern_examples: List[Tuple[str, str]],
     model: str = "gpt-5.2",
     translation_mode: str = "Manual",
+    style_reference: str = "",
 ) -> str:
     global TOTAL_INPUT_TOKENS, TOTAL_CACHED_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_TOKENS
 
@@ -1049,14 +1074,22 @@ def translate_paragraph_with_patterns(
 - Use enterprise software documentation style.
 """
 
+    style_ref_block = (
+        f"\nExisting English in this document (match tone, vocabulary, sentence structure):\n{style_reference}\n"
+        if style_reference else ""
+    )
+
     prompt = f"""
 Translate Korean to natural, professional English.
 
 Rules:
 - Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧.
-- ⟦G#⟧ = fixed glossary term — do NOT translate.
+- ⟦G#⟧ placeholders are FIXED glossary terms. Output them BYTE-FOR-BYTE unchanged.
+  NEVER translate, paraphrase, expand, or substitute a ⟦G#⟧ placeholder with any word.
 - ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
 - ⟦H#⟧…⟦/H#⟧ = hyperlink span — translate the text inside, keep the markers around it.
+- If the source contains existing English words or phrases, leave them EXACTLY as-is.
+  Do NOT rephrase, reword, or "improve" any English that is already present.
 - Use the pattern examples only as reference guidance.
 - Do not copy irrelevant examples.
 - Avoid repetition and awkward literal wording.
@@ -1065,7 +1098,7 @@ Rules:
 - NEVER merge markers with words. "⟦B⟧rule" is correct; "⟦Brule" is invalid.
 - Keep markers as separate tokens.
 - Output ONLY the translated text. No explanation, no extra lines.
-{style_rules}
+{style_rules}{style_ref_block}
 Reference pattern examples:
 {pattern_block}
 
@@ -1109,9 +1142,10 @@ def translate_remaining_korean(
 Translate any remaining Korean in the text into natural English.
 
 Rules:
-- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧.
-- Do not change text that is already good English.
-- Only translate the remaining Korean parts.
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦G#⟧.
+- ⟦G#⟧ placeholders are FIXED terms — output them UNCHANGED. Do NOT translate them.
+- Do NOT alter, rephrase, or improve any English that is already present.
+- Only translate Korean words/phrases; leave everything else exactly as-is.
 - Do not force title case.
 - Output ONLY the translated text. No explanation, no extra lines.
 
@@ -1148,6 +1182,20 @@ def translate_document(
     client = OpenAI(api_key=api_key)
     doc = Document(in_path)
     cache: Dict[str, str] = {}
+
+    # ── 문서 내 기존 영문 단락 추출 (톤앤매너 참조용) ─────────────────────
+    english_samples: List[str] = []
+    for p in iter_all_paragraphs(doc):
+        text = p.text.strip()
+        # 한국어 없고, 충분히 긴 (> 15자) 영문 단락만 수집
+        if text and not contains_korean(text) and len(text) > 15:
+            english_samples.append(text)
+        if sum(len(s) for s in english_samples) >= 600:
+            break
+
+    style_reference = ""
+    if english_samples:
+        style_reference = "\n".join(f"  {s}" for s in english_samples[:6])
 
     paras: List = []
     marked_texts: List[str] = []
@@ -1190,6 +1238,7 @@ def translate_document(
             pattern_examples=selected_pattern_examples,
             model=model,
             translation_mode=translation_mode,
+            style_reference=style_reference,
         )
 
         translated = translated.strip()
