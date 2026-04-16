@@ -453,6 +453,8 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
             is_bold = _lxml_run_is_bold(child)
             hl_val  = _run_highlight_val(child)
             if in_hl is not None and hl_val != in_hl:
+                if in_bold:
+                    parts.append(B_CLOSE); in_bold = False
                 parts.append(HL_CLOSE); in_hl = None
             if hl_val is not None and in_hl is None:
                 parts.append(f"⟦HL:{hl_val}⟧"); in_hl = hl_val
@@ -609,11 +611,27 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
         run_groups.append(cur_group)
 
         for gi, group in enumerate(run_groups):
-            slot    = text_slots[gi] if gi < len(text_slots) else []
+            slot     = text_slots[gi] if gi < len(text_slots) else []
             combined = "".join(t for _, t in slot)
-            is_b    = slot[0][0] if slot else False
+            props    = slot[0][0] if slot else {}
+            is_b     = props.get("bold", False) if isinstance(props, dict) else False
+            hl_val   = props.get("hl",   None)  if isinstance(props, dict) else None
             for ri, r in enumerate(group):
-                _set_run_text(r, combined if ri == 0 else "", is_b if ri == 0 else False)
+                if ri == 0:
+                    _set_run_text(r, combined, is_b)
+                    rPr = r.find(f"{{{_W}}}rPr")
+                    if hl_val:
+                        if rPr is None:
+                            rPr = etree.SubElement(r, f"{{{_W}}}rPr"); r.insert(0, rPr)
+                        old_hl = rPr.find(f"{{{_W}}}highlight")
+                        if old_hl is not None: rPr.remove(old_hl)
+                        hl_el = etree.SubElement(rPr, f"{{{_W}}}highlight")
+                        hl_el.set(f"{{{_W}}}val", hl_val)
+                    elif rPr is not None:
+                        old_hl = rPr.find(f"{{{_W}}}highlight")
+                        if old_hl is not None: rPr.remove(old_hl)
+                else:
+                    _set_run_text(r, "", False)
         return
 
     # ── PATH 2: Hyperlink ──────────────────────────────────────────────────
@@ -713,7 +731,11 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
 
 
 def strip_bold_markers(text: str) -> str:
-    return text.replace(B_OPEN, "").replace(B_CLOSE, "")
+    """Remove ⟦B⟧/⟦/B⟧ bold markers and ⟦HL:colour⟧/⟦/HL⟧ highlight markers."""
+    text = text.replace(B_OPEN, "").replace(B_CLOSE, "")
+    text = HL_OPEN_RE.sub("", text)
+    text = text.replace(HL_CLOSE, "")
+    return text
 
 
 def set_paragraph_text_preserve_style(paragraph, text: str) -> None:
@@ -776,6 +798,47 @@ def normalize_bold_spaces(text: str) -> str:
     text = re.sub(r"\s+⟦/B⟧", B_CLOSE, text)
     text = re.sub(r"  +", " ", text)
     return text
+
+
+def repair_hl_markers(text: str) -> str:
+    """
+    Fix common LLM garbling of ⟦HL:colour⟧ … ⟦/HL⟧ highlight markers.
+
+    - ⟦HL: yellow⟧  → ⟦HL:yellow⟧  (space after colon)
+    - Unmatched open → append ⟦/HL⟧ at end
+    - Unmatched close → remove excess ⟦/HL⟧
+    """
+    if not text or "⟦HL" not in text:
+        return text
+    # Fix space after colon
+    text = re.sub(r"⟦HL:\s+([a-zA-Z]+)⟧", lambda m: f"⟦HL:{m.group(1)}⟧", text)
+    opens  = len(HL_OPEN_RE.findall(text))
+    closes = text.count(HL_CLOSE)
+    if opens > closes:
+        text = text + HL_CLOSE * (opens - closes)
+    elif closes > opens:
+        for _ in range(closes - opens):
+            idx = text.rfind(HL_CLOSE)
+            if idx >= 0:
+                text = text[:idx] + text[idx + len(HL_CLOSE):]
+    return text
+
+
+def apply_highlight_fallback(translated: str, source_marked: str) -> str:
+    """
+    Safety net: if the source had ⟦HL:colour⟧ markers but the LLM dropped
+    them from the translation, wrap the entire translated text in the dominant
+    highlight colour so highlight is never silently lost.
+    """
+    src_colours = HL_OPEN_RE.findall(source_marked)
+    if not src_colours:
+        return translated                   # source had no highlight
+    if HL_OPEN_RE.search(translated):
+        return translated                   # LLM preserved markers — good
+    # Fallback: whole-paragraph highlight with the dominant colour
+    from collections import Counter
+    colour = Counter(src_colours).most_common(1)[0][0]
+    return f"⟦HL:{colour}⟧{translated}⟦/HL⟧"
 
 
 def _split_preserving_markers(text: str) -> List[str]:
@@ -1294,9 +1357,13 @@ def translate_document(
 
         # 1) marker 복구
         translated = repair_bold_markers(translated)
+        translated = repair_hl_markers(translated)
 
         # 1-b) bold 경계 공백 제거 (LLM이 ⟦B⟧ Rule ⟦/B⟧처럼 마커 안에 공백을 넣는 경우)
         translated = normalize_bold_spaces(translated)
+
+        # 1-c) LLM이 HL 마커를 누락한 경우 폴백 처리
+        translated = apply_highlight_fallback(translated, src)
 
         # 2) glossary 복원 (위치 기반 대소문자 적용)
         translated = restore_glossary_placeholders(translated, gl_map or {})
@@ -1308,7 +1375,9 @@ def translate_document(
         if contains_korean(translated):
             translated = translate_remaining_korean(client, translated, model=model)
             translated = repair_bold_markers(translated)
+            translated = repair_hl_markers(translated)
             translated = normalize_bold_spaces(translated)
+            translated = apply_highlight_fallback(translated, src)
             # fallback 번역 후에도 glossary 용어가 한국어로 남아 있을 수 있으므로 재복원
             translated = restore_glossary_placeholders(translated, gl_map or {})
             translated = normalize_colon_label_line(translated)
