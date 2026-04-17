@@ -600,37 +600,76 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
                 current.append(seg)
         text_slots.append(current)
 
-        run_groups: List[List] = []
-        cur_group: List = []
-        for r in all_runs:
-            if _run_is_non_text(r):
-                run_groups.append(cur_group)
-                cur_group = []
-            elif _lxml_text_elem(r) is not None:
-                cur_group.append(r)
-        run_groups.append(cur_group)
+        # Walk DIRECT children of p_elem to build run groups.
+        # Hyperlink nodes are NOT split — their inner runs are handled separately.
+        # Drawing runs act as group separators; everything else (commentRange*, pPr,
+        # hyperlinks) is left in place.
+        direct_children   = list(p_elem)
+        drawing_positions: List[int] = []   # child indices of drawing runs
+        run_groups: List[List]        = []
+        cur_direct: List              = []
 
+        for child_idx, child in enumerate(direct_children):
+            ctag = child.tag.split("}")[1] if "}" in child.tag else child.tag
+            if ctag == "r" and _run_is_non_text(child):
+                run_groups.append(cur_direct)
+                drawing_positions.append(child_idx)
+                cur_direct = []
+            elif (
+                ctag == "r"
+                and not _run_is_comment_ref(child)
+                and _lxml_text_elem(child) is not None
+            ):
+                cur_direct.append(child)
+            # hyperlink / commentRange* / pPr: skip (not text, not drawing)
+        run_groups.append(cur_direct)
+
+        # rPr template from the first available non-drawing text run
+        rPr_tmpl = None
+        for group in run_groups:
+            for r in group:
+                c = r.find(f"{{{_W}}}rPr")
+                if c is not None:
+                    rPr_tmpl = _make_rPr_template(c)
+                    break
+            if rPr_tmpl is not None:
+                break
+
+        # Rebuild each run group from its translated text slot
         for gi, group in enumerate(run_groups):
-            slot     = text_slots[gi] if gi < len(text_slots) else []
-            combined = "".join(t for _, t in slot)
-            props    = slot[0][0] if slot else {}
-            is_b     = props.get("bold", False) if isinstance(props, dict) else False
-            hl_val   = props.get("hl",   None)  if isinstance(props, dict) else None
-            for ri, r in enumerate(group):
-                if ri == 0:
-                    _set_run_text(r, combined, is_b)
-                    rPr = r.find(f"{{{_W}}}rPr")
-                    if hl_val:
-                        if rPr is None:
-                            rPr = etree.SubElement(r, f"{{{_W}}}rPr"); r.insert(0, rPr)
-                        old_hl = rPr.find(f"{{{_W}}}highlight")
-                        if old_hl is not None: rPr.remove(old_hl)
-                        hl_el = etree.SubElement(rPr, f"{{{_W}}}highlight")
-                        hl_el.set(f"{{{_W}}}val", hl_val)
-                    elif rPr is not None:
-                        old_hl = rPr.find(f"{{{_W}}}highlight")
-                        if old_hl is not None: rPr.remove(old_hl)
-                else:
+            slot = text_slots[gi] if gi < len(text_slots) else []
+
+            # Determine insertion position in p_elem
+            if group:
+                insert_pos = list(p_elem).index(group[0])
+            elif gi > 0 and drawing_positions:
+                prev_drawing = direct_children[drawing_positions[gi - 1]]
+                insert_pos   = list(p_elem).index(prev_drawing) + 1
+            else:
+                pPr        = p_elem.find(f"{{{_W}}}pPr")
+                insert_pos = (list(p_elem).index(pPr) + 1) if pPr is not None else 0
+
+            # Remove only the direct text runs in this group (not hyperlink inner runs)
+            for r in group:
+                p_elem.remove(r)
+
+            # Rebuild: one new run per non-hyperlink text segment
+            text_segs = [
+                (b, t) for b, t in slot
+                if not (isinstance(b, tuple) and b[0] == "h")
+            ]
+            for j, (props, text) in enumerate(text_segs):
+                p_elem.insert(insert_pos + j, _make_run(rPr_tmpl, text, props))
+
+        # Sync hyperlink inner-run text (same as PATH 2)
+        for hi, hl_info in hyperlink_map.items():
+            hl_runs = hl_info["runs"]
+            hl_text = "".join(
+                t for b, t in segs if isinstance(b, tuple) and b == ("h", hi)
+            )
+            if hl_runs:
+                _set_run_text(hl_runs[0], hl_text, False)
+                for r in hl_runs[1:]:
                     _set_run_text(r, "", False)
         return
 
