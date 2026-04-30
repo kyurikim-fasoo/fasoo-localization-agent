@@ -1,5 +1,4 @@
 import copy
-import json
 import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Iterable, Optional, Callable, Any
@@ -1122,7 +1121,6 @@ def translate_paragraph_with_patterns(
     model: str = "gpt-5.2",
     translation_mode: str = "Manual",
     style_reference: str = "",
-    learned_terms: Optional[List[Dict]] = None,
 ) -> str:
     global TOTAL_INPUT_TOKENS, TOTAL_CACHED_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_TOKENS
 
@@ -1150,12 +1148,6 @@ def translate_paragraph_with_patterns(
         if style_reference else ""
     )
 
-    learned_block = ""
-    if learned_terms:
-        lines = [f"- {t['ko']} → {t['en']}" for t in learned_terms if t.get("ko") and t.get("en")]
-        if lines:
-            learned_block = "\nLearned style preferences (MUST follow these exactly):\n" + "\n".join(lines) + "\n"
-
     prompt = f"""
 Translate Korean to natural, professional English.
 
@@ -1177,7 +1169,7 @@ Rules:
 - NEVER merge markers with words. "⟦B⟧rule" is correct; "⟦Brule" is invalid.
 - Keep markers as separate tokens.
 - Output ONLY the translated text. No explanation, no extra lines.
-{style_rules}{style_ref_block}{learned_block}
+{style_rules}{style_ref_block}
 Reference pattern examples:
 {pattern_block}
 
@@ -1242,162 +1234,6 @@ Text:
     return resp.output_text.strip()
 
 
-
-def _extract_inconsistencies_from_pairs(
-    client: OpenAI,
-    translation_pairs: List[Tuple[str, str]],
-    model: str = "gpt-5.2",
-) -> Dict[str, str]:
-    """
-    Pass 1 of the consistency review:
-    Ask the LLM to identify which Korean expressions were translated
-    inconsistently, and return the preferred English for each.
-
-    Returns {ko_expression: preferred_en_expression}
-    e.g. {"클릭합니다": "click", "선택합니다": "select"}
-
-    Only called when enable_consistency_pass=True.
-    Sends a compact summary (KO verb → all EN variants seen) to minimise tokens.
-    """
-    if not translation_pairs:
-        return {}
-
-    # Build a compact summary: KO verb → set of EN translations
-    # Use the same verb patterns as detect_inconsistencies
-    _KO_VERBS = [
-        "클릭합니다", "선택합니다", "설정합니다", "확인합니다",
-        "입력합니다", "표시됩니다", "적용됩니다", "저장합니다",
-        "추가합니다", "삭제합니다", "수정합니다", "완료됩니다",
-        "사용합니다", "실행합니다", "다운로드합니다", "업로드합니다",
-        "활성화됩니다", "비활성화됩니다", "나타납니다", "열립니다",
-        "클릭하세요", "선택하세요", "설정하세요", "확인하세요",
-        "입력하세요", "저장하세요", "추가하세요", "삭제하세요",
-    ]
-    _KO_RE = re.compile("|".join(re.escape(v) for v in _KO_VERBS))
-    _EN_VERB_RE = re.compile(r"^([A-Z][a-z]+)\b")
-
-    from collections import defaultdict, Counter as _Counter
-    ko_to_en: Dict[str, _Counter] = defaultdict(_Counter)
-
-    for ko_raw, en_raw in translation_pairs:
-        ko = re.sub(r"⟦[^⟧]*⟧", "", ko_raw).strip()
-        en = re.sub(r"⟦[^⟧]*⟧", "", en_raw).strip()
-        found = set(_KO_RE.findall(ko))
-        if not found:
-            continue
-        en_sents = re.split(r"(?<=[.!?])\s+", en)
-        m = _EN_VERB_RE.match(en_sents[0].strip()) if en_sents else None
-        verb = m.group(1).lower() if m else None
-        _SKIP = {"the", "a", "an", "this", "these", "your", "you", "if",
-                  "when", "after", "once", "it", "they", "all", "each", "note"}
-        if not verb or verb in _SKIP:
-            continue
-        for kv in found:
-            ko_to_en[kv][verb] += 1
-
-    # Only report expressions with 2+ different EN translations
-    summary_lines = []
-    for ko_verb, en_ctr in ko_to_en.items():
-        if len(en_ctr) < 2:
-            continue
-        variants = ", ".join(f"\"{en}\"{cnt}x" for en, cnt in en_ctr.most_common())
-        summary_lines.append(f"- {ko_verb}: {variants}")
-
-    if not summary_lines:
-        return {}
-
-    summary = "\n".join(summary_lines)
-    prompt = f"""You are a Korean→English localization reviewer for enterprise software documentation.
-
-Below are Korean expressions that were translated INCONSISTENTLY in this document.
-For each, pick the single best English translation to use throughout.
-
-Inconsistent translations found:
-{summary}
-
-Respond with ONLY a JSON object mapping each Korean expression to your preferred English:
-{{"클릭합니다": "click", "선택합니다": "select"}}
-
-Rules:
-- Use lowercase for verbs (imperative base form: "click" not "Click").
-- Prefer Microsoft/Google-style UI terminology.
-- Output ONLY the JSON object. No explanation, no markdown fences."""
-
-    try:
-        resp = client.responses.create(
-            model=model,
-            input=prompt,
-            reasoning={"effort": "low"},
-            text={"verbosity": "low"},
-        )
-        raw = resp.output_text.strip()
-        # Strip markdown fences if present
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
-        result = json.loads(raw)
-        if isinstance(result, dict):
-            return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str)}
-    except Exception:
-        pass  # Non-critical — continue without consistency pass
-
-    return {}
-
-
-def _apply_consistency_to_paragraph(
-    client: OpenAI,
-    translated_text: str,
-    consistency_map: Dict[str, str],
-    model: str = "gpt-5.2",
-) -> str:
-    """
-    Pass 2 of the consistency review (per-paragraph):
-    Rewrite the translated paragraph to use the preferred English expressions.
-    Returns the original text unchanged if no substitution is needed.
-    """
-    if not consistency_map or not translated_text.strip():
-        return translated_text
-
-    # Quick pre-check: does this paragraph need any substitution?
-    # Build set of EN alternatives that should be replaced
-    # (any EN verb that is NOT the preferred one for its KO counterpart)
-    # We check by asking the LLM only if the paragraph contains a non-preferred verb.
-    # Heuristic: try simple string replacement first (fast path)
-    result = translated_text
-    changed = False
-    for ko_verb, preferred_en in consistency_map.items():
-        # Simple check: does the paragraph contain a non-preferred alternative?
-        # We can't perfectly do this without NLP, so we always pass to LLM
-        # but only if the paragraph is likely affected.
-        # Use a quick heuristic: skip paragraphs with no EN verbs at all.
-        pass
-
-    # Send to LLM with a tight, low-cost prompt
-    lines = "\n".join(f"- {ko} → always use \"{en}\"" for ko, en in consistency_map.items())
-    prompt = f"""Rewrite the paragraph below to use ONLY the preferred English translations listed.
-Change ONLY the specific verb/expression listed — do not rephrase anything else.
-If no change is needed, output the paragraph exactly as-is.
-
-Preferred translations:
-{lines}
-
-Preserve all markers (⟦B⟧, ⟦/B⟧, ⟦HL:*⟧, ⟦G#⟧, ⟦D#⟧, ⟦H#⟧) exactly.
-Output ONLY the rewritten paragraph. No explanation.
-
-Paragraph:
-{translated_text}""".strip()
-
-    try:
-        resp = client.responses.create(
-            model=model,
-            input=prompt,
-            reasoning={"effort": "low"},
-            text={"verbosity": "low"},
-        )
-        return resp.output_text.strip() or translated_text
-    except Exception:
-        return translated_text
-
-
-
 def translate_document(
     in_path: str,
     out_path: str,
@@ -1408,8 +1244,6 @@ def translate_document(
     model: str = "gpt-5.2",
     translation_mode: str = "Manual",
     progress_callback: Optional[Callable[[int, int], None]] = None,
-    enable_consistency_pass: bool = False,
-    learned_terms: Optional[List[Dict]] = None,
 ) -> Dict[str, int]:
     reset_token_counters()
 
@@ -1456,14 +1290,11 @@ def translate_document(
             "paragraphs_translated": 0,
         }
 
-    translation_pairs: List[Tuple[str, str]] = []  # (ko_plain, en_plain) for inconsistency detection
-
     for idx, p in enumerate(paras):
         src, drawing_map, hyperlink_map = marked_texts[idx]
 
         if enable_cache and src in cache:
             translated = cache[src]
-            translation_pairs.append((src, translated))
             _write_paragraph(p, translated, drawing_map, hyperlink_map)
             if progress_callback:
                 progress_callback(idx + 1, total_paras)
@@ -1479,7 +1310,6 @@ def translate_document(
             model=model,
             translation_mode=translation_mode,
             style_reference=style_reference,
-            learned_terms=learned_terms,
         )
 
         translated = translated.strip()
@@ -1541,7 +1371,6 @@ def translate_document(
         if enable_cache:
             cache[src] = translated
 
-        translation_pairs.append((src, translated))
         _write_paragraph(p, translated, drawing_map, hyperlink_map)
 
         if progress_callback:
@@ -1549,50 +1378,10 @@ def translate_document(
 
     doc.save(out_path)
 
-    # ── Consistency review pass (optional second pass) ─────────────────────
-    consistency_map: Dict[str, str] = {}
-    if enable_consistency_pass and translation_pairs:
-        # Pass 1: identify inconsistencies and pick preferred EN for each KO
-        if progress_callback:
-            progress_callback(total_paras, total_paras)  # keep bar at 100%
-        consistency_map = _extract_inconsistencies_from_pairs(
-            client, translation_pairs, model=model
-        )
-
-    if consistency_map:
-        # Pass 2: rewrite affected paragraphs
-        doc2 = Document(in_path)   # re-open source to rebuild cleanly
-        doc2_paras: List = []
-        doc2_marked: List = []
-        for p in iter_all_paragraphs(doc2):
-            mk, dm, hm = paragraph_to_marked_text(p)
-            if not contains_korean(mk):
-                continue
-            doc2_paras.append(p)
-            doc2_marked.append((mk, dm, hm))
-
-        for idx2, p2 in enumerate(doc2_paras):
-            src2, dm2, hm2 = doc2_marked[idx2]
-            # Get the first-pass translation from translation_pairs
-            original_translated = next(
-                (en for ko, en in translation_pairs if ko == src2), None
-            )
-            if original_translated is None:
-                continue
-
-            revised = _apply_consistency_to_paragraph(
-                client, original_translated, consistency_map, model=model
-            )
-            _write_paragraph(p2, revised, dm2, hm2)
-
-        doc2.save(out_path)
-
     return {
         "input_tokens": TOTAL_INPUT_TOKENS,
         "cached_tokens": TOTAL_CACHED_INPUT_TOKENS,
         "output_tokens": TOTAL_OUTPUT_TOKENS,
         "total_tokens": TOTAL_TOKENS,
         "paragraphs_translated": total_paras,
-        "translation_pairs": translation_pairs,
-        "consistency_map": consistency_map,
     }
