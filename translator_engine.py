@@ -1,5 +1,6 @@
 import copy
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Iterable, Optional, Callable, Any
 
@@ -1234,6 +1235,173 @@ Text:
     return resp.output_text.strip()
 
 
+def extract_doc_style_guide(
+    client: OpenAI,
+    english_samples: List[str],
+    model: str = "gpt-5.2",
+) -> str:
+    """
+    Pre-pass: compress existing English content into a compact style guide.
+
+    Called once per document before any paragraph translation. The returned
+    string is reused as the `style_reference` for every per-paragraph LLM call,
+    so it must be short (~250 words) — both to save tokens and to maximise
+    prompt-cache hits across batches.
+    """
+    global TOTAL_INPUT_TOKENS, TOTAL_CACHED_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_TOKENS
+
+    if not english_samples:
+        return ""
+
+    samples_text = "\n".join(english_samples)
+
+    prompt = f"""Extract a CONCISE style guide from this product document's existing English content. The guide will be reused to keep newly translated Korean paragraphs consistent with the rest of the document.
+
+Cover only what is distinctive (skip generic English advice):
+- Specific terminology preferences this product uses (e.g. "Save" vs "Apply", "page" vs "screen")
+- Sentence patterns for instructions, headings, and UI labels
+- Formality level / tone (UI text vs manual prose)
+- Capitalization conventions (sentence case, title case, lowercase UI words)
+- Any product-specific phrasing the document repeats
+
+Output as a compact bullet list. No introduction, no examples — bullets only. Maximum 250 words.
+
+Existing English content:
+{samples_text}
+""".strip()
+
+    resp = client.responses.create(
+        model=model,
+        input=prompt,
+        reasoning={"effort": "low"},
+        text={"verbosity": "low"},
+    )
+
+    usage = getattr(resp, "usage", None)
+    if usage:
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        total_tokens = getattr(usage, "total_tokens", 0) or 0
+        input_details = getattr(usage, "input_tokens_details", None)
+        cached_tokens = getattr(input_details, "cached_tokens", 0) or 0
+        TOTAL_INPUT_TOKENS += input_tokens
+        TOTAL_CACHED_INPUT_TOKENS += cached_tokens
+        TOTAL_OUTPUT_TOKENS += output_tokens
+        TOTAL_TOKENS += total_tokens
+
+    return resp.output_text.strip()
+
+
+_QA_HEADER_RE = re.compile(r"\[(\d+)\]")
+
+
+def parse_qa_response(text: str) -> Dict[int, str]:
+    """
+    Parse '[N] revised text' blocks from the QA response.
+
+    Multi-line revisions are supported: each [N] header captures everything up
+    to the next [N] header (or end of text). Returns {} when the LLM signals
+    no changes (output is empty or 'NONE').
+    """
+    revisions: Dict[int, str] = {}
+    if not text:
+        return revisions
+    matches = list(_QA_HEADER_RE.finditer(text))
+    if not matches:
+        return revisions
+    for i, m in enumerate(matches):
+        idx = int(m.group(1))
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[start:end].strip()
+        if body and body.upper() != "NONE":
+            revisions[idx] = body
+    return revisions
+
+
+def qa_check_batch(
+    client: OpenAI,
+    items: List[Tuple[int, str, str]],
+    style_guide: str,
+    glossary_pairs: List[Tuple[str, str]],
+    model: str = "gpt-5.2",
+) -> Dict[int, str]:
+    """
+    Pass-2 consistency check on a batch of translated paragraphs.
+
+    Items are (local_index, korean_source, english_translation). The local
+    index is what the LLM echoes back in `[N]` headers, so callers should map
+    it to their own paragraph identifiers.
+
+    Returns {local_index: revised_translation} containing ONLY items the LLM
+    chose to revise. Items not in the result should keep their pass-1
+    translation unchanged.
+    """
+    global TOTAL_INPUT_TOKENS, TOTAL_CACHED_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_TOKENS
+
+    if not items:
+        return {}
+
+    glossary_block = (
+        "\n".join(f"- {ko} -> {en}" for ko, en in glossary_pairs[:80]) or "(none)"
+    )
+    pairs_block = "\n\n".join(
+        f"[{idx}]\nSOURCE: {src}\nTRANSLATION: {tr}" for idx, src, tr in items
+    )
+
+    prompt = f"""You are a translation QA reviewer. Each numbered pair below contains a Korean SOURCE and its English TRANSLATION produced in a first pass.
+
+Revise a translation ONLY when it has a clear problem:
+- Terminology inconsistent with the document's existing English style
+- Sentence pattern that does not match the document's tone
+- Awkward, unnatural, or overly literal English
+- Missing or duplicated marker, or marker merged with a word
+- Glossary term not preserved (see glossary list below)
+
+Do NOT revise translations that are already acceptable. Do NOT make stylistic preference changes that are not grounded in the style guide. Do NOT shorten or expand for taste. When in doubt, leave it alone.
+
+Strict rules:
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦HL:colour⟧, ⟦/HL⟧, ⟦H#⟧, ⟦/H#⟧, ⟦D#⟧.
+- Glossary translations listed below are mandatory — keep those exact English words.
+- Do NOT translate or alter any English already present.
+
+Output format:
+- For each item that needs revision: a header line `[N]` followed by the revised translation. Nothing else for that item.
+- If nothing needs revision, output exactly: NONE
+- Do NOT add explanations, comments, or numbering of any other kind.
+
+Style guide:
+{style_guide or "(no style guide available)"}
+
+Glossary (mandatory translations):
+{glossary_block}
+
+Pairs to review:
+{pairs_block}
+""".strip()
+
+    resp = client.responses.create(
+        model=model,
+        input=prompt,
+        reasoning={"effort": "low"},
+        text={"verbosity": "low"},
+    )
+
+    usage = getattr(resp, "usage", None)
+    if usage:
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        total_tokens = getattr(usage, "total_tokens", 0) or 0
+        input_details = getattr(usage, "input_tokens_details", None)
+        cached_tokens = getattr(input_details, "cached_tokens", 0) or 0
+        TOTAL_INPUT_TOKENS += input_tokens
+        TOTAL_CACHED_INPUT_TOKENS += cached_tokens
+        TOTAL_OUTPUT_TOKENS += output_tokens
+        TOTAL_TOKENS += total_tokens
+
+    return parse_qa_response(resp.output_text)
+
+
 def translate_document(
     in_path: str,
     out_path: str,
@@ -1241,6 +1409,8 @@ def translate_document(
     pattern_rows: List[dict],
     api_key: str,
     enable_cache: bool = True,
+    enable_qa: bool = True,
+    qa_batch_size: int = 8,
     model: str = "gpt-5.2",
     translation_mode: str = "Manual",
     progress_callback: Optional[Callable[[int, int], None]] = None,
@@ -1249,27 +1419,35 @@ def translate_document(
 
     glossary_entries = build_glossary_entries_from_rows(glossary_rows)
     patterns = build_pattern_pairs_from_rows(pattern_rows)
+    glossary_pairs_for_qa = [(e.ko, e.en) for e in glossary_entries]
 
     client = OpenAI(api_key=api_key)
     doc = Document(in_path)
     cache: Dict[str, str] = {}
 
-    # ── 문서 내 기존 영문 단락 추출 (톤앤매너 참조용) ─────────────────────
+    # ── 문서 내 기존 영문 단락 수집 ────────────────────────────────────
+    # Pre-pass(extract_doc_style_guide)에서 한 번만 사용되므로 캡을 넉넉히
+    # 잡아도 호출당 비용은 고정. v2.0→v2.1처럼 영문이 풍부한 문서에서
+    # 가이드 품질을 끌어올리기 위함.
     english_samples: List[str] = []
     for p in iter_all_paragraphs(doc):
         text = p.text.strip()
-        # 한국어 없고, 충분히 긴 (> 15자) 영문 단락만 수집
         if text and not contains_korean(text) and len(text) > 15:
             english_samples.append(text)
-        if sum(len(s) for s in english_samples) >= 600:
+        if sum(len(s) for s in english_samples) >= 3000:
             break
 
-    style_reference = ""
+    # ── Pre-pass: doc-specific style guide 추출 (LLM 1회 호출) ─────────
+    style_guide = ""
     if english_samples:
-        style_reference = "\n".join(f"  {s}" for s in english_samples[:6])
+        try:
+            style_guide = extract_doc_style_guide(client, english_samples, model=model)
+        except Exception:
+            # 가이드 추출 실패는 치명적이지 않음 — 가이드 없이 진행
+            style_guide = ""
 
     paras: List = []
-    marked_texts: List[str] = []
+    marked_texts: List = []
 
     for p in iter_all_paragraphs(doc):
         marked_ko, drawing_map, hyperlink_map = paragraph_to_marked_text(p)
@@ -1283,98 +1461,176 @@ def translate_document(
     if total_paras == 0:
         doc.save(out_path)
         return {
-            "input_tokens": 0,
-            "cached_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
+            "input_tokens": TOTAL_INPUT_TOKENS,
+            "cached_tokens": TOTAL_CACHED_INPUT_TOKENS,
+            "output_tokens": TOTAL_OUTPUT_TOKENS,
+            "total_tokens": TOTAL_TOKENS,
             "paragraphs_translated": 0,
         }
+
+    # ── 진행률 총량 사전 계산 ─────────────────────────────────────────
+    # Pass 2(QA) 대상은 "src 첫 등장이고 heading이 아닌" 단락. Pass 1과
+    # 동일한 필터링 규칙을 미리 돌려서 Pass 1/2 합산 진행률을 확정한다.
+    qa_estimated = 0
+    if enable_qa:
+        seen_for_estimate = set()
+        for idx_e, (src_e, _, _) in enumerate(marked_texts):
+            if src_e in seen_for_estimate:
+                continue
+            seen_for_estimate.add(src_e)
+            if is_heading_paragraph(paras[idx_e]) or looks_like_heading_text(src_e):
+                continue
+            qa_estimated += 1
+    total_work = total_paras + qa_estimated
+
+    # ── Pass 1: 번역 (XML 쓰기는 미루고 메모리에 누적) ─────────────────
+    pass1_results: List[Dict] = []
 
     for idx, p in enumerate(paras):
         src, drawing_map, hyperlink_map = marked_texts[idx]
 
         if enable_cache and src in cache:
             translated = cache[src]
-            _write_paragraph(p, translated, drawing_map, hyperlink_map)
-            if progress_callback:
-                progress_callback(idx + 1, total_paras)
-            continue
+        else:
+            gl_pre, gl_map = preprocess_with_glossary_placeholders(src, glossary_entries)
+            selected_pattern_examples = select_relevant_patterns(gl_pre, patterns)
 
-        gl_pre, gl_map = preprocess_with_glossary_placeholders(src, glossary_entries)
-        selected_pattern_examples = select_relevant_patterns(gl_pre, patterns)
+            translated = translate_paragraph_with_patterns(
+                client=client,
+                source_text=gl_pre,
+                pattern_examples=selected_pattern_examples,
+                model=model,
+                translation_mode=translation_mode,
+                style_reference=style_guide,
+            )
 
-        translated = translate_paragraph_with_patterns(
-            client=client,
-            source_text=gl_pre,
-            pattern_examples=selected_pattern_examples,
-            model=model,
-            translation_mode=translation_mode,
-            style_reference=style_reference,
-        )
+            translated = translated.strip()
 
-        translated = translated.strip()
-
-        # 1) marker 복구
-        translated = repair_bold_markers(translated)
-        translated = repair_hl_markers(translated)
-
-        # 1-b) bold 경계 공백 제거 (LLM이 ⟦B⟧ Rule ⟦/B⟧처럼 마커 안에 공백을 넣는 경우)
-        translated = normalize_bold_spaces(translated)
-
-        # 1-c) LLM이 HL 마커를 누락한 경우 폴백 처리
-        translated = apply_highlight_fallback(translated, src)
-
-        # 2) glossary 복원 (위치 기반 대소문자 적용)
-        translated = restore_glossary_placeholders(translated, gl_map or {})
-
-        # 3) colon label normalize
-        translated = normalize_colon_label_line(translated)
-
-        # 4) 남은 한국어 fallback 번역
-        if contains_korean(translated):
-            translated = translate_remaining_korean(client, translated, model=model)
+            # 1) marker 복구
             translated = repair_bold_markers(translated)
             translated = repair_hl_markers(translated)
+
+            # 1-b) bold 경계 공백 제거
             translated = normalize_bold_spaces(translated)
+
+            # 1-c) HL 마커 누락 폴백
             translated = apply_highlight_fallback(translated, src)
-            # fallback 번역 후에도 glossary 용어가 한국어로 남아 있을 수 있으므로 재복원
+
+            # 2) glossary 복원 (위치 기반 대소문자)
             translated = restore_glossary_placeholders(translated, gl_map or {})
+
+            # 3) colon label normalize
             translated = normalize_colon_label_line(translated)
 
-        # 5) heading 판단: 스타일 기반 + 소스 텍스트 기반 (번역문은 사용하지 않음)
-        # looks_like_heading_text는 한국어 소스에서는 False를 반환하므로
-        # 실제 Heading 스타일이 없는 단락은 heading으로 처리하지 않음.
-        is_heading = (
-            is_heading_paragraph(p)
-            or looks_like_heading_text(src)
-        )
+            # 4) 남은 한국어 fallback 번역
+            if contains_korean(translated):
+                translated = translate_remaining_korean(client, translated, model=model)
+                translated = repair_bold_markers(translated)
+                translated = repair_hl_markers(translated)
+                translated = normalize_bold_spaces(translated)
+                translated = apply_highlight_fallback(translated, src)
+                translated = restore_glossary_placeholders(translated, gl_map or {})
+                translated = normalize_colon_label_line(translated)
 
-        # 6) heading / 일반 문단 후처리
-        if is_heading:
-            translated = normalize_heading_text(translated)
-            translated = normalize_ui_label_text(translated)
-            translated = _cap_first_alpha(translated)
-            translated = translated.rstrip()
-            if translated.endswith("."):
-                translated = translated[:-1]
-        else:
-            translated = normalize_ui_in_bold_segments(translated)
-            # Cap first alpha in the whole sentence (catches leading bold terms)
-            translated = _cap_first_alpha(translated)
+            # 5) heading 판단
+            is_heading = (
+                is_heading_paragraph(p)
+                or looks_like_heading_text(src)
+            )
 
-        # 7) 마지막 품질 보정
-        translated = fix_indefinite_articles(translated)
-        translated = capitalize_bullet_lines(translated)
-        translated = restore_sentence_period(translated, src)
-        translated = normalize_paragraph_breaks(translated)
+            # 6) heading / 일반 문단 후처리
+            if is_heading:
+                translated = normalize_heading_text(translated)
+                translated = normalize_ui_label_text(translated)
+                translated = _cap_first_alpha(translated)
+                translated = translated.rstrip()
+                if translated.endswith("."):
+                    translated = translated[:-1]
+            else:
+                translated = normalize_ui_in_bold_segments(translated)
+                translated = _cap_first_alpha(translated)
 
-        if enable_cache:
-            cache[src] = translated
+            # 7) 마지막 품질 보정
+            translated = fix_indefinite_articles(translated)
+            translated = capitalize_bullet_lines(translated)
+            translated = restore_sentence_period(translated, src)
+            translated = normalize_paragraph_breaks(translated)
 
-        _write_paragraph(p, translated, drawing_map, hyperlink_map)
+            if enable_cache:
+                cache[src] = translated
+
+        pass1_results.append({
+            "p": p,
+            "src": src,
+            "translated": translated,
+            "drawing_map": drawing_map,
+            "hyperlink_map": hyperlink_map,
+        })
 
         if progress_callback:
-            progress_callback(idx + 1, total_paras)
+            progress_callback(idx + 1, total_work)
+
+    # ── Pass 2: batch QA (일관성 검사) ───────────────────────────────
+    # src별 그룹핑으로 동일 원문은 한 번만 QA → 결과를 모든 사본에 적용.
+    if enable_qa:
+        src_groups: Dict[str, List[Dict]] = defaultdict(list)
+        for r in pass1_results:
+            src_groups[r["src"]].append(r)
+
+        qa_items: List[Dict] = []
+        for src, group in src_groups.items():
+            rep = group[0]
+            if is_heading_paragraph(rep["p"]) or looks_like_heading_text(src):
+                continue
+            qa_items.append({
+                "src": src,
+                "translated": rep["translated"],
+                "group": group,
+            })
+
+        qa_done = 0
+        for batch_start in range(0, len(qa_items), qa_batch_size):
+            batch = qa_items[batch_start:batch_start + qa_batch_size]
+            batch_input = [
+                (i, item["src"], item["translated"])
+                for i, item in enumerate(batch)
+            ]
+
+            try:
+                revisions = qa_check_batch(
+                    client=client,
+                    items=batch_input,
+                    style_guide=style_guide,
+                    glossary_pairs=glossary_pairs_for_qa,
+                    model=model,
+                )
+            except Exception:
+                # QA 실패 시 batch 전체 skip — Pass 1 결과 유지
+                revisions = {}
+
+            for i, item in enumerate(batch):
+                if i not in revisions:
+                    continue
+                revised = revisions[i].strip()
+                if not revised:
+                    continue  # 안전장치: 빈 응답으로 덮어쓰지 않음
+                # Pass 2 응답에도 동일한 marker 후처리를 적용
+                revised = repair_bold_markers(revised)
+                revised = repair_hl_markers(revised)
+                revised = normalize_bold_spaces(revised)
+                revised = apply_highlight_fallback(revised, item["src"])
+                for r in item["group"]:
+                    r["translated"] = revised
+                    if enable_cache:
+                        cache[item["src"]] = revised
+
+            qa_done += len(batch)
+            if progress_callback:
+                progress_callback(total_paras + qa_done, total_work)
+
+    # ── Final: 모든 결과를 한 번에 XML로 쓰기 ─────────────────────────
+    for r in pass1_results:
+        _write_paragraph(r["p"], r["translated"], r["drawing_map"], r["hyperlink_map"])
 
     doc.save(out_path)
 

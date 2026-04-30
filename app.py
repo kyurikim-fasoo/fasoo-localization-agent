@@ -222,6 +222,7 @@ def init_session_state():
         "selected_product": None,
         "translation_mode": "매뉴얼",
         "enable_cache": True,
+        "enable_qa": True,
         "glossary_df": None,
         "pattern_df": prepare_pattern_editor_df(None),   # ← 전역 중복 초기화 제거
         "base_glossary_df": None,
@@ -247,8 +248,9 @@ def reset_translation_result():
 # UI helpers
 # ─────────────────────────────────────────────
 
-def render_summary_pills(product: str, mode: str, cache: bool):
+def render_summary_pills(product: str, mode: str, cache: bool, qa: bool = True):
     cache_text = "사용" if cache else "사용 안 함"
+    qa_text = "사용" if qa else "사용 안 함"
     st.markdown(
         f"""
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin: 0 0 16px 0;">
@@ -263,6 +265,10 @@ def render_summary_pills(product: str, mode: str, cache: bool):
             <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px;
                          background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
                 <strong>캐시</strong> {cache_text}
+            </span>
+            <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px;
+                         background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
+                <strong>QA</strong> {qa_text}
             </span>
         </div>
         """,
@@ -378,12 +384,18 @@ if st.session_state.step == 1:
         value=st.session_state.enable_cache,
     )
 
+    enable_qa = st.checkbox(
+        "2차 일관성 검사(QA)를 수행해 문서 내 영문 톤·용어와 일치하도록 보정합니다.",
+        value=st.session_state.enable_qa,
+    )
+
     st.markdown("---")
 
     if st.button("다음", use_container_width=True):
         st.session_state.selected_product = selected_product
         st.session_state.translation_mode = translation_mode
         st.session_state.enable_cache = enable_cache
+        st.session_state.enable_qa = enable_qa
 
         glossary_df, pattern_df = build_product_tables(selected_product, config)
 
@@ -411,6 +423,7 @@ elif st.session_state.step == 2:
         st.session_state.selected_product,
         st.session_state.translation_mode,
         st.session_state.enable_cache,
+        st.session_state.enable_qa,
     )
 
     tab1, tab2 = st.tabs(["용어", "패턴"])
@@ -541,6 +554,7 @@ elif st.session_state.step == 3:
         st.session_state.selected_product,
         st.session_state.translation_mode,
         st.session_state.enable_cache,
+        st.session_state.enable_qa,
     )
 
     glossary_rows = (
@@ -591,10 +605,12 @@ elif st.session_state.step == 3:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
+            label = "번역/QA 진행 중" if st.session_state.enable_qa else "번역 중"
+
             def update_progress(done, total):
                 progress = int((done / total) * 100) if total else 0
                 progress_bar.progress(progress)
-                status_text.text(f"번역 중... {done}/{total} 문단")
+                status_text.text(f"{label}... {done}/{total}")
 
             try:
                 result = translate_document(
@@ -604,6 +620,7 @@ elif st.session_state.step == 3:
                     pattern_rows=pattern_rows,
                     api_key=OPENAI_API_KEY,
                     enable_cache=st.session_state.enable_cache,
+                    enable_qa=st.session_state.enable_qa,
                     translation_mode=st.session_state.translation_mode,
                     progress_callback=update_progress,
                 )
