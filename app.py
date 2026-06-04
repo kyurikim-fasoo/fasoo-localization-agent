@@ -51,8 +51,26 @@ def read_tsv_flexible(path: Path) -> pd.DataFrame:
     raise RuntimeError(f"Failed to read TSV: {path}. Last error: {last_error}")
 
 
-def read_uploaded_tsv_flexible(uploaded_file) -> pd.DataFrame:
+def read_uploaded_table_flexible(uploaded_file) -> pd.DataFrame:
+    """
+    Read an uploaded glossary/pattern table from xlsx/xls or tsv/txt.
+
+    Detection order: file extension first (most reliable for Excel), then
+    fall back to text decoding for everything else. Encoding probing covers
+    Korean/Windows defaults that users commonly save TSV as.
+    """
+    name = (uploaded_file.name or "").lower()
     raw = uploaded_file.getvalue()
+
+    # Excel: detect by extension. openpyxl handles .xlsx; .xls needs xlrd
+    # but pandas will surface a clear error if xlrd is missing.
+    if name.endswith((".xlsx", ".xlsm", ".xls")):
+        from io import BytesIO
+        df = pd.read_excel(BytesIO(raw))
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+
+    # TSV / TXT: tab-separated with flexible encoding
     encodings_to_try = ["utf-16", "utf-8-sig", "utf-8", "cp949", "euc-kr"]
     last_error = None
     for enc in encodings_to_try:
@@ -63,7 +81,7 @@ def read_uploaded_tsv_flexible(uploaded_file) -> pd.DataFrame:
             return df
         except Exception as e:
             last_error = e
-    raise RuntimeError(f"Failed to read uploaded TSV: {uploaded_file.name}. Last error: {last_error}")
+    raise RuntimeError(f"Failed to read uploaded file: {uploaded_file.name}. Last error: {last_error}")
 
 
 def save_uploaded_file(uploaded_file, save_dir: Path) -> Path:
@@ -189,20 +207,89 @@ def build_product_tables(product_name: str, config: dict):
     return glossary_df, pattern_df
 
 
-def merge_glossary_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
-    uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
-    uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"])
-    uploaded_df["File"] = uploaded_file.name
+def _append_df_as_glossary(current_df: pd.DataFrame, new_df: pd.DataFrame, source_name: str) -> pd.DataFrame:
+    uploaded_df = _ensure_columns(new_df.copy(), ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"])
+    uploaded_df["File"] = source_name
     uploaded_df = uploaded_df[["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"]]
     return prepare_glossary_editor_df(pd.concat([current_df, uploaded_df], ignore_index=True))
 
 
-def merge_pattern_upload(current_df: pd.DataFrame, uploaded_file) -> pd.DataFrame:
-    uploaded_df = read_uploaded_tsv_flexible(uploaded_file)
-    uploaded_df = _ensure_columns(uploaded_df, ["KO", "EN", "Note"])
-    uploaded_df["File"] = uploaded_file.name
+def _append_df_as_pattern(current_df: pd.DataFrame, new_df: pd.DataFrame, source_name: str) -> pd.DataFrame:
+    uploaded_df = _ensure_columns(new_df.copy(), ["KO", "EN", "Note"])
+    uploaded_df["File"] = source_name
     uploaded_df = uploaded_df[["KO", "EN", "File", "Note"]]
     return prepare_pattern_editor_df(pd.concat([current_df, uploaded_df], ignore_index=True))
+
+
+def _classify_table(sheet_name: str, df: pd.DataFrame) -> str:
+    """
+    Decide whether a table is a glossary or a pattern table.
+
+    Order of evidence:
+    1. Sheet/file name substring match (case-insensitive) — explicit user intent.
+    2. Column presence — DNT or Case-sensitive uniquely identify glossary tables.
+    3. Default to pattern when only KO/EN are present.
+
+    Returns "glossary" | "pattern" | "unknown".
+    """
+    lname = (sheet_name or "").lower()
+    if any(k in lname for k in ["glossary", "용어", "사전"]):
+        return "glossary"
+    if any(k in lname for k in ["pattern", "패턴"]):
+        return "pattern"
+    cols = {str(c).strip().lower() for c in df.columns}
+    if "dnt" in cols or "case-sensitive" in cols:
+        return "glossary"
+    if "ko" in cols and "en" in cols:
+        return "pattern"
+    return "unknown"
+
+
+def route_uploaded_workbook(
+    uploaded_file,
+    glossary_df: pd.DataFrame,
+    pattern_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[str, str]]]:
+    """
+    Route an uploaded Excel workbook (or TSV/TXT) into glossary and/or pattern tables.
+
+    Excel workbooks are processed sheet-by-sheet; each sheet is classified via
+    [_classify_table] and appended to the matching dataframe. TSV/TXT files
+    contain a single table and are classified by column presence.
+
+    Returns (new_glossary_df, new_pattern_df, applied) where `applied` is a list
+    of (target_tab, source_label) tuples for status display.
+    """
+    name = (uploaded_file.name or "").lower()
+    raw = uploaded_file.getvalue()
+    applied: list[tuple[str, str]] = []
+
+    if name.endswith((".xlsx", ".xlsm", ".xls")):
+        from io import BytesIO
+        sheets = pd.read_excel(BytesIO(raw), sheet_name=None)
+        for sheet_name, sheet_df in sheets.items():
+            sheet_df.columns = [str(c).strip() for c in sheet_df.columns]
+            target = _classify_table(sheet_name, sheet_df)
+            src_label = f"{uploaded_file.name} [{sheet_name}]"
+            if target == "glossary":
+                glossary_df = _append_df_as_glossary(glossary_df, sheet_df, src_label)
+                applied.append(("용어", sheet_name))
+            elif target == "pattern":
+                pattern_df = _append_df_as_pattern(pattern_df, sheet_df, src_label)
+                applied.append(("패턴", sheet_name))
+        return glossary_df, pattern_df, applied
+
+    # TSV / TXT
+    single_df = read_uploaded_table_flexible(uploaded_file)
+    target = _classify_table("", single_df)
+    if target == "glossary":
+        glossary_df = _append_df_as_glossary(glossary_df, single_df, uploaded_file.name)
+        applied.append(("용어", uploaded_file.name))
+    else:
+        # 컬럼만으로 pattern/unknown인 경우 모두 pattern으로 처리
+        pattern_df = _append_df_as_pattern(pattern_df, single_df, uploaded_file.name)
+        applied.append(("패턴", uploaded_file.name))
+    return glossary_df, pattern_df, applied
 
 
 def make_default_output_filename(product: str, source_name: str) -> str:
@@ -426,28 +513,43 @@ elif st.session_state.step == 2:
         st.session_state.enable_qa,
     )
 
+    # ── 통합 파일 업로드 (Excel 다중 시트 자동 라우팅) ─────────────────
+    with st.expander("파일 업로드 (Excel 다중 시트 / TSV)", expanded=False):
+        st.caption(
+            "Excel 파일을 올리면 시트별로 용어/패턴 탭에 자동 분배됩니다. "
+            "시트명에 'glossary'/'용어' 또는 'pattern'/'패턴'을 포함하거나, "
+            "컬럼에 'DNT'/'Case-sensitive'가 있으면 용어로 인식합니다."
+        )
+        uploaded_workbook = st.file_uploader(
+            "파일 업로드",
+            type=["xlsx", "xlsm", "xls", "tsv", "txt"],
+            key="uploaded_workbook",
+            label_visibility="collapsed",
+        )
+        if uploaded_workbook is not None:
+            try:
+                (
+                    st.session_state.glossary_df,
+                    st.session_state.pattern_df,
+                    applied,
+                ) = route_uploaded_workbook(
+                    uploaded_workbook,
+                    st.session_state.glossary_df,
+                    st.session_state.pattern_df,
+                )
+                if applied:
+                    lines = "\n".join(f"- **{target}** ← `{label}`" for target, label in applied)
+                    st.success(f"{uploaded_workbook.name} 적용 완료:\n{lines}")
+                else:
+                    st.warning("적용된 시트가 없습니다. 시트명 또는 컬럼을 확인하세요.")
+            except Exception as e:
+                st.error(f"업로드 오류: {e}")
+
     tab1, tab2 = st.tabs(["용어", "패턴"])
 
     # ── 용어 탭 ──────────────────────────────
     with tab1:
         st.caption("선택한 용어는 항상 동일하게 번역합니다.")
-
-        with st.expander("TSV 업로드", expanded=False):
-            uploaded_glossary_tsv = st.file_uploader(
-                "TSV 업로드",
-                type=["tsv"],
-                key="uploaded_glossary_tsv",
-                label_visibility="collapsed",
-            )
-            if uploaded_glossary_tsv is not None:
-                try:
-                    st.session_state.glossary_df = merge_glossary_upload(
-                        st.session_state.glossary_df,
-                        uploaded_glossary_tsv,
-                    )
-                    st.success(f"{uploaded_glossary_tsv.name}을(를) 용어에 추가했습니다.")
-                except Exception as e:
-                    st.error(f"업로드 오류: {e}")
 
         _, col_reset = st.columns([6, 2])
         with col_reset:
@@ -482,23 +584,6 @@ elif st.session_state.step == 2:
     # ── 패턴 탭 ──────────────────────────────
     with tab2:
         st.caption("비슷한 패턴이 나오면 아래를 참고해 번역합니다.")
-
-        with st.expander("TSV 업로드", expanded=False):
-            uploaded_pattern_tsv = st.file_uploader(
-                "TSV 업로드",
-                type=["tsv"],
-                key="uploaded_pattern_tsv",
-                label_visibility="collapsed",
-            )
-            if uploaded_pattern_tsv is not None:
-                try:
-                    st.session_state.pattern_df = merge_pattern_upload(
-                        st.session_state.pattern_df,
-                        uploaded_pattern_tsv,
-                    )
-                    st.success(f"{uploaded_pattern_tsv.name}을(를) 패턴에 추가했습니다.")
-                except Exception as e:
-                    st.error(f"업로드 오류: {e}")
 
         _, col_reset = st.columns([6, 2])
         with col_reset:

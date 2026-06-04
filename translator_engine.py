@@ -313,6 +313,30 @@ def restore_glossary_placeholders(
     return out.strip()
 
 
+def enforce_case_sensitive_glossary(
+    text: str,
+    glossary_entries: List[GlossaryEntry],
+) -> str:
+    """
+    Restore the exact casing of DNT and case-sensitive glossary EN values.
+
+    Some downstream steps — heading sentence-case ([_sentence_case_preserving_markers]),
+    QA revisions, generic capitalisation helpers — can drift the casing of
+    product names like 'Wrapsody eCo' to 'Wrapsody eco'. This function does a
+    case-insensitive sweep and rewrites every occurrence with the stored EN
+    value, so the user's case_sensitive=True flag actually holds end-to-end.
+    Word boundaries are used to avoid partial matches inside other words.
+    """
+    for entry in glossary_entries:
+        if not (entry.dnt or entry.case_sensitive):
+            continue
+        if not entry.en:
+            continue
+        pattern = re.compile(rf"\b{re.escape(entry.en)}\b", re.IGNORECASE)
+        text = pattern.sub(entry.en, text)
+    return text
+
+
 def _lxml_all_runs(p_elem):
     """Return every w:r in the paragraph in document order,
     including those nested inside w:hyperlink."""
@@ -1150,7 +1174,7 @@ def translate_paragraph_with_patterns(
     )
 
     prompt = f"""
-Translate Korean to natural, professional English.
+Translate Korean to natural, professional English. Produce a draft, then revise it so a native English speaker would not flag awkwardness, grammar errors, or literal-translation tells.
 
 Rules:
 - Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧.
@@ -1165,6 +1189,21 @@ Rules:
 - Use the pattern examples only as reference guidance.
 - Do not copy irrelevant examples.
 - Avoid repetition and awkward literal wording.
+- Grammar: maintain subject-verb agreement and correct singular/plural agreement.
+  Korean does not always mark plurality, but English does. Prefer "all users participating",
+  "individual users", "authorized users" over "all user", "individual user", "authorized user".
+- Subjects: avoid bare generic singular subjects without articles. "Can user prevent..." is
+  ungrammatical — use "Can users prevent..." or supply a concrete subject like
+  "Can administrators prevent users from...".
+- Naturalize literal renderings into idiomatic English. For example:
+    "신개념 협업 플랫폼" → "next-generation collaboration platform" (NOT "new-concept platform")
+    "활용 가이드"        → "user guide" or "usage guide" (NOT "utilization guide")
+  After your initial draft, re-read each sentence and replace any phrasing that reads as
+  Korean-influenced literal English with the way a native speaker would actually write it.
+- Spell English words correctly. NEVER transliterate Korean phonetic spellings.
+  "프로그램" is "program" (never "logram", "pulogeurem", etc.). Treat any non-word
+  English output as a serious error and self-correct.
+- Articles: use "a/an/the" appropriately. Korean has no articles, so do not omit them.
 - Do not force title case.
 - For headings, concise phrase-style English is preferred.
 - NEVER merge markers with words. "⟦B⟧rule" is correct; "⟦Brule" is invalid.
@@ -1354,16 +1393,24 @@ def qa_check_batch(
 Revise a translation ONLY when it has a clear problem:
 - Terminology inconsistent with the document's existing English style
 - Sentence pattern that does not match the document's tone
-- Awkward, unnatural, or overly literal English
+- Awkward, unnatural, or overly literal English (Korean-influenced phrasing)
+  e.g. "new-concept platform" → "next-generation platform", "utilization guide" → "user guide"
+- Subject-verb or singular/plural agreement error
+  e.g. "all user" → "all users", "individual user" → "individual users", "authorized user" → "authorized users"
+- Awkward bare generic singular subject
+  e.g. "Can user prevent users" → "Can users prevent" or "Can administrators prevent users"
+- Missing article where English requires one (Korean has no articles, so the draft may omit them)
+- Misspelling, typo, or non-word — especially Korean phonetic transliteration
+  e.g. "logram" → "program", any nonsense English output is wrong
 - Missing or duplicated marker, or marker merged with a word
-- Glossary term not preserved (see glossary list below)
+- Glossary term not preserved (see glossary list below) — including the exact casing of case-sensitive terms
 
 Do NOT revise translations that are already acceptable. Do NOT make stylistic preference changes that are not grounded in the style guide. Do NOT shorten or expand for taste. When in doubt, leave it alone.
 
 Strict rules:
 - Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦HL:colour⟧, ⟦/HL⟧, ⟦H#⟧, ⟦/H#⟧, ⟦D#⟧.
-- Glossary translations listed below are mandatory — keep those exact English words.
-- Do NOT translate or alter any English already present.
+- Glossary translations listed below are mandatory — keep those exact English words with their exact casing.
+- Do NOT translate or alter any English already present (other than the specific problems above).
 
 Output format:
 - For each item that needs revision: a header line `[N]` followed by the revised translation. Nothing else for that item.
@@ -1556,6 +1603,11 @@ def translate_document(
             translated = restore_sentence_period(translated, src)
             translated = normalize_paragraph_breaks(translated)
 
+            # 8) case-sensitive/DNT glossary 용어의 정확한 대소문자 복원
+            #    (heading sentence-case, _cap_first_alpha 등이 'Wrapsody eCo'를
+            #    'Wrapsody eco'로 망가뜨리는 문제를 잡는다)
+            translated = enforce_case_sensitive_glossary(translated, glossary_entries)
+
             if enable_cache:
                 cache[src] = translated
 
@@ -1619,6 +1671,8 @@ def translate_document(
                 revised = repair_hl_markers(revised)
                 revised = normalize_bold_spaces(revised)
                 revised = apply_highlight_fallback(revised, item["src"])
+                # QA가 case-sensitive 용어를 흐트러뜨리는 경우도 복원
+                revised = enforce_case_sensitive_glossary(revised, glossary_entries)
                 for r in item["group"]:
                     r["translated"] = revised
                     if enable_cache:
