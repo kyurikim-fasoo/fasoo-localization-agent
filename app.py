@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from io import StringIO
 from pathlib import Path
 
@@ -36,19 +37,6 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 def load_product_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def read_tsv_flexible(path: Path) -> pd.DataFrame:
-    encodings_to_try = ["utf-16", "utf-8-sig", "utf-8", "cp949", "euc-kr"]
-    last_error = None
-    for enc in encodings_to_try:
-        try:
-            df = pd.read_csv(path, sep="\t", encoding=enc)
-            df.columns = [str(c).strip() for c in df.columns]
-            return df
-        except Exception as e:
-            last_error = e
-    raise RuntimeError(f"Failed to read TSV: {path}. Last error: {last_error}")
 
 
 def read_uploaded_table_flexible(uploaded_file) -> pd.DataFrame:
@@ -162,48 +150,19 @@ def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def load_glossary_table(paths: list[str]) -> pd.DataFrame:
-    frames = []
-    for rel_path in paths:
-        path = BASE_DIR / rel_path
-        if not path.exists():
-            continue
-        df = read_tsv_flexible(path)
-        df = _ensure_columns(df, ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"])
-        df["File"] = path.name
-        df = df[["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"]]
-        frames.append(df)
-
-    if not frames:
-        return prepare_glossary_editor_df(
-            pd.DataFrame(columns=["KO", "EN", "File", "Product", "DNT", "Case-sensitive"])
-        )
-
-    return prepare_glossary_editor_df(pd.concat(frames, ignore_index=True))
-
-
-def load_pattern_table(paths: list[str]) -> pd.DataFrame:
-    frames = []
-    for rel_path in paths:
-        path = BASE_DIR / rel_path
-        if not path.exists():
-            continue
-        df = read_tsv_flexible(path)
-        df = _ensure_columns(df, ["KO", "EN", "Note"])
-        df["File"] = path.name
-        df = df[["KO", "EN", "File", "Note"]]
-        frames.append(df)
-
-    if not frames:
-        return prepare_pattern_editor_df(pd.DataFrame(columns=["KO", "EN", "File", "Note"]))
-
-    return prepare_pattern_editor_df(pd.concat(frames, ignore_index=True))
-
-
 def build_product_tables(product_name: str, config: dict):
-    product_info = config[product_name]
-    glossary_df = load_glossary_table(product_info.get("default_glossaries", []))
-    pattern_df = load_pattern_table(product_info.get("default_patterns", []))
+    """
+    Return empty glossary/pattern tables. Default TSV loading was removed —
+    users must upload their own Excel/TSV in Step 2. `product_name` is kept in
+    the signature so callers stay product-aware, but no longer triggers any
+    file IO here.
+    """
+    glossary_df = prepare_glossary_editor_df(
+        pd.DataFrame(columns=["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"])
+    )
+    pattern_df = prepare_pattern_editor_df(
+        pd.DataFrame(columns=["KO", "EN", "File", "Note"])
+    )
     return glossary_df, pattern_df
 
 
@@ -219,6 +178,32 @@ def _append_df_as_pattern(current_df: pd.DataFrame, new_df: pd.DataFrame, source
     uploaded_df["File"] = source_name
     uploaded_df = uploaded_df[["KO", "EN", "File", "Note"]]
     return prepare_pattern_editor_df(pd.concat([current_df, uploaded_df], ignore_index=True))
+
+
+def _filter_by_product(df: pd.DataFrame, product: str) -> pd.DataFrame:
+    """
+    Keep rows whose Product cell matches the selected product or 'all'.
+
+    - No `Product` column → return df untouched (e.g. pattern tables that don't carry product info).
+    - Comma/semicolon/slash-separated lists are split, so a cell like "fss, wrapsody"
+      matches when either 'fss' or 'wrapsody' is selected.
+    - Blank cells are excluded — callers wanting blanks to count as 'all'
+      should pre-fill the column.
+    """
+    if df is None or df.empty or "Product" not in df.columns:
+        return df
+    p = (product or "").strip().lower()
+    if not p:
+        return df
+
+    def keep(val):
+        s = str(val).strip().lower()
+        if not s or s == "nan":
+            return False
+        parts = re.split(r"[,;/]\s*", s)
+        return any(x.strip() in ("all", p) for x in parts)
+
+    return df[df["Product"].apply(keep)].copy()
 
 
 def _classify_table(sheet_name: str, df: pd.DataFrame) -> str:
@@ -249,7 +234,8 @@ def route_uploaded_workbook(
     uploaded_file,
     glossary_df: pd.DataFrame,
     pattern_df: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[str, str]]]:
+    product_filter: str = "",
+) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[str, str, int]]]:
     """
     Route an uploaded Excel workbook (or TSV/TXT) into glossary and/or pattern tables.
 
@@ -257,12 +243,16 @@ def route_uploaded_workbook(
     [_classify_table] and appended to the matching dataframe. TSV/TXT files
     contain a single table and are classified by column presence.
 
+    When `product_filter` is set, rows are filtered via [_filter_by_product]
+    before being appended — only rows whose Product cell matches the selected
+    product (or 'all') survive. Tables without a Product column are not filtered.
+
     Returns (new_glossary_df, new_pattern_df, applied) where `applied` is a list
-    of (target_tab, source_label) tuples for status display.
+    of (target_tab, source_label, kept_row_count) tuples for status display.
     """
     name = (uploaded_file.name or "").lower()
     raw = uploaded_file.getvalue()
-    applied: list[tuple[str, str]] = []
+    applied: list[tuple[str, str, int]] = []
 
     if name.endswith((".xlsx", ".xlsm", ".xls")):
         from io import BytesIO
@@ -270,25 +260,27 @@ def route_uploaded_workbook(
         for sheet_name, sheet_df in sheets.items():
             sheet_df.columns = [str(c).strip() for c in sheet_df.columns]
             target = _classify_table(sheet_name, sheet_df)
+            filtered_df = _filter_by_product(sheet_df, product_filter)
             src_label = f"{uploaded_file.name} [{sheet_name}]"
             if target == "glossary":
-                glossary_df = _append_df_as_glossary(glossary_df, sheet_df, src_label)
-                applied.append(("용어", sheet_name))
+                glossary_df = _append_df_as_glossary(glossary_df, filtered_df, src_label)
+                applied.append(("용어", sheet_name, len(filtered_df)))
             elif target == "pattern":
-                pattern_df = _append_df_as_pattern(pattern_df, sheet_df, src_label)
-                applied.append(("패턴", sheet_name))
+                pattern_df = _append_df_as_pattern(pattern_df, filtered_df, src_label)
+                applied.append(("패턴", sheet_name, len(filtered_df)))
         return glossary_df, pattern_df, applied
 
     # TSV / TXT
     single_df = read_uploaded_table_flexible(uploaded_file)
     target = _classify_table("", single_df)
+    filtered_df = _filter_by_product(single_df, product_filter)
     if target == "glossary":
-        glossary_df = _append_df_as_glossary(glossary_df, single_df, uploaded_file.name)
-        applied.append(("용어", uploaded_file.name))
+        glossary_df = _append_df_as_glossary(glossary_df, filtered_df, uploaded_file.name)
+        applied.append(("용어", uploaded_file.name, len(filtered_df)))
     else:
         # 컬럼만으로 pattern/unknown인 경우 모두 pattern으로 처리
-        pattern_df = _append_df_as_pattern(pattern_df, single_df, uploaded_file.name)
-        applied.append(("패턴", uploaded_file.name))
+        pattern_df = _append_df_as_pattern(pattern_df, filtered_df, uploaded_file.name)
+        applied.append(("패턴", uploaded_file.name, len(filtered_df)))
     return glossary_df, pattern_df, applied
 
 
@@ -312,8 +304,6 @@ def init_session_state():
         "enable_qa": True,
         "glossary_df": None,
         "pattern_df": prepare_pattern_editor_df(None),   # ← 전역 중복 초기화 제거
-        "base_glossary_df": None,
-        "base_pattern_df": prepare_pattern_editor_df(None),
         "last_result": None,
         "last_output_path": None,
         "last_output_filename": None,
@@ -488,8 +478,6 @@ if st.session_state.step == 1:
 
         st.session_state.glossary_df = glossary_df.copy()
         st.session_state.pattern_df = pattern_df.copy()
-        st.session_state.base_glossary_df = glossary_df.copy()
-        st.session_state.base_pattern_df = pattern_df.copy()
 
         st.session_state.glossary_editor_key += 1
         st.session_state.pattern_editor_key += 1
@@ -504,8 +492,8 @@ if st.session_state.step == 1:
 # ─────────────────────────────────────────────
 
 elif st.session_state.step == 2:
-    st.subheader("Step 2. 용어 및 패턴 선택")
-    st.markdown("적용하지 않을 항목은 체크박스를 해제하세요. 필요시 새 항목을 추가하거나 수정, 삭제할 수 있습니다.")
+    st.subheader("Step 2. 용어 및 패턴 업로드")
+    st.markdown("Excel(또는 TSV) 파일을 업로드해서 용어집과 패턴을 채우세요. 적용하지 않을 항목은 체크박스를 해제하고, 필요하면 직접 추가/수정/삭제할 수 있습니다.")
     render_summary_pills(
         st.session_state.selected_product,
         st.session_state.translation_mode,
@@ -513,12 +501,15 @@ elif st.session_state.step == 2:
         st.session_state.enable_qa,
     )
 
-    # ── 통합 파일 업로드 (Excel 다중 시트 자동 라우팅) ─────────────────
-    with st.expander("파일 업로드 (Excel 다중 시트 / TSV)", expanded=False):
+    # ── 통합 파일 업로드 (Excel 다중 시트 자동 라우팅 + product 필터링) ─
+    with st.expander("파일 업로드 (Excel 다중 시트 / TSV)", expanded=True):
         st.caption(
-            "Excel 파일을 올리면 시트별로 용어/패턴 탭에 자동 분배됩니다. "
-            "시트명에 'glossary'/'용어' 또는 'pattern'/'패턴'을 포함하거나, "
-            "컬럼에 'DNT'/'Case-sensitive'가 있으면 용어로 인식합니다."
+            f"Excel 파일을 올리면 시트별로 용어/패턴 탭에 자동 분배됩니다. "
+            f"시트명에 'glossary'/'용어' 또는 'pattern'/'패턴'을 포함하거나, "
+            f"컬럼에 'DNT'/'Case-sensitive'가 있으면 용어로 인식합니다.\n\n"
+            f"**Product 필터**: 현재 선택된 제품 `{st.session_state.selected_product}` "
+            f"또는 `all`로 표기된 항목만 통과합니다 "
+            f"(Product 컬럼이 없는 시트는 필터링 없이 전부 적용)."
         )
         uploaded_workbook = st.file_uploader(
             "파일 업로드",
@@ -536,9 +527,13 @@ elif st.session_state.step == 2:
                     uploaded_workbook,
                     st.session_state.glossary_df,
                     st.session_state.pattern_df,
+                    product_filter=st.session_state.selected_product or "",
                 )
                 if applied:
-                    lines = "\n".join(f"- **{target}** ← `{label}`" for target, label in applied)
+                    lines = "\n".join(
+                        f"- **{target}** ← `{label}` ({rows}건)"
+                        for target, label, rows in applied
+                    )
                     st.success(f"{uploaded_workbook.name} 적용 완료:\n{lines}")
                 else:
                     st.warning("적용된 시트가 없습니다. 시트명 또는 컬럼을 확인하세요.")
@@ -553,9 +548,9 @@ elif st.session_state.step == 2:
 
         _, col_reset = st.columns([6, 2])
         with col_reset:
-            if st.button("초기 설정으로 복원", key="reset_glossary", use_container_width=True):
+            if st.button("비우기", key="reset_glossary", use_container_width=True):
                 st.session_state.glossary_df = prepare_glossary_editor_df(
-                    st.session_state.base_glossary_df.copy()
+                    pd.DataFrame(columns=["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"])
                 )
                 st.rerun()
 
@@ -587,9 +582,9 @@ elif st.session_state.step == 2:
 
         _, col_reset = st.columns([6, 2])
         with col_reset:
-            if st.button("초기 설정으로 복원", key="reset_pattern", use_container_width=True):
+            if st.button("비우기", key="reset_pattern", use_container_width=True):
                 st.session_state.pattern_df = prepare_pattern_editor_df(
-                    st.session_state.base_pattern_df.copy()
+                    pd.DataFrame(columns=["KO", "EN", "File", "Note"])
                 )
                 st.rerun()
 
