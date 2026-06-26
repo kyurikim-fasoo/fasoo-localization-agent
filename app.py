@@ -265,9 +265,15 @@ st.markdown(
         width: 100%;
     }
 
-    /* ── 메인 영역 상단 여백 — 우측 상단 동그라미 아이콘이 잘리는 것 방지 */
+    /* ── 메인 영역: 상단 여백 + 풀폭 사용 ──────────────────────────
+       기본 streamlit은 max-width를 약 730~960px로 제한해서 와이드 화면에서
+       좌우 여백이 크게 남는다. 데이터 테이블 위주의 화면이라 풀폭으로 풀어
+       가로 공간을 활용한다. */
     .block-container {
         padding-top: 2rem !important;
+        padding-left: 3rem !important;
+        padding-right: 3rem !important;
+        max-width: 100% !important;
     }
 
     /* ── 사이드바 폭 + 영역 축소 (기본 ~244px → 170px) ───────────── */
@@ -498,6 +504,7 @@ else:
     # Glossary 모드: 큰 타이틀 없음. 사용자 아이콘만 우측 상단에.
     _spacer, col_user = st.columns([9, 1])
     with col_user:
+        st.markdown(" ")
         _render_user_menu()
 
 
@@ -554,10 +561,51 @@ if st.session_state.app_mode == "번역 실행" and st.session_state.step == 1:
 
 if st.session_state.app_mode == "Glossary 관리":
     st.subheader("Glossary 관리")
-    st.markdown(
-        "Team 용어/패턴은 모두가 함께 관리하고, 내 용어/패턴은 본인에게만 보이며 본인만 수정할 수 있습니다. "
-        "추가/수정/삭제 후 **변경사항 저장** 버튼을 눌러야 반영됩니다."
-    )
+
+    # ── 현재 Team/Personal 수량을 먼저 측정해서 안내 분기 ──────────────
+    _team_terms_count = len(load_terms(current_user=st.session_state.current_user, scope_filter="team"))
+    _mine_terms_count = len(load_terms(current_user=st.session_state.current_user, scope_filter="mine"))
+    _team_pat_count   = len(load_patterns(current_user=st.session_state.current_user, scope_filter="team"))
+    _mine_pat_count   = len(load_patterns(current_user=st.session_state.current_user, scope_filter="mine"))
+
+    # ── 통계 카드 4개 ───────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Team 용어", f"{_team_terms_count:,}")
+    c2.metric(f"내 용어 ({st.session_state.current_user})", f"{_mine_terms_count:,}")
+    c3.metric("Team 패턴", f"{_team_pat_count:,}")
+    c4.metric(f"내 패턴 ({st.session_state.current_user})", f"{_mine_pat_count:,}")
+
+    st.markdown(" ")
+
+    # ── 빈 상태(empty-state) onboarding: Team 글로서리가 비어있으면 ──
+    if _team_terms_count == 0 and _team_pat_count == 0:
+        st.info(
+            "👋 **시작하기 — 먼저 팀에서 관리하는 Master 글로서리 엑셀을 불러오세요.**\n\n"
+            "아래 **'1️⃣ 팀 Master 엑셀 불러오기'** 섹션에서 Wrapsody에서 받은 master xlsx를 올리면 "
+            "Team 영역이 채워집니다. 그 다음 이 화면 표에서 본인 작업용 용어를 추가/수정하시면 됩니다 "
+            "(자동으로 Scope=내 이름인 Personal 용어로 저장).",
+            icon="💡",
+        )
+    else:
+        # 작업 흐름 안내 — 항상 보임 (접을 수 있게)
+        with st.expander("💡 이 화면에서 무엇을 할 수 있나요?", expanded=False):
+            st.markdown(
+                f"""
+                **1️⃣ 팀 Master 글로서리 불러오기**
+                팀이 Wrapsody에서 함께 관리하는 마스터 엑셀을 올리면 **Team 영역만** 새로 채웁니다.
+                본인을 포함한 모든 사용자의 **Personal 용어는 그대로 유지**됩니다.
+
+                **2️⃣ 본인 용도로 Personalize**
+                아래 표에서 행을 추가하면 기본 **Scope = `{st.session_state.current_user}`** (= 본인만 보이는 Personal)으로 저장됩니다.
+                Team 표준에 올리고 싶을 때만 Scope을 **`Team`** 으로 바꾸세요.
+                다른 사람의 Personal 용어는 보이지도 수정되지도 않습니다.
+
+                **3️⃣ 백업 / Wrapsody 재업로드**
+                **📥 Glossary 다운로드** 섹션에서 엑셀로 받아 Wrapsody에 다시 업로드(암호화 보관)하거나 로컬에 백업하세요.
+                """
+            )
+
+    st.markdown(" ")
 
     # 제품 필터 — 글로서리 페이지는 번역 워크플로의 selected_product에 묶이지 않음.
     product_options = ["전체"] + products
@@ -575,7 +623,7 @@ if st.session_state.app_mode == "Glossary 관리":
     active_product = None if glossary_product_choice == "전체" else glossary_product_choice
 
     # ── 다운로드 (백업 / Wrapsody 재업로드용) ─────────────────────────
-    with st.expander("📥 Glossary 다운로드 (.xlsx)", expanded=False):
+    with st.expander("3️⃣  Glossary 다운로드 (.xlsx) — 백업 / Wrapsody 재업로드용", expanded=False):
         st.caption(
             "현재 사용자가 볼 수 있는 용어 + 패턴을 엑셀로 다운받아 "
             "**Wrapsody에 다시 업로드(암호화 관리)하거나 로컬에 백업**할 수 있어요."
@@ -612,7 +660,11 @@ if st.session_state.app_mode == "Glossary 관리":
             st.error(f"다운로드 준비 오류: {e}")
 
     # ── Master Excel 교체 임포트 (Team-only) ─────────────────────────
-    with st.expander("최신 Master Glossary 엑셀 불러오기 (Team 영역만 교체)", expanded=False):
+    # 빈 상태일 땐 자동으로 펼침 — onboarding과 자연스럽게 이어지도록.
+    with st.expander(
+        "1️⃣  팀 Master 엑셀 불러오기 (Team 영역만 교체)",
+        expanded=(_team_terms_count == 0 and _team_pat_count == 0),
+    ):
         st.caption(
             f"팀에서 관리하는 최신 Master Glossary 엑셀 파일을 올리면 "
             f"**Team 영역만 새로 채웁니다.** 모든 사용자의 개인(Personal) 용어는 그대로 유지됩니다.\n\n"
@@ -665,6 +717,12 @@ if st.session_state.app_mode == "Glossary 관리":
                     st.warning("임포트할 시트를 찾지 못했습니다.")
             except Exception as e:
                 st.error(f"임포트 오류: {e}")
+
+    st.markdown(f"### 2️⃣  본인 용도로 Personalize")
+    st.caption(
+        f"행을 추가하면 기본값은 Scope = **{st.session_state.current_user}** (본인만 보이는 Personal). "
+        f"Team에 추가하고 싶을 때만 Scope을 `Team`으로 바꿔서 저장하세요."
+    )
 
     tab1, tab2 = st.tabs(["용어", "패턴"])
 
