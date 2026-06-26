@@ -264,6 +264,21 @@ st.markdown(
     div[data-testid="stDataEditor"] {
         width: 100%;
     }
+
+    /* ── 사이드바 폭 축소 (기본 ~244px → 200px) ────────────────── */
+    section[data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
+        width: 200px;
+        min-width: 200px;
+    }
+
+    /* ── 사이드바 메뉴 버튼: 왼쪽 정렬 + 큰 폰트 ─────────────── */
+    section[data-testid="stSidebar"] [data-testid="stButton"] button {
+        text-align: left;
+        justify-content: flex-start;
+        font-size: 17px;
+        font-weight: 600;
+        padding-left: 14px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -347,13 +362,13 @@ if not st.session_state.current_user:
 # 로그인 후 — 사이드바 nav + 메인 헤더 + 메뉴별 콘텐츠
 # ──────────────────────────────────────────────────────────────────────
 
-# ── 사이드바: 메뉴 nav ─────────────────────────────────────────────────
+# ── 사이드바: 메뉴 nav (아이콘 없이, 좌측 정렬, 큰 폰트) ────────────────
 with st.sidebar:
-    st.markdown("## 메뉴")
+    st.markdown("### 메뉴")
     st.markdown(" ")
 
     if st.button(
-        "📝  번역 실행",
+        "번역 실행",
         use_container_width=True,
         type="primary" if st.session_state.app_mode == "번역 실행" else "secondary",
         key="nav_translate",
@@ -362,7 +377,7 @@ with st.sidebar:
         st.rerun()
 
     if st.button(
-        "📚  Glossary 관리",
+        "Glossary 관리",
         use_container_width=True,
         type="primary" if st.session_state.app_mode == "Glossary 관리" else "secondary",
         key="nav_glossary",
@@ -370,20 +385,45 @@ with st.sidebar:
         st.session_state.app_mode = "Glossary 관리"
         st.rerun()
 
-    # 추후 확장될 메뉴 — 일단 비활성화 상태로 노출해서 사용자에게 로드맵 안내
-    st.button("📊  로그 (준비 중)", use_container_width=True, disabled=True, key="nav_logs")
+    st.button("로그 (준비 중)", use_container_width=True, disabled=True, key="nav_logs")
 
-# ── 메인 헤더: 타이틀 좌측, 사용자/로그아웃 우측 ─────────────────────────
-col_title, col_user = st.columns([7, 3])
-with col_title:
-    st.title("Fasoo Localization Agent")
-    st.caption("국문 문서를 영문으로 로컬라이즈합니다.")
-with col_user:
-    st.markdown(" ")
-    col_u_name, col_u_btn = st.columns([3, 2])
-    with col_u_name:
-        st.markdown(f"##### 👤 {st.session_state.current_user}")
-    with col_u_btn:
+# ── 메인 헤더 ─────────────────────────────────────────────────────────
+# 우측에 원형 이니셜 + 작은 사용자 이름 + 로그아웃 (모든 모드 공통).
+# "Fasoo Localization Agent" 큰 타이틀은 번역 실행 모드에서만 노출 —
+# Glossary 관리에선 페이지 자체 subheader가 있으니 중복 제거.
+def _render_user_chip() -> str:
+    name = st.session_state.current_user or "?"
+    initial = name[0].upper()
+    return (
+        "<div style='display:flex;align-items:center;justify-content:flex-end;"
+        "gap:8px;margin-top:14px;'>"
+        f"<span style='display:inline-flex;align-items:center;justify-content:center;"
+        f"width:28px;height:28px;border-radius:50%;background:#4CAF50;color:#fff;"
+        f"font-weight:700;font-size:12px;'>{initial}</span>"
+        f"<span style='font-size:13px;color:#444;'>{name}</span>"
+        "</div>"
+    )
+
+
+if st.session_state.app_mode == "번역 실행":
+    col_title, col_user, col_logout = st.columns([7, 2, 1])
+    with col_title:
+        st.title("Fasoo Localization Agent")
+        st.caption("국문 문서를 영문으로 로컬라이즈합니다.")
+    with col_user:
+        st.markdown(_render_user_chip(), unsafe_allow_html=True)
+    with col_logout:
+        st.markdown(" ")
+        if st.button("로그아웃", use_container_width=True, key="logout_btn"):
+            st.session_state.current_user = ""
+            st.rerun()
+else:
+    # Glossary 모드: 큰 타이틀 없음. 사용자 chip + 로그아웃만 우측 상단에.
+    _spacer, col_user, col_logout = st.columns([7, 2, 1])
+    with col_user:
+        st.markdown(_render_user_chip(), unsafe_allow_html=True)
+    with col_logout:
+        st.markdown(" ")
         if st.button("로그아웃", use_container_width=True, key="logout_btn"):
             st.session_state.current_user = ""
             st.rerun()
