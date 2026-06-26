@@ -254,11 +254,12 @@ st.markdown(
         font-size: 16px;
     }
 
-    [data-testid="stDownloadButton"] button {
-        min-height: 54px;
-        font-weight: 700;
-        border-radius: 14px;
-        font-size: 16px;
+    /* type="primary"가 아닌 일반 download_button은 일반 button과 동일 높이 */
+    [data-testid="stDownloadButton"] button:not([kind="primary"]) {
+        min-height: 46px;
+        font-weight: 600;
+        border-radius: 12px;
+        font-size: 14px;
     }
 
     div[data-testid="stDataEditor"] {
@@ -722,20 +723,20 @@ if st.session_state.app_mode == "Glossary 관리":
 
         # 변경사항이 있으면 저장 버튼 활성화. 명시적으로 클릭해야만 DB 반영.
         terms_changed = not edited_terms.equals(terms_df)
-        col_save, col_status = st.columns([1, 4])
+        col_status, col_save = st.columns([5, 1])
+        with col_status:
+            if terms_changed:
+                st.caption("⚠️ 변경됨 — 저장하지 않으면 사라집니다.")
+            else:
+                st.caption("✓ 저장됨")
         with col_save:
             save_clicked = st.button(
-                "변경사항 저장",
+                "저장",
                 key="save_terms",
                 disabled=not terms_changed,
                 type="primary" if terms_changed else "secondary",
                 use_container_width=True,
             )
-        with col_status:
-            if terms_changed:
-                st.caption("⚠️ 변경됨 — 저장하지 않으면 다른 화면 이동 시 사라집니다.")
-            else:
-                st.caption("✓ 모든 변경사항 저장됨")
 
         if save_clicked:
             try:
@@ -806,20 +807,20 @@ if st.session_state.app_mode == "Glossary 관리":
         )
 
         patterns_changed = not edited_patterns.equals(patterns_df)
-        col_save_p, col_status_p = st.columns([1, 4])
+        col_status_p, col_save_p = st.columns([5, 1])
+        with col_status_p:
+            if patterns_changed:
+                st.caption("⚠️ 변경됨 — 저장하지 않으면 사라집니다.")
+            else:
+                st.caption("✓ 저장됨")
         with col_save_p:
             save_p_clicked = st.button(
-                "변경사항 저장",
+                "저장",
                 key="save_patterns",
                 disabled=not patterns_changed,
                 type="primary" if patterns_changed else "secondary",
                 use_container_width=True,
             )
-        with col_status_p:
-            if patterns_changed:
-                st.caption("⚠️ 변경됨 — 저장하지 않으면 다른 화면 이동 시 사라집니다.")
-            else:
-                st.caption("✓ 모든 변경사항 저장됨")
 
         if save_p_clicked:
             try:
