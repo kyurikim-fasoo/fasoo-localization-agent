@@ -401,6 +401,35 @@ def replace_terms_from_excel(
     return inserted
 
 
+def export_to_excel(current_user: str = "", scope_filter: str = "all") -> bytes:
+    """
+    Bundle current user's visible terms + patterns into one xlsx workbook.
+
+    Sheet layout matches what `replace_*_from_excel` expects, so a downloaded
+    file can be re-imported (or uploaded to Wrapsody) round-trip safely.
+
+    Scope filter mirrors the load_* contract:
+    - 'all'  → Team + own Personal
+    - 'team' → Team only (useful for sharing with the team)
+    - 'mine' → own Personal only (useful for personal backup)
+    """
+    import io
+
+    terms = load_terms(current_user=current_user, scope_filter=scope_filter)
+    patterns = load_patterns(current_user=current_user, scope_filter=scope_filter)
+
+    # 다운로드 파일에선 UI-전용 컬럼은 빼고, Scope는 남겨서 누가 어떤 row인지 추적 가능
+    drop_cols = ["적용", "id", "Status", "File"]
+    terms = terms.drop(columns=drop_cols, errors="ignore")
+    patterns = patterns.drop(columns=drop_cols, errors="ignore")
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        terms.to_excel(writer, sheet_name="glossary", index=False)
+        patterns.to_excel(writer, sheet_name="pattern", index=False)
+    return buf.getvalue()
+
+
 def replace_patterns_from_excel(sheet_df: pd.DataFrame, source_file: str) -> int:
     """Wipe + refill the **Team** patterns from a single sheet.
     Personal patterns are preserved across re-imports."""

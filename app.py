@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from db.schema import DB_PATH, init_db
 from services.glossary import (
+    export_to_excel,
     load_patterns,
     load_terms,
     replace_patterns_from_excel,
@@ -138,6 +139,7 @@ def init_session_state():
     """모든 session_state 초기값을 한 곳에서 관리합니다."""
     defaults = {
         "step": 1,
+        "app_mode": "번역 실행",
         "selected_product": None,
         "translation_mode": "매뉴얼",
         "enable_cache": True,
@@ -268,9 +270,20 @@ st.markdown(
 st.title("Fasoo Localization Agent")
 st.markdown("국문 문서를 영문으로 로컬라이즈합니다.")
 
-# ── 사이드바: 사용자 선택 (Option A 멀티유저) ──────────────────────────
-# 첫 사용자는 직접 이름을 입력하면 자동 등록되고, 그 이후엔 드롭다운에서 선택.
+# ── 사이드바: 메뉴 + 사용자 선택 ────────────────────────────────────────
 with st.sidebar:
+    st.markdown("### 메뉴")
+    app_mode = st.radio(
+        "메뉴",
+        ["번역 실행", "Glossary 관리"],
+        index=["번역 실행", "Glossary 관리"].index(st.session_state.app_mode),
+        label_visibility="collapsed",
+    )
+    if app_mode != st.session_state.app_mode:
+        st.session_state.app_mode = app_mode
+        st.rerun()
+
+    st.markdown("---")
     st.markdown("### 사용자")
     registered = list_users()
 
@@ -372,31 +385,74 @@ if st.session_state.step == 1:
 
 
 # ─────────────────────────────────────────────
-# Step 2 — 용어 및 패턴
+# Glossary 관리 페이지 (번역 워크플로와 독립)
 # ─────────────────────────────────────────────
 
-elif st.session_state.step == 2:
-    st.subheader("Step 2. 용어 및 패턴")
+if st.session_state.app_mode == "Glossary 관리":
+    st.subheader("Glossary 관리")
     st.markdown(
-        "글로서리는 DB에 영구 저장됩니다. 화면에서 추가/수정/삭제하면 즉시 저장돼요. "
-        "Wrapsody에서 최신 master 엑셀을 받으면 아래 '교체 임포트'로 통째로 덮어쓰세요."
-    )
-    render_summary_pills(
-        st.session_state.selected_product,
-        st.session_state.translation_mode,
-        st.session_state.enable_cache,
-        st.session_state.enable_qa,
+        "Team 용어/패턴은 모두가 함께 관리하고, 내 용어/패턴은 본인에게만 보이며 본인만 수정할 수 있습니다. "
+        "추가/수정/삭제 후 **변경사항 저장** 버튼을 눌러야 반영됩니다."
     )
 
-    # ── Master Excel 교체 임포트 (옵션 A — Wrapsody 워크플로 + Team-only) ─
-    with st.expander("최신 Master Glossary 엑셀 불러오기", expanded=False):
+    # 제품 필터 — 글로서리 페이지는 번역 워크플로의 selected_product에 묶이지 않음.
+    product_options = ["전체"] + products
+    _default_p = st.session_state.selected_product or "전체"
+    try:
+        _default_idx = product_options.index(_default_p)
+    except ValueError:
+        _default_idx = 0
+    glossary_product_choice = st.selectbox(
+        "제품 필터",
+        product_options,
+        index=_default_idx,
+        help="특정 제품 + ALL 공통 항목만 보거나, 전체 항목을 봅니다.",
+    )
+    active_product = None if glossary_product_choice == "전체" else glossary_product_choice
+
+    # ── 다운로드 (백업 / Wrapsody 재업로드용) ─────────────────────────
+    with st.expander("📥 Glossary 다운로드 (.xlsx)", expanded=False):
+        st.caption(
+            "현재 사용자가 볼 수 있는 용어 + 패턴을 엑셀로 다운받아 "
+            "**Wrapsody에 다시 업로드(암호화 관리)하거나 로컬에 백업**할 수 있어요."
+        )
+        col_dl_scope, col_dl_btn = st.columns([1, 1])
+        with col_dl_scope:
+            _dl_scope_label = st.selectbox(
+                "범위",
+                ["전체 (Team + 내 것)", "Team만", "내 것만"],
+                key="dl_scope_glossary",
+            )
+        _dl_scope = {
+            "전체 (Team + 내 것)": "all",
+            "Team만": "team",
+            "내 것만": "mine",
+        }[_dl_scope_label]
+        from datetime import date as _date
+        _dl_filename = f"glossary_{_date.today().isoformat()}_{st.session_state.current_user}.xlsx"
+        try:
+            _dl_bytes = export_to_excel(
+                current_user=st.session_state.current_user,
+                scope_filter=_dl_scope,
+            )
+            with col_dl_btn:
+                st.write(" ")
+                st.download_button(
+                    "엑셀로 다운로드",
+                    data=_dl_bytes,
+                    file_name=_dl_filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+        except Exception as e:
+            st.error(f"다운로드 준비 오류: {e}")
+
+    # ── Master Excel 교체 임포트 (Team-only) ─────────────────────────
+    with st.expander("최신 Master Glossary 엑셀 불러오기 (Team 영역만 교체)", expanded=False):
         st.caption(
             f"팀에서 관리하는 최신 Master Glossary 엑셀 파일을 올리면 "
             f"**Team 영역만 새로 채웁니다.** 모든 사용자의 개인(Personal) 용어는 그대로 유지됩니다.\n\n"
-            f"엑셀 안 시트 자동 분류:\n"
-            f"- 시트 이름이 `용어` / `glossary` → **용어 탭**\n"
-            f"- 시트 이름이 `패턴` / `pattern` → **패턴 탭**\n\n"
-            f"현재 선택한 제품 **{st.session_state.selected_product}** 항목과 모든 제품 공통(`ALL`) 항목만 가져옵니다."
+            f"현재 필터: 제품 **{active_product or '전체'}** 항목과 모든 제품 공통(`ALL`) 항목만 가져옵니다."
         )
         uploaded_workbook = st.file_uploader(
             "Master Glossary 엑셀",
@@ -421,7 +477,7 @@ elif st.session_state.step == 2:
                     n = replace_terms_from_excel(
                         sdf,
                         source_file=f"{uploaded_workbook.name} [{sname}]",
-                        product_filter=st.session_state.selected_product or None,
+                        product_filter=active_product,
                     )
                     results.append(("용어", sname, n))
                 # pattern 시트
@@ -468,7 +524,7 @@ elif st.session_state.step == 2:
         terms_scope = {"전체": "all", "Team만": "team", "내 용어만": "mine"}[terms_scope_label]
 
         terms_df = load_terms(
-            product=st.session_state.selected_product,
+            product=active_product,
             search=terms_search,
             current_user=st.session_state.current_user,
             scope_filter=terms_scope,
@@ -621,28 +677,16 @@ elif st.session_state.step == 2:
             except Exception as e:
                 st.error(f"저장 오류: {e}")
 
-    # ── 이전 / 다음 버튼 ───────────
-    st.markdown("---")
-    col_back, col_next = st.columns(2)
-
-    with col_back:
-        if st.button("이전", use_container_width=True):
-            st.session_state.step = 1
-            st.rerun()
-
-    with col_next:
-        if st.button("다음", use_container_width=True):
-            reset_translation_result()
-            st.session_state.step = 3
-            st.rerun()
+    # Glossary 관리 페이지는 워크플로가 아니므로 여기서 페이지 렌더링 끝.
+    st.stop()
 
 
 # ─────────────────────────────────────────────
-# Step 3 — 파일 업로드 & 번역
+# Step 2 — 파일 업로드 & 번역 (번역 실행 모드)
 # ─────────────────────────────────────────────
 
-elif st.session_state.step == 3:
-    st.subheader("Step 3. 업로드")
+if st.session_state.step == 2:
+    st.subheader("Step 2. 업로드")
     st.markdown("로컬라이즈할 Word 파일을 업로드하거나 끌어서 놓으세요.")
     render_summary_pills(
         st.session_state.selected_product,
@@ -680,7 +724,7 @@ elif st.session_state.step == 3:
 
     with col_back:
         if st.button("이전", use_container_width=True):
-            st.session_state.step = 2
+            st.session_state.step = 1
             st.rerun()
 
     with col_translate:
@@ -729,7 +773,7 @@ elif st.session_state.step == 3:
                 st.session_state.last_result = result
                 st.session_state.last_output_path = str(output_path)
                 st.session_state.last_output_filename = output_filename
-                st.session_state.step = 4
+                st.session_state.step = 3
                 st.rerun()
 
             except Exception as e:
@@ -737,11 +781,11 @@ elif st.session_state.step == 3:
 
 
 # ─────────────────────────────────────────────
-# Step 4 — 결과 & 다운로드
+# Step 3 — 결과 & 다운로드
 # ─────────────────────────────────────────────
 
-elif st.session_state.step == 4:
-    st.subheader("Step 4. 다운로드")
+elif st.session_state.step == 3:
+    st.subheader("Step 3. 다운로드")
 
     result = st.session_state.last_result
     output_path = st.session_state.last_output_path
@@ -783,7 +827,7 @@ elif st.session_state.step == 4:
 
     with col_prev:
         if st.button("이전", use_container_width=True):
-            st.session_state.step = 3
+            st.session_state.step = 2
             st.rerun()
 
     with col_restart:
