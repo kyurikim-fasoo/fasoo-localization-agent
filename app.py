@@ -1,25 +1,43 @@
 import json
 import os
-import re
-from io import StringIO
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from db.schema import DB_PATH, init_db
+from services.glossary import (
+    load_patterns,
+    load_terms,
+    replace_patterns_from_excel,
+    replace_terms_from_excel,
+    save_patterns_from_dataframe,
+    save_terms_from_dataframe,
+)
 from translator_engine import translate_document
 
 
 load_dotenv()
 
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-COST_PER_1K_INPUT_TOKENS = float(
-    st.secrets.get("MODEL_COST_PER_1K_INPUT_TOKENS", os.getenv("MODEL_COST_PER_1K_INPUT_TOKENS", "0.005"))
-)
-COST_PER_1K_OUTPUT_TOKENS = float(
-    st.secrets.get("MODEL_COST_PER_1K_OUTPUT_TOKENS", os.getenv("MODEL_COST_PER_1K_OUTPUT_TOKENS", "0.015"))
-)
+
+def _secret_or_env(key: str, default: str = "") -> str:
+    """Read from Streamlit secrets if available, otherwise fall back to env var.
+
+    `st.secrets[...]` raises StreamlitSecretNotFoundError when no secrets.toml
+    exists, which means `.get(...)` cannot be relied on. Wrapping it lets the
+    .env path work cleanly without a secrets file.
+    """
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.getenv(key, default)
+
+
+OPENAI_API_KEY = _secret_or_env("OPENAI_API_KEY", "")
+COST_PER_1K_INPUT_TOKENS = float(_secret_or_env("MODEL_COST_PER_1K_INPUT_TOKENS", "0.005"))
+COST_PER_1K_OUTPUT_TOKENS = float(_secret_or_env("MODEL_COST_PER_1K_OUTPUT_TOKENS", "0.015"))
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -39,39 +57,6 @@ def load_product_config():
         return json.load(f)
 
 
-def read_uploaded_table_flexible(uploaded_file) -> pd.DataFrame:
-    """
-    Read an uploaded glossary/pattern table from xlsx/xls or tsv/txt.
-
-    Detection order: file extension first (most reliable for Excel), then
-    fall back to text decoding for everything else. Encoding probing covers
-    Korean/Windows defaults that users commonly save TSV as.
-    """
-    name = (uploaded_file.name or "").lower()
-    raw = uploaded_file.getvalue()
-
-    # Excel: detect by extension. openpyxl handles .xlsx; .xls needs xlrd
-    # but pandas will surface a clear error if xlrd is missing.
-    if name.endswith((".xlsx", ".xlsm", ".xls")):
-        from io import BytesIO
-        df = pd.read_excel(BytesIO(raw))
-        df.columns = [str(c).strip() for c in df.columns]
-        return df
-
-    # TSV / TXT: tab-separated with flexible encoding
-    encodings_to_try = ["utf-16", "utf-8-sig", "utf-8", "cp949", "euc-kr"]
-    last_error = None
-    for enc in encodings_to_try:
-        try:
-            text = raw.decode(enc)
-            df = pd.read_csv(StringIO(text), sep="\t")
-            df.columns = [str(c).strip() for c in df.columns]
-            return df
-        except Exception as e:
-            last_error = e
-    raise RuntimeError(f"Failed to read uploaded file: {uploaded_file.name}. Last error: {last_error}")
-
-
 def save_uploaded_file(uploaded_file, save_dir: Path) -> Path:
     save_path = save_dir / uploaded_file.name
     with open(save_path, "wb") as f:
@@ -86,208 +71,62 @@ def estimate_cost_usd(input_tokens: int, output_tokens: int) -> float:
     return round(cost, 4)
 
 
-def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    out = df.copy()
-    for col in cols:
-        if col not in out.columns:
-            out[col] = ""
-    return out
-
-
-# ─────────────────────────────────────────────
-# DataFrame helpers
-# ─────────────────────────────────────────────
-
-def prepare_glossary_editor_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None:
-        df = pd.DataFrame()
-    if not isinstance(df, pd.DataFrame):
-        df = pd.DataFrame(df)
-
-    out = df.copy()
-
-    expected_cols = ["적용", "KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"]
-
-    for col in expected_cols:
-        if col not in out.columns:
-            out[col] = True if col == "적용" else ""
-
-    if "적용" in out.columns:
-        out["적용"] = out["적용"].fillna(True).astype(bool)
-
-    out = out[expected_cols]
-
-    for col in expected_cols:
-        if col != "적용":
-            out[col] = out[col].fillna("").astype(str)
-
-    return out
-
-
-def prepare_pattern_editor_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None:
-        df = pd.DataFrame()
-    if not isinstance(df, pd.DataFrame):
-        df = pd.DataFrame(df)
-
-    out = df.copy()
-
-    expected_cols = ["적용", "KO", "EN", "File", "Note"]
-
-    for col in expected_cols:
-        if col not in out.columns:
-            out[col] = True if col == "적용" else ""
-
-    if "적용" in out.columns:
-        out["적용"] = out["적용"].fillna(True).astype(bool)
-
-    out = out[expected_cols]
-
-    for col in expected_cols:
-        if col != "적용":
-            out[col] = out[col].fillna("").astype(str)
-
-    return out
-
-
-def build_product_tables(product_name: str, config: dict):
-    """
-    Return empty glossary/pattern tables. Default TSV loading was removed —
-    users must upload their own Excel/TSV in Step 2. `product_name` is kept in
-    the signature so callers stay product-aware, but no longer triggers any
-    file IO here.
-    """
-    glossary_df = prepare_glossary_editor_df(
-        pd.DataFrame(columns=["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"])
-    )
-    pattern_df = prepare_pattern_editor_df(
-        pd.DataFrame(columns=["KO", "EN", "File", "Note"])
-    )
-    return glossary_df, pattern_df
-
-
-def _append_df_as_glossary(current_df: pd.DataFrame, new_df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-    uploaded_df = _ensure_columns(new_df.copy(), ["KO", "EN", "DNT", "Case-sensitive", "Product", "Note"])
-    uploaded_df["File"] = source_name
-    uploaded_df = uploaded_df[["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"]]
-    return prepare_glossary_editor_df(pd.concat([current_df, uploaded_df], ignore_index=True))
-
-
-def _append_df_as_pattern(current_df: pd.DataFrame, new_df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-    uploaded_df = _ensure_columns(new_df.copy(), ["KO", "EN", "Note"])
-    uploaded_df["File"] = source_name
-    uploaded_df = uploaded_df[["KO", "EN", "File", "Note"]]
-    return prepare_pattern_editor_df(pd.concat([current_df, uploaded_df], ignore_index=True))
-
-
-def _filter_by_product(df: pd.DataFrame, product: str) -> pd.DataFrame:
-    """
-    Keep rows whose Product cell matches the selected product or 'all'.
-
-    - No `Product` column → return df untouched (e.g. pattern tables that don't carry product info).
-    - Comma/semicolon/slash-separated lists are split, so a cell like "fss, wrapsody"
-      matches when either 'fss' or 'wrapsody' is selected.
-    - Blank cells are excluded — callers wanting blanks to count as 'all'
-      should pre-fill the column.
-    """
-    if df is None or df.empty or "Product" not in df.columns:
-        return df
-    p = (product or "").strip().lower()
-    if not p:
-        return df
-
-    def keep(val):
-        s = str(val).strip().lower()
-        if not s or s == "nan":
-            return False
-        parts = re.split(r"[,;/]\s*", s)
-        return any(x.strip() in ("all", p) for x in parts)
-
-    return df[df["Product"].apply(keep)].copy()
-
-
-def _classify_table(sheet_name: str, df: pd.DataFrame) -> str:
-    """
-    Decide whether a table is a glossary or a pattern table.
-
-    Order of evidence:
-    1. Sheet/file name substring match (case-insensitive) — explicit user intent.
-    2. Column presence — DNT or Case-sensitive uniquely identify glossary tables.
-    3. Default to pattern when only KO/EN are present.
-
-    Returns "glossary" | "pattern" | "unknown".
-    """
-    lname = (sheet_name or "").lower()
-    if any(k in lname for k in ["glossary", "용어", "사전"]):
-        return "glossary"
-    if any(k in lname for k in ["pattern", "패턴"]):
-        return "pattern"
-    cols = {str(c).strip().lower() for c in df.columns}
-    if "dnt" in cols or "case-sensitive" in cols:
-        return "glossary"
-    if "ko" in cols and "en" in cols:
-        return "pattern"
-    return "unknown"
-
-
-def route_uploaded_workbook(
-    uploaded_file,
-    glossary_df: pd.DataFrame,
-    pattern_df: pd.DataFrame,
-    product_filter: str = "",
-) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[str, str, int]]]:
-    """
-    Route an uploaded Excel workbook (or TSV/TXT) into glossary and/or pattern tables.
-
-    Excel workbooks are processed sheet-by-sheet; each sheet is classified via
-    [_classify_table] and appended to the matching dataframe. TSV/TXT files
-    contain a single table and are classified by column presence.
-
-    When `product_filter` is set, rows are filtered via [_filter_by_product]
-    before being appended — only rows whose Product cell matches the selected
-    product (or 'all') survive. Tables without a Product column are not filtered.
-
-    Returns (new_glossary_df, new_pattern_df, applied) where `applied` is a list
-    of (target_tab, source_label, kept_row_count) tuples for status display.
-    """
-    name = (uploaded_file.name or "").lower()
-    raw = uploaded_file.getvalue()
-    applied: list[tuple[str, str, int]] = []
-
-    if name.endswith((".xlsx", ".xlsm", ".xls")):
-        from io import BytesIO
-        sheets = pd.read_excel(BytesIO(raw), sheet_name=None)
-        for sheet_name, sheet_df in sheets.items():
-            sheet_df.columns = [str(c).strip() for c in sheet_df.columns]
-            target = _classify_table(sheet_name, sheet_df)
-            filtered_df = _filter_by_product(sheet_df, product_filter)
-            src_label = f"{uploaded_file.name} [{sheet_name}]"
-            if target == "glossary":
-                glossary_df = _append_df_as_glossary(glossary_df, filtered_df, src_label)
-                applied.append(("용어", sheet_name, len(filtered_df)))
-            elif target == "pattern":
-                pattern_df = _append_df_as_pattern(pattern_df, filtered_df, src_label)
-                applied.append(("패턴", sheet_name, len(filtered_df)))
-        return glossary_df, pattern_df, applied
-
-    # TSV / TXT
-    single_df = read_uploaded_table_flexible(uploaded_file)
-    target = _classify_table("", single_df)
-    filtered_df = _filter_by_product(single_df, product_filter)
-    if target == "glossary":
-        glossary_df = _append_df_as_glossary(glossary_df, filtered_df, uploaded_file.name)
-        applied.append(("용어", uploaded_file.name, len(filtered_df)))
-    else:
-        # 컬럼만으로 pattern/unknown인 경우 모두 pattern으로 처리
-        pattern_df = _append_df_as_pattern(pattern_df, filtered_df, uploaded_file.name)
-        applied.append(("패턴", uploaded_file.name, len(filtered_df)))
-    return glossary_df, pattern_df, applied
-
-
 def make_default_output_filename(product: str, source_name: str) -> str:
     source_stem = Path(source_name).stem
     safe_product = product.strip().replace(" ", "_")
     return f"{source_stem}_{safe_product}_en.docx"
+
+
+# ─────────────────────────────────────────────
+# Daily DB backup
+# ─────────────────────────────────────────────
+
+def run_daily_backup_if_due() -> Optional[Path]:
+    """
+    Copy data/glossary.db into data/backups/glossary-YYYY-MM-DD.db once per day.
+
+    Cheap to call on every Streamlit run — exits immediately if today's backup
+    already exists. Returns the backup path when a new copy is written.
+
+    Phase 2 todo: also copy this file to OneDrive / NAS by setting
+    `BACKUP_MIRROR_DIR` env var.
+    """
+    import shutil
+    from datetime import date
+
+    if not DB_PATH.exists():
+        return None
+
+    backup_dir = DB_PATH.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    today_backup = backup_dir / f"glossary-{date.today().isoformat()}.db"
+
+    if today_backup.exists():
+        return None
+
+    shutil.copy2(DB_PATH, today_backup)
+
+    # 30일 넘은 백업은 자동 정리
+    cutoff = date.today().toordinal() - 30
+    for old in backup_dir.glob("glossary-*.db"):
+        try:
+            ymd = old.stem.replace("glossary-", "")
+            from datetime import datetime as _dt
+            if _dt.fromisoformat(ymd).date().toordinal() < cutoff:
+                old.unlink()
+        except Exception:
+            continue
+
+    mirror = os.getenv("BACKUP_MIRROR_DIR")
+    if mirror:
+        try:
+            mirror_dir = Path(mirror)
+            mirror_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(today_backup, mirror_dir / today_backup.name)
+        except Exception:
+            pass
+
+    return today_backup
 
 
 # ─────────────────────────────────────────────
@@ -302,8 +141,6 @@ def init_session_state():
         "translation_mode": "매뉴얼",
         "enable_cache": True,
         "enable_qa": True,
-        "glossary_df": None,
-        "pattern_df": prepare_pattern_editor_df(None),   # ← 전역 중복 초기화 제거
         "last_result": None,
         "last_output_path": None,
         "last_output_filename": None,
@@ -359,6 +196,8 @@ def render_summary_pills(product: str, mode: str, cache: bool, qa: bool = True):
 
 st.set_page_config(page_title="Fasoo Localization Agent", layout="wide")
 init_session_state()
+init_db()
+run_daily_backup_if_due()
 
 st.markdown(
     """
@@ -474,11 +313,6 @@ if st.session_state.step == 1:
         st.session_state.enable_cache = enable_cache
         st.session_state.enable_qa = enable_qa
 
-        glossary_df, pattern_df = build_product_tables(selected_product, config)
-
-        st.session_state.glossary_df = glossary_df.copy()
-        st.session_state.pattern_df = pattern_df.copy()
-
         st.session_state.glossary_editor_key += 1
         st.session_state.pattern_editor_key += 1
 
@@ -492,8 +326,11 @@ if st.session_state.step == 1:
 # ─────────────────────────────────────────────
 
 elif st.session_state.step == 2:
-    st.subheader("Step 2. 용어 및 패턴 업로드")
-    st.markdown("Excel(또는 TSV) 파일을 업로드해서 용어집과 패턴을 채우세요. 적용하지 않을 항목은 체크박스를 해제하고, 필요하면 직접 추가/수정/삭제할 수 있습니다.")
+    st.subheader("Step 2. 용어 및 패턴")
+    st.markdown(
+        "글로서리는 DB에 영구 저장됩니다. 화면에서 추가/수정/삭제하면 즉시 저장돼요. "
+        "Wrapsody에서 최신 master 엑셀을 받으면 아래 '교체 임포트'로 통째로 덮어쓰세요."
+    )
     render_summary_pills(
         st.session_state.selected_product,
         st.session_state.translation_mode,
@@ -501,113 +338,159 @@ elif st.session_state.step == 2:
         st.session_state.enable_qa,
     )
 
-    # ── 통합 파일 업로드 (Excel 다중 시트 자동 라우팅 + product 필터링) ─
-    with st.expander("파일 업로드 (Excel 다중 시트 / TSV)", expanded=True):
+    # ── Master Excel 교체 임포트 (옵션 A — Wrapsody 워크플로) ──────────
+    with st.expander("Master Excel 교체 임포트 — 기존 데이터 통째로 덮어쓰기", expanded=False):
         st.caption(
-            f"Excel 파일을 올리면 시트별로 용어/패턴 탭에 자동 분배됩니다. "
-            f"시트명에 'glossary'/'용어' 또는 'pattern'/'패턴'을 포함하거나, "
-            f"컬럼에 'DNT'/'Case-sensitive'가 있으면 용어로 인식합니다.\n\n"
-            f"**Product 필터**: 현재 선택된 제품 `{st.session_state.selected_product}` "
-            f"또는 `all`로 표기된 항목만 통과합니다 "
-            f"(Product 컬럼이 없는 시트는 필터링 없이 전부 적용)."
+            f"매번 Wrapsody에서 decrypt한 master 엑셀을 올리면 DB가 그 시점 스냅샷으로 새로 채워집니다. "
+            f"시트명에 'glossary'/'용어'를 포함하면 용어로, 'pattern'/'패턴'을 포함하면 패턴으로 인식합니다.\n\n"
+            f"**Product 필터**: 현재 선택된 제품 `{st.session_state.selected_product}` 또는 `all/ALL`만 통과합니다."
         )
         uploaded_workbook = st.file_uploader(
-            "파일 업로드",
-            type=["xlsx", "xlsm", "xls", "tsv", "txt"],
+            "Master Excel 파일",
+            type=["xlsx", "xlsm", "xls"],
             key="uploaded_workbook",
             label_visibility="collapsed",
         )
         if uploaded_workbook is not None:
             try:
-                (
-                    st.session_state.glossary_df,
-                    st.session_state.pattern_df,
-                    applied,
-                ) = route_uploaded_workbook(
-                    uploaded_workbook,
-                    st.session_state.glossary_df,
-                    st.session_state.pattern_df,
-                    product_filter=st.session_state.selected_product or "",
-                )
-                if applied:
-                    lines = "\n".join(
-                        f"- **{target}** ← `{label}` ({rows}건)"
-                        for target, label, rows in applied
+                from io import BytesIO
+                sheets = pd.read_excel(BytesIO(uploaded_workbook.getvalue()), sheet_name=None)
+                results = []
+                # glossary 시트
+                gpick = None
+                for sname, sdf in sheets.items():
+                    if any(k in sname.lower() for k in ["glossary", "용어", "사전"]):
+                        gpick = (sname, sdf); break
+                if gpick is None and sheets:
+                    gpick = list(sheets.items())[0]
+                if gpick:
+                    sname, sdf = gpick
+                    n = replace_terms_from_excel(
+                        sdf,
+                        source_file=f"{uploaded_workbook.name} [{sname}]",
+                        product_filter=st.session_state.selected_product or None,
                     )
-                    st.success(f"{uploaded_workbook.name} 적용 완료:\n{lines}")
+                    results.append(("용어", sname, n))
+                # pattern 시트
+                ppick = None
+                for sname, sdf in sheets.items():
+                    if any(k in sname.lower() for k in ["pattern", "패턴"]):
+                        ppick = (sname, sdf); break
+                if ppick is None and len(sheets) >= 2:
+                    ppick = list(sheets.items())[1]
+                if ppick:
+                    sname, sdf = ppick
+                    n = replace_patterns_from_excel(
+                        sdf, source_file=f"{uploaded_workbook.name} [{sname}]"
+                    )
+                    results.append(("패턴", sname, n))
+                if results:
+                    lines = "\n".join(f"- **{t}** ← `{s}` ({n}건)" for t, s, n in results)
+                    st.success(f"{uploaded_workbook.name} 교체 임포트 완료:\n{lines}")
+                    st.rerun()
                 else:
-                    st.warning("적용된 시트가 없습니다. 시트명 또는 컬럼을 확인하세요.")
+                    st.warning("임포트할 시트를 찾지 못했습니다.")
             except Exception as e:
-                st.error(f"업로드 오류: {e}")
+                st.error(f"임포트 오류: {e}")
 
     tab1, tab2 = st.tabs(["용어", "패턴"])
 
     # ── 용어 탭 ──────────────────────────────
     with tab1:
-        st.caption("선택한 용어는 항상 동일하게 번역합니다.")
+        col_search, col_count = st.columns([4, 1])
+        with col_search:
+            terms_search = st.text_input(
+                "검색 (KO/EN/Note)",
+                key="terms_search",
+                placeholder="예: Wrapsody, rule, 정책 …",
+                label_visibility="collapsed",
+            )
 
-        _, col_reset = st.columns([6, 2])
-        with col_reset:
-            if st.button("비우기", key="reset_glossary", use_container_width=True):
-                st.session_state.glossary_df = prepare_glossary_editor_df(
-                    pd.DataFrame(columns=["KO", "EN", "File", "Product", "DNT", "Case-sensitive", "Note"])
-                )
-                st.rerun()
+        terms_df = load_terms(
+            product=st.session_state.selected_product,
+            search=terms_search,
+        )
+        # 화면에 보였던 id 집합 — autosave 시 "이 안에서만 삭제 허용"하는 안전장치.
+        # 현재 product/검색 필터로 안 보이는 row가 실수로 삭제되는 사고 방지.
+        _terms_view_ids = {int(v) for v in terms_df["id"].dropna().tolist()}
+        with col_count:
+            st.caption(f"{len(terms_df)}개")
 
-        st.session_state.glossary_df = prepare_glossary_editor_df(st.session_state.glossary_df)
-
-        edited_glossary_df = st.data_editor(
-            st.session_state.glossary_df,
+        edited_terms = st.data_editor(
+            terms_df,
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
-            disabled=["File"],
+            disabled=["id", "File", "Status"],
             column_config={
                 "적용": st.column_config.CheckboxColumn("적용", default=True),
+                "id": st.column_config.NumberColumn("ID", help="자동 부여 (편집 불가)"),
                 "KO": st.column_config.TextColumn("KO"),
                 "EN": st.column_config.TextColumn("EN"),
-                "File": st.column_config.TextColumn("File"),
-                "Product": st.column_config.TextColumn("Product"),
-                "DNT": st.column_config.TextColumn("DNT"),
-                "Case-sensitive": st.column_config.TextColumn("Case-sensitive"),
+                "Product": st.column_config.TextColumn("Product", help="ALL 또는 제품명 (예: fss)"),
+                "DNT": st.column_config.CheckboxColumn("DNT"),
+                "Case-sensitive": st.column_config.CheckboxColumn("Case-sensitive"),
                 "Note": st.column_config.TextColumn("Note"),
+                "Status": st.column_config.TextColumn("Status"),
+                "File": st.column_config.TextColumn("출처"),
             },
-            key="glossary_editor_widget",
+            key=f"terms_editor_{st.session_state.glossary_editor_key}",
         )
-        st.session_state.glossary_df = prepare_glossary_editor_df(edited_glossary_df)
+
+        # 변경 감지 → 자동 저장. view_ids로 "화면에 보였던 row 안에서만" 삭제 허용.
+        if not edited_terms.equals(terms_df):
+            try:
+                counts = save_terms_from_dataframe(edited_terms, view_ids=_terms_view_ids)
+                summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
+                st.toast(f"용어 저장됨 — {summary}", icon="💾")
+                st.rerun()
+            except Exception as e:
+                st.error(f"저장 오류: {e}")
 
     # ── 패턴 탭 ──────────────────────────────
     with tab2:
-        st.caption("비슷한 패턴이 나오면 아래를 참고해 번역합니다.")
+        col_search, col_count = st.columns([4, 1])
+        with col_search:
+            patterns_search = st.text_input(
+                "검색 (KO/EN/Note)",
+                key="patterns_search",
+                placeholder="예: 클릭, click, 화면 …",
+                label_visibility="collapsed",
+            )
 
-        _, col_reset = st.columns([6, 2])
-        with col_reset:
-            if st.button("비우기", key="reset_pattern", use_container_width=True):
-                st.session_state.pattern_df = prepare_pattern_editor_df(
-                    pd.DataFrame(columns=["KO", "EN", "File", "Note"])
-                )
-                st.rerun()
+        patterns_df = load_patterns(search=patterns_search)
+        _patterns_view_ids = {int(v) for v in patterns_df["id"].dropna().tolist()}
+        with col_count:
+            st.caption(f"{len(patterns_df)}개")
 
-        st.session_state.pattern_df = prepare_pattern_editor_df(st.session_state.pattern_df)
-
-        edited_pattern_df = st.data_editor(
-            st.session_state.pattern_df,
+        edited_patterns = st.data_editor(
+            patterns_df,
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
-            disabled=["File"],
+            disabled=["id", "File", "Status"],
             column_config={
                 "적용": st.column_config.CheckboxColumn("적용", default=True),
+                "id": st.column_config.NumberColumn("ID"),
                 "KO": st.column_config.TextColumn("KO"),
                 "EN": st.column_config.TextColumn("EN"),
-                "File": st.column_config.TextColumn("File"),
                 "Note": st.column_config.TextColumn("Note"),
+                "Status": st.column_config.TextColumn("Status"),
+                "File": st.column_config.TextColumn("출처"),
             },
-            key="pattern_editor_widget",
+            key=f"patterns_editor_{st.session_state.pattern_editor_key}",
         )
-        st.session_state.pattern_df = prepare_pattern_editor_df(edited_pattern_df)
 
-    # ── 이전 / 다음 버튼 (탭 바깥) ───────────
+        if not edited_patterns.equals(patterns_df):
+            try:
+                counts = save_patterns_from_dataframe(edited_patterns, view_ids=_patterns_view_ids)
+                summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
+                st.toast(f"패턴 저장됨 — {summary}", icon="💾")
+                st.rerun()
+            except Exception as e:
+                st.error(f"저장 오류: {e}")
+
+    # ── 이전 / 다음 버튼 ───────────
     st.markdown("---")
     col_back, col_next = st.columns(2)
 
@@ -637,14 +520,18 @@ elif st.session_state.step == 3:
         st.session_state.enable_qa,
     )
 
+    # DB에서 직접 로드 — Step 2에서 편집한 결과가 즉시 반영됨
+    _terms_df = load_terms(product=st.session_state.selected_product)
+    _patterns_df = load_patterns()
+
     glossary_rows = (
-        st.session_state.glossary_df[st.session_state.glossary_df["적용"] == True]
-        .drop(columns=["적용"])
+        _terms_df[_terms_df["적용"] == True]
+        .drop(columns=["적용", "id", "Status"])
         .to_dict("records")
     )
     pattern_rows = (
-        st.session_state.pattern_df[st.session_state.pattern_df["적용"] == True]
-        .drop(columns=["적용"])
+        _patterns_df[_patterns_df["적용"] == True]
+        .drop(columns=["적용", "id", "Status"])
         .to_dict("records")
     )
 
