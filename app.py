@@ -561,168 +561,105 @@ if st.session_state.app_mode == "번역 실행" and st.session_state.step == 1:
 
 if st.session_state.app_mode == "Glossary 관리":
     st.subheader("Glossary 관리")
-
-    # ── 현재 Team/Personal 수량을 먼저 측정해서 안내 분기 ──────────────
-    _team_terms_count = len(load_terms(current_user=st.session_state.current_user, scope_filter="team"))
-    _mine_terms_count = len(load_terms(current_user=st.session_state.current_user, scope_filter="mine"))
-    _team_pat_count   = len(load_patterns(current_user=st.session_state.current_user, scope_filter="team"))
-    _mine_pat_count   = len(load_patterns(current_user=st.session_state.current_user, scope_filter="mine"))
-
-    # ── 통계 카드 4개 ───────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Team 용어", f"{_team_terms_count:,}")
-    c2.metric(f"내 용어 ({st.session_state.current_user})", f"{_mine_terms_count:,}")
-    c3.metric("Team 패턴", f"{_team_pat_count:,}")
-    c4.metric(f"내 패턴 ({st.session_state.current_user})", f"{_mine_pat_count:,}")
-
-    st.markdown(" ")
-
-    # ── 빈 상태(empty-state) onboarding: Team 글로서리가 비어있으면 ──
-    if _team_terms_count == 0 and _team_pat_count == 0:
-        st.info(
-            "👋 **시작하기 — 먼저 팀에서 관리하는 Master 글로서리 엑셀을 불러오세요.**\n\n"
-            "아래 **'1️⃣ 팀 Master 엑셀 불러오기'** 섹션에서 Wrapsody에서 받은 master xlsx를 올리면 "
-            "Team 영역이 채워집니다. 그 다음 이 화면 표에서 본인 작업용 용어를 추가/수정하시면 됩니다 "
-            "(자동으로 Scope=내 이름인 Personal 용어로 저장).",
-            icon="💡",
-        )
-    else:
-        # 작업 흐름 안내 — 항상 보임 (접을 수 있게)
-        with st.expander("💡 이 화면에서 무엇을 할 수 있나요?", expanded=False):
-            st.markdown(
-                f"""
-                **1️⃣ 팀 Master 글로서리 불러오기**
-                팀이 Wrapsody에서 함께 관리하는 마스터 엑셀을 올리면 **Team 영역만** 새로 채웁니다.
-                본인을 포함한 모든 사용자의 **Personal 용어는 그대로 유지**됩니다.
-
-                **2️⃣ 본인 용도로 Personalize**
-                아래 표에서 행을 추가하면 기본 **Scope = `{st.session_state.current_user}`** (= 본인만 보이는 Personal)으로 저장됩니다.
-                Team 표준에 올리고 싶을 때만 Scope을 **`Team`** 으로 바꾸세요.
-                다른 사람의 Personal 용어는 보이지도 수정되지도 않습니다.
-
-                **3️⃣ 백업 / Wrapsody 재업로드**
-                **📥 Glossary 다운로드** 섹션에서 엑셀로 받아 Wrapsody에 다시 업로드(암호화 보관)하거나 로컬에 백업하세요.
-                """
-            )
-
-    st.markdown(" ")
-
-    # 제품 필터 — 글로서리 페이지는 번역 워크플로의 selected_product에 묶이지 않음.
-    product_options = ["전체"] + products
-    _default_p = st.session_state.selected_product or "전체"
-    try:
-        _default_idx = product_options.index(_default_p)
-    except ValueError:
-        _default_idx = 0
-    glossary_product_choice = st.selectbox(
-        "제품 필터",
-        product_options,
-        index=_default_idx,
-        help="특정 제품 + ALL 공통 항목만 보거나, 전체 항목을 봅니다.",
-    )
-    active_product = None if glossary_product_choice == "전체" else glossary_product_choice
-
-    # ── 다운로드 (백업 / Wrapsody 재업로드용) ─────────────────────────
-    with st.expander("3️⃣  Glossary 다운로드 (.xlsx) — 백업 / Wrapsody 재업로드용", expanded=False):
-        st.caption(
-            "현재 사용자가 볼 수 있는 용어 + 패턴을 엑셀로 다운받아 "
-            "**Wrapsody에 다시 업로드(암호화 관리)하거나 로컬에 백업**할 수 있어요."
-        )
-        col_dl_scope, col_dl_btn = st.columns([1, 1])
-        with col_dl_scope:
-            _dl_scope_label = st.selectbox(
-                "범위",
-                ["전체 (Team + 내 것)", "Team만", "내 것만"],
-                key="dl_scope_glossary",
-            )
-        _dl_scope = {
-            "전체 (Team + 내 것)": "all",
-            "Team만": "team",
-            "내 것만": "mine",
-        }[_dl_scope_label]
-        from datetime import date as _date
-        _dl_filename = f"glossary_{_date.today().isoformat()}_{st.session_state.current_user}.xlsx"
-        try:
-            _dl_bytes = export_to_excel(
-                current_user=st.session_state.current_user,
-                scope_filter=_dl_scope,
-            )
-            with col_dl_btn:
-                st.write(" ")
-                st.download_button(
-                    "엑셀로 다운로드",
-                    data=_dl_bytes,
-                    file_name=_dl_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-        except Exception as e:
-            st.error(f"다운로드 준비 오류: {e}")
-
-    # ── Master Excel 교체 임포트 (Team-only) ─────────────────────────
-    # 빈 상태일 땐 자동으로 펼침 — onboarding과 자연스럽게 이어지도록.
-    with st.expander(
-        "1️⃣  팀 Master 엑셀 불러오기 (Team 영역만 교체)",
-        expanded=(_team_terms_count == 0 and _team_pat_count == 0),
-    ):
-        st.caption(
-            f"팀에서 관리하는 최신 Master Glossary 엑셀 파일을 올리면 "
-            f"**Team 영역만 새로 채웁니다.** 모든 사용자의 개인(Personal) 용어는 그대로 유지됩니다.\n\n"
-            f"현재 필터: 제품 **{active_product or '전체'}** 항목과 모든 제품 공통(`ALL`) 항목만 가져옵니다."
-        )
-        uploaded_workbook = st.file_uploader(
-            "Master Glossary 엑셀",
-            type=["xlsx", "xlsm", "xls"],
-            key="uploaded_workbook",
-            label_visibility="collapsed",
-        )
-        if uploaded_workbook is not None:
-            try:
-                from io import BytesIO
-                sheets = pd.read_excel(BytesIO(uploaded_workbook.getvalue()), sheet_name=None)
-                results = []
-                # glossary 시트
-                gpick = None
-                for sname, sdf in sheets.items():
-                    if any(k in sname.lower() for k in ["glossary", "용어", "사전"]):
-                        gpick = (sname, sdf); break
-                if gpick is None and sheets:
-                    gpick = list(sheets.items())[0]
-                if gpick:
-                    sname, sdf = gpick
-                    n = replace_terms_from_excel(
-                        sdf,
-                        source_file=f"{uploaded_workbook.name} [{sname}]",
-                        product_filter=active_product,
-                    )
-                    results.append(("용어", sname, n))
-                # pattern 시트
-                ppick = None
-                for sname, sdf in sheets.items():
-                    if any(k in sname.lower() for k in ["pattern", "패턴"]):
-                        ppick = (sname, sdf); break
-                if ppick is None and len(sheets) >= 2:
-                    ppick = list(sheets.items())[1]
-                if ppick:
-                    sname, sdf = ppick
-                    n = replace_patterns_from_excel(
-                        sdf, source_file=f"{uploaded_workbook.name} [{sname}]"
-                    )
-                    results.append(("패턴", sname, n))
-                if results:
-                    lines = "\n".join(f"- **{t}** ← `{s}` ({n}건)" for t, s, n in results)
-                    st.success(f"{uploaded_workbook.name} 교체 임포트 완료:\n{lines}")
-                    st.rerun()
-                else:
-                    st.warning("임포트할 시트를 찾지 못했습니다.")
-            except Exception as e:
-                st.error(f"임포트 오류: {e}")
-
-    st.markdown(f"### 2️⃣  본인 용도로 Personalize")
     st.caption(
-        f"행을 추가하면 기본값은 Scope = **{st.session_state.current_user}** (본인만 보이는 Personal). "
-        f"Team에 추가하고 싶을 때만 Scope을 `Team`으로 바꿔서 저장하세요."
+        f"Team 항목은 모두가 함께 보고 편집합니다. "
+        f"Scope을 본인 이름(**{st.session_state.current_user}**)으로 둔 항목은 본인에게만 보이고 본인만 수정할 수 있습니다. "
+        f"여기서 추가/수정/삭제한 결과는 번역 시 자동으로 적용됩니다."
     )
+
+    # 제품 필터는 사용 안 함 — 전체 항목을 항상 표시.
+    active_product = None
+
+    # ── 상단 액션 버튼: 최신 엑셀 불러오기 (옵션) / 백업 다운로드 ──────
+    # 둘 다 옵션. 안 눌러도 표는 정상 표시.
+    if "show_master_upload" not in st.session_state:
+        st.session_state.show_master_upload = False
+
+    from datetime import date as _date
+    _dl_filename = f"glossary_{_date.today().isoformat()}_{st.session_state.current_user}.xlsx"
+    try:
+        _dl_bytes = export_to_excel(
+            current_user=st.session_state.current_user,
+            scope_filter="all",
+        )
+        _dl_ok = True
+    except Exception:
+        _dl_bytes = b""
+        _dl_ok = False
+
+    col_act_upload, col_act_download, _col_spacer = st.columns([2, 2, 6])
+    with col_act_upload:
+        if st.button("📤  최신 엑셀 불러오기", use_container_width=True, key="toggle_master_upload"):
+            st.session_state.show_master_upload = not st.session_state.show_master_upload
+            st.rerun()
+    with col_act_download:
+        st.download_button(
+            "📥  백업 다운로드",
+            data=_dl_bytes,
+            file_name=_dl_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            disabled=not _dl_ok,
+            key="download_glossary_btn",
+        )
+
+    # ── 최신 엑셀 불러오기 영역 (토글) ─────────────────────────────────
+    if st.session_state.show_master_upload:
+        with st.container(border=True):
+            st.markdown("**최신 Master Glossary 엑셀 불러오기**")
+            st.caption(
+                "팀에서 관리하는 마스터 엑셀을 올리면 **Team 영역만** 새로 채웁니다. "
+                "모든 사용자의 Personal 항목은 그대로 유지됩니다."
+            )
+            uploaded_workbook = st.file_uploader(
+                "Master Glossary 엑셀",
+                type=["xlsx", "xlsm", "xls"],
+                key="uploaded_workbook",
+                label_visibility="collapsed",
+            )
+            if uploaded_workbook is not None:
+                try:
+                    from io import BytesIO
+                    sheets = pd.read_excel(BytesIO(uploaded_workbook.getvalue()), sheet_name=None)
+                    results = []
+                    gpick = None
+                    for sname, sdf in sheets.items():
+                        if any(k in sname.lower() for k in ["glossary", "용어", "사전"]):
+                            gpick = (sname, sdf); break
+                    if gpick is None and sheets:
+                        gpick = list(sheets.items())[0]
+                    if gpick:
+                        sname, sdf = gpick
+                        n = replace_terms_from_excel(
+                            sdf,
+                            source_file=f"{uploaded_workbook.name} [{sname}]",
+                            product_filter=active_product,
+                        )
+                        results.append(("용어", sname, n))
+                    ppick = None
+                    for sname, sdf in sheets.items():
+                        if any(k in sname.lower() for k in ["pattern", "패턴"]):
+                            ppick = (sname, sdf); break
+                    if ppick is None and len(sheets) >= 2:
+                        ppick = list(sheets.items())[1]
+                    if ppick:
+                        sname, sdf = ppick
+                        n = replace_patterns_from_excel(
+                            sdf, source_file=f"{uploaded_workbook.name} [{sname}]"
+                        )
+                        results.append(("패턴", sname, n))
+                    if results:
+                        lines = "\n".join(f"- **{t}** ← `{s}` ({n}건)" for t, s, n in results)
+                        st.success(f"{uploaded_workbook.name} 적용 완료:\n{lines}")
+                        st.session_state.show_master_upload = False
+                        st.rerun()
+                    else:
+                        st.warning("적용할 시트를 찾지 못했습니다.")
+                except Exception as e:
+                    st.error(f"임포트 오류: {e}")
+            if st.button("닫기", key="close_master_upload"):
+                st.session_state.show_master_upload = False
+                st.rerun()
 
     tab1, tab2 = st.tabs(["용어", "패턴"])
 
