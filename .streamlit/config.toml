@@ -1,0 +1,13 @@
+# Streamlit Cloud / local 공통 설정.
+#
+# 핵심 — toolbarMode = "minimal"
+#   햄버거 메뉴에서 "Clear cache", "Rerun" 같은 옵션을 숨겨서,
+#   data_editor 셀에서 텍스트를 드래그하다가 'C' 키 입력으로
+#   Clear Caches 모달이 뜨는 사고를 막는다. 일반 사용자는 이 메뉴를
+#   쓸 일이 없고 운영자는 streamlit run을 직접 재기동하면 충분.
+[client]
+toolbarMode = "minimal"
+showSidebarNavigation = false
+
+[browser]
+gatherUsageStats = false
