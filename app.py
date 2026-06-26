@@ -265,6 +265,11 @@ st.markdown(
         width: 100%;
     }
 
+    /* ── 메인 영역 상단 여백 — 우측 상단 동그라미 아이콘이 잘리는 것 방지 */
+    .block-container {
+        padding-top: 2rem !important;
+    }
+
     /* ── 사이드바 폭 + 영역 축소 (기본 ~244px → 170px) ───────────── */
     section[data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
         width: 170px;
@@ -318,8 +323,8 @@ st.markdown(
         height: 36px !important;
         min-height: 36px !important;
         border-radius: 50% !important;
-        background: #4CAF50 !important;
-        color: #fff !important;
+        background: #E8F5E9 !important;
+        color: #2E7D32 !important;
         font-weight: 700 !important;
         font-size: 14px !important;
         padding: 0 !important;
@@ -327,7 +332,22 @@ st.markdown(
         box-shadow: 0 2px 4px rgba(0,0,0,0.08) !important;
     }
     [data-testid="stPopover"] > div:first-child > button:hover {
-        background: #43A047 !important;
+        background: #DCEDC8 !important;
+    }
+
+    /* ── popover 패널 안의 로그아웃 버튼: 빨간 글자, 호버 시 옅은 빨강 ── */
+    div[data-baseweb="popover"] [data-testid="stButton"] button {
+        color: #D32F2F !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+        padding-left: 12px !important;
+        background: transparent !important;
+        border: none !important;
+        font-weight: 600 !important;
+    }
+    div[data-baseweb="popover"] [data-testid="stButton"] button:hover {
+        background: #FFEBEE !important;
+        color: #B71C1C !important;
     }
     </style>
     """,
@@ -443,7 +463,23 @@ def _render_user_menu() -> None:
     name = st.session_state.current_user or "?"
     initial = name[0].upper()
     with st.popover(initial, use_container_width=False):
-        st.markdown(f"**👤 {name}**")
+        # 큰 동그라미 + 이름 + 역할 — Fireside/Wrapsody 스타일
+        st.markdown(
+            f"""
+            <div style='display:flex;align-items:center;gap:14px;
+                        padding:6px 4px 14px 4px;min-width:220px;'>
+              <span style='display:inline-flex;align-items:center;justify-content:center;
+                           width:52px;height:52px;border-radius:50%;
+                           background:#E8F5E9;color:#2E7D32;
+                           font-weight:700;font-size:20px;'>{initial}</span>
+              <div style='line-height:1.35;'>
+                <div style='font-weight:700;font-size:15px;color:#222;'>{name}</div>
+                <div style='font-size:12px;color:#888;'>Translator</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.divider()
         if st.button("로그아웃", use_container_width=True, key="logout_btn"):
             st.session_state.current_user = ""
@@ -466,10 +502,10 @@ else:
 
 
 # ─────────────────────────────────────────────
-# Step 1 — 기본 정보
+# Step 1 — 기본 정보 (번역 실행 모드에서만 노출)
 # ─────────────────────────────────────────────
 
-if st.session_state.step == 1:
+if st.session_state.app_mode == "번역 실행" and st.session_state.step == 1:
     st.subheader("Step 1. 기본 정보")
     st.markdown("번역할 텍스트 유형과 제품을 선택하세요.")
 
