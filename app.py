@@ -265,19 +265,69 @@ st.markdown(
         width: 100%;
     }
 
-    /* ── 사이드바 폭 축소 (기본 ~244px → 200px) ────────────────── */
+    /* ── 사이드바 폭 + 영역 축소 (기본 ~244px → 170px) ───────────── */
     section[data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
-        width: 200px;
-        min-width: 200px;
+        width: 170px;
+        min-width: 170px;
+    }
+    section[data-testid="stSidebar"][aria-expanded="true"] {
+        width: 170px !important;
+        min-width: 170px !important;
     }
 
-    /* ── 사이드바 메뉴 버튼: 왼쪽 정렬 + 큰 폰트 ─────────────── */
+    /* ── 사이드바 메뉴 버튼: Wrapsody 스타일 ──────────────────── */
+    /* 비활성: 테두리 없음, 투명 배경, 회색 글자 */
     section[data-testid="stSidebar"] [data-testid="stButton"] button {
         text-align: left;
         justify-content: flex-start;
-        font-size: 17px;
-        font-weight: 600;
-        padding-left: 14px;
+        font-size: 15px;
+        font-weight: 500;
+        padding-left: 12px;
+        padding-right: 12px;
+        border: none !important;
+        background: transparent !important;
+        color: #555 !important;
+        border-radius: 8px !important;
+        min-height: 38px !important;
+        box-shadow: none !important;
+    }
+    /* 호버: 옅은 회색 배경 */
+    section[data-testid="stSidebar"] [data-testid="stButton"] button:hover:not(:disabled) {
+        background: #F0F2F5 !important;
+        color: #222 !important;
+    }
+    /* 활성(primary): 연한 녹색 배경 + 진한 녹색 글자 + 굵게 */
+    section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {
+        background: #E8F5E9 !important;
+        color: #2E7D32 !important;
+        font-weight: 700 !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:hover {
+        background: #DCEDC8 !important;
+        color: #1B5E20 !important;
+    }
+    /* 비활성화(disabled): 더 옅은 회색 */
+    section[data-testid="stSidebar"] [data-testid="stButton"] button:disabled {
+        color: #BBB !important;
+        background: transparent !important;
+    }
+
+    /* ── 사용자 popover trigger: 원형 이니셜 아이콘 ─────────────── */
+    [data-testid="stPopover"] > div:first-child > button {
+        width: 36px !important;
+        height: 36px !important;
+        min-height: 36px !important;
+        border-radius: 50% !important;
+        background: #4CAF50 !important;
+        color: #fff !important;
+        font-weight: 700 !important;
+        font-size: 14px !important;
+        padding: 0 !important;
+        border: none !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.08) !important;
+    }
+    [data-testid="stPopover"] > div:first-child > button:hover {
+        background: #43A047 !important;
     }
     </style>
     """,
@@ -362,11 +412,8 @@ if not st.session_state.current_user:
 # 로그인 후 — 사이드바 nav + 메인 헤더 + 메뉴별 콘텐츠
 # ──────────────────────────────────────────────────────────────────────
 
-# ── 사이드바: 메뉴 nav (아이콘 없이, 좌측 정렬, 큰 폰트) ────────────────
+# ── 사이드바: 메뉴 nav (헤더 라벨 없음, 테두리 없는 Wrapsody 스타일) ────
 with st.sidebar:
-    st.markdown("### 메뉴")
-    st.markdown(" ")
-
     if st.button(
         "번역 실행",
         use_container_width=True,
@@ -388,45 +435,34 @@ with st.sidebar:
     st.button("로그 (준비 중)", use_container_width=True, disabled=True, key="nav_logs")
 
 # ── 메인 헤더 ─────────────────────────────────────────────────────────
-# 우측에 원형 이니셜 + 작은 사용자 이름 + 로그아웃 (모든 모드 공통).
+# 우측 상단: 원형 이니셜 아이콘 (popover trigger). 클릭하면 사용자 이름 +
+# 로그아웃 버튼이 드롭다운으로 뜬다. 모든 모드 공통.
 # "Fasoo Localization Agent" 큰 타이틀은 번역 실행 모드에서만 노출 —
 # Glossary 관리에선 페이지 자체 subheader가 있으니 중복 제거.
-def _render_user_chip() -> str:
+def _render_user_menu() -> None:
     name = st.session_state.current_user or "?"
     initial = name[0].upper()
-    return (
-        "<div style='display:flex;align-items:center;justify-content:flex-end;"
-        "gap:8px;margin-top:14px;'>"
-        f"<span style='display:inline-flex;align-items:center;justify-content:center;"
-        f"width:28px;height:28px;border-radius:50%;background:#4CAF50;color:#fff;"
-        f"font-weight:700;font-size:12px;'>{initial}</span>"
-        f"<span style='font-size:13px;color:#444;'>{name}</span>"
-        "</div>"
-    )
+    with st.popover(initial, use_container_width=False):
+        st.markdown(f"**👤 {name}**")
+        st.divider()
+        if st.button("로그아웃", use_container_width=True, key="logout_btn"):
+            st.session_state.current_user = ""
+            st.rerun()
 
 
 if st.session_state.app_mode == "번역 실행":
-    col_title, col_user, col_logout = st.columns([7, 2, 1])
+    col_title, col_user = st.columns([9, 1])
     with col_title:
         st.title("Fasoo Localization Agent")
         st.caption("국문 문서를 영문으로 로컬라이즈합니다.")
     with col_user:
-        st.markdown(_render_user_chip(), unsafe_allow_html=True)
-    with col_logout:
         st.markdown(" ")
-        if st.button("로그아웃", use_container_width=True, key="logout_btn"):
-            st.session_state.current_user = ""
-            st.rerun()
+        _render_user_menu()
 else:
-    # Glossary 모드: 큰 타이틀 없음. 사용자 chip + 로그아웃만 우측 상단에.
-    _spacer, col_user, col_logout = st.columns([7, 2, 1])
+    # Glossary 모드: 큰 타이틀 없음. 사용자 아이콘만 우측 상단에.
+    _spacer, col_user = st.columns([9, 1])
     with col_user:
-        st.markdown(_render_user_chip(), unsafe_allow_html=True)
-    with col_logout:
-        st.markdown(" ")
-        if st.button("로그아웃", use_container_width=True, key="logout_btn"):
-            st.session_state.current_user = ""
-            st.rerun()
+        _render_user_menu()
 
 
 # ─────────────────────────────────────────────
