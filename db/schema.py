@@ -60,12 +60,15 @@ CREATE TABLE IF NOT EXISTS terms (
     note            TEXT    DEFAULT '',
     status          TEXT    NOT NULL DEFAULT 'approved',
     source_file     TEXT    DEFAULT '',
+    owner           TEXT    DEFAULT '',     -- '' = Team(공용), 그 외 = 개인 user 이름
     imported_at     TEXT,
     updated_at      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS ix_terms_product ON terms(product);
 CREATE INDEX IF NOT EXISTS ix_terms_ko      ON terms(ko);
+-- ix_terms_owner is created in _migrate() because the owner column may be
+-- added via ALTER TABLE for pre-existing databases.
 
 CREATE TABLE IF NOT EXISTS patterns (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,18 +77,46 @@ CREATE TABLE IF NOT EXISTS patterns (
     note            TEXT    DEFAULT '',
     status          TEXT    NOT NULL DEFAULT 'approved',
     source_file     TEXT    DEFAULT '',
+    owner           TEXT    DEFAULT '',     -- '' = Team(공용), 그 외 = 개인
     imported_at     TEXT,
     updated_at      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS ix_patterns_ko ON patterns(ko);
+-- ix_patterns_owner is created in _migrate() (same reason as ix_terms_owner).
 """
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == col for r in rows)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """
+    Apply lightweight schema migrations for already-populated DBs.
+
+    Each migration is idempotent (checks before altering) so this can run
+    on every startup safely. Add new migrations at the bottom.
+    """
+    # M1: terms.owner — Team/Personal scope (Option A multi-user)
+    if not _column_exists(conn, "terms", "owner"):
+        conn.execute("ALTER TABLE terms ADD COLUMN owner TEXT DEFAULT ''")
+        conn.execute("UPDATE terms SET owner='' WHERE owner IS NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_terms_owner ON terms(owner)")
+
+    # M2: patterns.owner
+    if not _column_exists(conn, "patterns", "owner"):
+        conn.execute("ALTER TABLE patterns ADD COLUMN owner TEXT DEFAULT ''")
+        conn.execute("UPDATE patterns SET owner='' WHERE owner IS NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_patterns_owner ON patterns(owner)")
+
+
 def init_db() -> None:
-    """Create tables if they don't exist. Safe to call repeatedly."""
+    """Create tables if they don't exist, then apply migrations. Safe on every startup."""
     with db_session() as conn:
         conn.executescript(_SCHEMA_SQL)
+        _migrate(conn)
 
 
 def now_iso() -> str:

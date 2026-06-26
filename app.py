@@ -16,6 +16,7 @@ from services.glossary import (
     save_patterns_from_dataframe,
     save_terms_from_dataframe,
 )
+from services.users import add_user, list_users
 from translator_engine import translate_document
 
 
@@ -141,6 +142,7 @@ def init_session_state():
         "translation_mode": "매뉴얼",
         "enable_cache": True,
         "enable_qa": True,
+        "current_user": "",
         "last_result": None,
         "last_output_path": None,
         "last_output_filename": None,
@@ -266,11 +268,59 @@ st.markdown(
 st.title("Fasoo Localization Agent")
 st.markdown("국문 문서를 영문으로 로컬라이즈합니다.")
 
+# ── 사이드바: 사용자 선택 (Option A 멀티유저) ──────────────────────────
+# 첫 사용자는 직접 이름을 입력하면 자동 등록되고, 그 이후엔 드롭다운에서 선택.
+with st.sidebar:
+    st.markdown("### 사용자")
+    registered = list_users()
+
+    if registered:
+        options = ["(선택)"] + registered + ["+ 새 사용자 추가"]
+        default_idx = 0
+        if st.session_state.current_user in registered:
+            default_idx = options.index(st.session_state.current_user)
+        choice = st.selectbox(
+            "현재 사용자",
+            options,
+            index=default_idx,
+            label_visibility="collapsed",
+        )
+        if choice == "+ 새 사용자 추가":
+            new_name = st.text_input("새 사용자 이름", key="new_user_name")
+            if st.button("등록", use_container_width=True):
+                if new_name.strip():
+                    add_user(new_name.strip())
+                    st.session_state.current_user = new_name.strip()
+                    st.rerun()
+        elif choice != "(선택)":
+            st.session_state.current_user = choice
+        else:
+            st.session_state.current_user = ""
+    else:
+        st.caption("아직 등록된 사용자가 없습니다. 이름을 입력해 시작하세요.")
+        new_name = st.text_input("이름", key="new_user_name_first")
+        if st.button("시작하기", use_container_width=True, type="primary"):
+            if new_name.strip():
+                add_user(new_name.strip())
+                st.session_state.current_user = new_name.strip()
+                st.rerun()
+
+    if st.session_state.current_user:
+        st.success(f"👤 {st.session_state.current_user}")
+        st.caption(
+            "Team 용어는 모두가 함께 관리하고, "
+            "내 용어(Personal)는 본인에게만 보이며 본인만 수정할 수 있습니다."
+        )
+
 config = load_product_config()
 products = list(config.keys())
 
 if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY를 찾을 수 없습니다.")
+    st.stop()
+
+if not st.session_state.current_user:
+    st.warning("👈 시작하려면 왼쪽 사이드바에서 사용자를 선택하거나 등록해주세요.")
     st.stop()
 
 
@@ -338,15 +388,18 @@ elif st.session_state.step == 2:
         st.session_state.enable_qa,
     )
 
-    # ── Master Excel 교체 임포트 (옵션 A — Wrapsody 워크플로) ──────────
-    with st.expander("Master Excel 교체 임포트 — 기존 데이터 통째로 덮어쓰기", expanded=False):
+    # ── Master Excel 교체 임포트 (옵션 A — Wrapsody 워크플로 + Team-only) ─
+    with st.expander("최신 Master Glossary 엑셀 불러오기", expanded=False):
         st.caption(
-            f"매번 Wrapsody에서 decrypt한 master 엑셀을 올리면 DB가 그 시점 스냅샷으로 새로 채워집니다. "
-            f"시트명에 'glossary'/'용어'를 포함하면 용어로, 'pattern'/'패턴'을 포함하면 패턴으로 인식합니다.\n\n"
-            f"**Product 필터**: 현재 선택된 제품 `{st.session_state.selected_product}` 또는 `all/ALL`만 통과합니다."
+            f"팀에서 관리하는 최신 Master Glossary 엑셀 파일을 올리면 "
+            f"**Team 영역만 새로 채웁니다.** 모든 사용자의 개인(Personal) 용어는 그대로 유지됩니다.\n\n"
+            f"엑셀 안 시트 자동 분류:\n"
+            f"- 시트 이름이 `용어` / `glossary` → **용어 탭**\n"
+            f"- 시트 이름이 `패턴` / `pattern` → **패턴 탭**\n\n"
+            f"현재 선택한 제품 **{st.session_state.selected_product}** 항목과 모든 제품 공통(`ALL`) 항목만 가져옵니다."
         )
         uploaded_workbook = st.file_uploader(
-            "Master Excel 파일",
+            "Master Glossary 엑셀",
             type=["xlsx", "xlsm", "xls"],
             key="uploaded_workbook",
             label_visibility="collapsed",
@@ -397,7 +450,7 @@ elif st.session_state.step == 2:
 
     # ── 용어 탭 ──────────────────────────────
     with tab1:
-        col_search, col_count = st.columns([4, 1])
+        col_search, col_scope, col_count = st.columns([3, 1, 1])
         with col_search:
             terms_search = st.text_input(
                 "검색 (KO/EN/Note)",
@@ -405,13 +458,21 @@ elif st.session_state.step == 2:
                 placeholder="예: Wrapsody, rule, 정책 …",
                 label_visibility="collapsed",
             )
+        with col_scope:
+            terms_scope_label = st.selectbox(
+                "Scope",
+                ["전체", "Team만", "내 용어만"],
+                key="terms_scope_filter",
+                label_visibility="collapsed",
+            )
+        terms_scope = {"전체": "all", "Team만": "team", "내 용어만": "mine"}[terms_scope_label]
 
         terms_df = load_terms(
             product=st.session_state.selected_product,
             search=terms_search,
+            current_user=st.session_state.current_user,
+            scope_filter=terms_scope,
         )
-        # 화면에 보였던 id 집합 — autosave 시 "이 안에서만 삭제 허용"하는 안전장치.
-        # 현재 product/검색 필터로 안 보이는 row가 실수로 삭제되는 사고 방지.
         _terms_view_ids = {int(v) for v in terms_df["id"].dropna().tolist()}
         with col_count:
             st.caption(f"{len(terms_df)}개")
@@ -422,26 +483,55 @@ elif st.session_state.step == 2:
             hide_index=True,
             num_rows="dynamic",
             disabled=["id", "File", "Status"],
+            column_order=["적용", "Scope", "KO", "EN", "Product", "DNT", "Case-sensitive", "Note"],
             column_config={
                 "적용": st.column_config.CheckboxColumn("적용", default=True),
-                "id": st.column_config.NumberColumn("ID", help="자동 부여 (편집 불가)"),
+                "id": None,
+                "Scope": st.column_config.SelectboxColumn(
+                    "Scope",
+                    options=["Team", st.session_state.current_user],
+                    default=st.session_state.current_user,
+                    help="Team = 모두 공유 / 내 이름 = 본인만 보이는 개인 용어",
+                ),
                 "KO": st.column_config.TextColumn("KO"),
                 "EN": st.column_config.TextColumn("EN"),
-                "Product": st.column_config.TextColumn("Product", help="ALL 또는 제품명 (예: fss)"),
-                "DNT": st.column_config.CheckboxColumn("DNT"),
-                "Case-sensitive": st.column_config.CheckboxColumn("Case-sensitive"),
+                "Product": st.column_config.TextColumn("Product", help="ALL 또는 제품명 (예: AI-R DLP)"),
+                "DNT": st.column_config.CheckboxColumn("DNT", help="번역하지 말고 원문 그대로 유지"),
+                "Case-sensitive": st.column_config.CheckboxColumn("Case-sensitive", help="대소문자를 정확히 보존"),
                 "Note": st.column_config.TextColumn("Note"),
-                "Status": st.column_config.TextColumn("Status"),
-                "File": st.column_config.TextColumn("출처"),
+                "Status": None,
+                "File": None,
             },
             key=f"terms_editor_{st.session_state.glossary_editor_key}",
         )
 
-        # 변경 감지 → 자동 저장. view_ids로 "화면에 보였던 row 안에서만" 삭제 허용.
-        if not edited_terms.equals(terms_df):
+        # 변경사항이 있으면 저장 버튼 활성화. 명시적으로 클릭해야만 DB 반영.
+        terms_changed = not edited_terms.equals(terms_df)
+        col_save, col_status = st.columns([1, 4])
+        with col_save:
+            save_clicked = st.button(
+                "변경사항 저장",
+                key="save_terms",
+                disabled=not terms_changed,
+                type="primary" if terms_changed else "secondary",
+                use_container_width=True,
+            )
+        with col_status:
+            if terms_changed:
+                st.caption("⚠️ 변경됨 — 저장하지 않으면 다른 화면 이동 시 사라집니다.")
+            else:
+                st.caption("✓ 모든 변경사항 저장됨")
+
+        if save_clicked:
             try:
-                counts = save_terms_from_dataframe(edited_terms, view_ids=_terms_view_ids)
+                counts = save_terms_from_dataframe(
+                    edited_terms,
+                    view_ids=_terms_view_ids,
+                    current_user=st.session_state.current_user,
+                )
                 summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
+                if counts.get("denied", 0) > 0:
+                    summary += f" / 권한 없어 거부 {counts['denied']}"
                 st.toast(f"용어 저장됨 — {summary}", icon="💾")
                 st.rerun()
             except Exception as e:
@@ -449,7 +539,7 @@ elif st.session_state.step == 2:
 
     # ── 패턴 탭 ──────────────────────────────
     with tab2:
-        col_search, col_count = st.columns([4, 1])
+        col_search, col_scope, col_count = st.columns([3, 1, 1])
         with col_search:
             patterns_search = st.text_input(
                 "검색 (KO/EN/Note)",
@@ -457,8 +547,20 @@ elif st.session_state.step == 2:
                 placeholder="예: 클릭, click, 화면 …",
                 label_visibility="collapsed",
             )
+        with col_scope:
+            patterns_scope_label = st.selectbox(
+                "Scope",
+                ["전체", "Team만", "내 패턴만"],
+                key="patterns_scope_filter",
+                label_visibility="collapsed",
+            )
+        patterns_scope = {"전체": "all", "Team만": "team", "내 패턴만": "mine"}[patterns_scope_label]
 
-        patterns_df = load_patterns(search=patterns_search)
+        patterns_df = load_patterns(
+            search=patterns_search,
+            current_user=st.session_state.current_user,
+            scope_filter=patterns_scope,
+        )
         _patterns_view_ids = {int(v) for v in patterns_df["id"].dropna().tolist()}
         with col_count:
             st.caption(f"{len(patterns_df)}개")
@@ -469,22 +571,51 @@ elif st.session_state.step == 2:
             hide_index=True,
             num_rows="dynamic",
             disabled=["id", "File", "Status"],
+            column_order=["적용", "Scope", "KO", "EN", "Note"],
             column_config={
                 "적용": st.column_config.CheckboxColumn("적용", default=True),
-                "id": st.column_config.NumberColumn("ID"),
+                "id": None,
+                "Scope": st.column_config.SelectboxColumn(
+                    "Scope",
+                    options=["Team", st.session_state.current_user],
+                    default=st.session_state.current_user,
+                    help="Team = 모두 공유 / 내 이름 = 본인만 보이는 개인 패턴",
+                ),
                 "KO": st.column_config.TextColumn("KO"),
                 "EN": st.column_config.TextColumn("EN"),
                 "Note": st.column_config.TextColumn("Note"),
-                "Status": st.column_config.TextColumn("Status"),
-                "File": st.column_config.TextColumn("출처"),
+                "Status": None,
+                "File": None,
             },
             key=f"patterns_editor_{st.session_state.pattern_editor_key}",
         )
 
-        if not edited_patterns.equals(patterns_df):
+        patterns_changed = not edited_patterns.equals(patterns_df)
+        col_save_p, col_status_p = st.columns([1, 4])
+        with col_save_p:
+            save_p_clicked = st.button(
+                "변경사항 저장",
+                key="save_patterns",
+                disabled=not patterns_changed,
+                type="primary" if patterns_changed else "secondary",
+                use_container_width=True,
+            )
+        with col_status_p:
+            if patterns_changed:
+                st.caption("⚠️ 변경됨 — 저장하지 않으면 다른 화면 이동 시 사라집니다.")
+            else:
+                st.caption("✓ 모든 변경사항 저장됨")
+
+        if save_p_clicked:
             try:
-                counts = save_patterns_from_dataframe(edited_patterns, view_ids=_patterns_view_ids)
+                counts = save_patterns_from_dataframe(
+                    edited_patterns,
+                    view_ids=_patterns_view_ids,
+                    current_user=st.session_state.current_user,
+                )
                 summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
+                if counts.get("denied", 0) > 0:
+                    summary += f" / 권한 없어 거부 {counts['denied']}"
                 st.toast(f"패턴 저장됨 — {summary}", icon="💾")
                 st.rerun()
             except Exception as e:
@@ -520,18 +651,21 @@ elif st.session_state.step == 3:
         st.session_state.enable_qa,
     )
 
-    # DB에서 직접 로드 — Step 2에서 편집한 결과가 즉시 반영됨
-    _terms_df = load_terms(product=st.session_state.selected_product)
-    _patterns_df = load_patterns()
+    # DB에서 직접 로드 — Team + 본인 Personal 합쳐서 사용
+    _terms_df = load_terms(
+        product=st.session_state.selected_product,
+        current_user=st.session_state.current_user,
+    )
+    _patterns_df = load_patterns(current_user=st.session_state.current_user)
 
     glossary_rows = (
         _terms_df[_terms_df["적용"] == True]
-        .drop(columns=["적용", "id", "Status"])
+        .drop(columns=["적용", "id", "Status", "Scope"])
         .to_dict("records")
     )
     pattern_rows = (
         _patterns_df[_patterns_df["적용"] == True]
-        .drop(columns=["적용", "id", "Status"])
+        .drop(columns=["적용", "id", "Status", "Scope"])
         .to_dict("records")
     )
 
