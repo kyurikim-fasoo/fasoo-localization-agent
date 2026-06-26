@@ -269,64 +269,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Fasoo Localization Agent")
-st.markdown("국문 문서를 영문으로 로컬라이즈합니다.")
-
-# ── 사이드바: 메뉴 + 사용자 선택 ────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 메뉴")
-    app_mode = st.radio(
-        "메뉴",
-        ["번역 실행", "Glossary 관리"],
-        index=["번역 실행", "Glossary 관리"].index(st.session_state.app_mode),
-        label_visibility="collapsed",
-    )
-    if app_mode != st.session_state.app_mode:
-        st.session_state.app_mode = app_mode
-        st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 사용자")
-    registered = list_users()
-
-    if registered:
-        options = ["(선택)"] + registered + ["+ 새 사용자 추가"]
-        default_idx = 0
-        if st.session_state.current_user in registered:
-            default_idx = options.index(st.session_state.current_user)
-        choice = st.selectbox(
-            "현재 사용자",
-            options,
-            index=default_idx,
-            label_visibility="collapsed",
-        )
-        if choice == "+ 새 사용자 추가":
-            new_name = st.text_input("새 사용자 이름", key="new_user_name")
-            if st.button("등록", use_container_width=True):
-                if new_name.strip():
-                    add_user(new_name.strip())
-                    st.session_state.current_user = new_name.strip()
-                    st.rerun()
-        elif choice != "(선택)":
-            st.session_state.current_user = choice
-        else:
-            st.session_state.current_user = ""
-    else:
-        st.caption("아직 등록된 사용자가 없습니다. 이름을 입력해 시작하세요.")
-        new_name = st.text_input("이름", key="new_user_name_first")
-        if st.button("시작하기", use_container_width=True, type="primary"):
-            if new_name.strip():
-                add_user(new_name.strip())
-                st.session_state.current_user = new_name.strip()
-                st.rerun()
-
-    if st.session_state.current_user:
-        st.success(f"👤 {st.session_state.current_user}")
-        st.caption(
-            "Team 용어는 모두가 함께 관리하고, "
-            "내 용어(Personal)는 본인에게만 보이며 본인만 수정할 수 있습니다."
-        )
-
 config = load_product_config()
 products = list(config.keys())
 
@@ -334,9 +276,117 @@ if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY를 찾을 수 없습니다.")
     st.stop()
 
+
+# ──────────────────────────────────────────────────────────────────────
+# 로그인 페이지 — current_user가 비어있으면 다른 화면 일체 안 보임
+# ──────────────────────────────────────────────────────────────────────
 if not st.session_state.current_user:
-    st.warning("👈 시작하려면 왼쪽 사이드바에서 사용자를 선택하거나 등록해주세요.")
+    # 사이드바 숨기기 (CSS)
+    st.markdown(
+        "<style>[data-testid='stSidebar']{display:none;}</style>",
+        unsafe_allow_html=True,
+    )
+
+    col_l, col_c, col_r = st.columns([1, 2, 1])
+    with col_c:
+        st.markdown("# Fasoo Localization Agent")
+        st.caption("국문 문서를 영문으로 로컬라이즈합니다.")
+        st.markdown(" ")
+        st.markdown("### 👋 시작하기")
+
+        registered = list_users()
+
+        if registered:
+            st.caption("기존 사용자")
+            options = ["(선택)"] + registered
+            chosen = st.selectbox(
+                "기존 사용자",
+                options,
+                label_visibility="collapsed",
+            )
+            if st.button(
+                "로그인",
+                type="primary",
+                use_container_width=True,
+                disabled=(chosen == "(선택)"),
+            ):
+                st.session_state.current_user = chosen
+                st.session_state.app_mode = "번역 실행"
+                st.rerun()
+            st.markdown(" ")
+            st.markdown("**또는 새 사용자 등록**")
+        else:
+            st.caption("아직 등록된 사용자가 없습니다. 첫 사용자를 등록해주세요.")
+
+        new_name = st.text_input(
+            "이름",
+            placeholder="이름을 입력하세요",
+            label_visibility="collapsed",
+            key="login_new_name",
+        )
+        if st.button(
+            "등록 후 시작",
+            use_container_width=True,
+            type="primary" if not registered else "secondary",
+            disabled=(not new_name.strip()),
+        ):
+            add_user(new_name.strip())
+            st.session_state.current_user = new_name.strip()
+            st.session_state.app_mode = "번역 실행"
+            st.rerun()
+
+        st.markdown(" ")
+        st.caption(
+            "💡 Team 용어는 모두가 함께 관리하고, "
+            "내 용어(Personal)는 본인에게만 보이며 본인만 수정할 수 있습니다."
+        )
     st.stop()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 로그인 후 — 사이드바 nav + 메인 헤더 + 메뉴별 콘텐츠
+# ──────────────────────────────────────────────────────────────────────
+
+# ── 사이드바: 메뉴 nav ─────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## 메뉴")
+    st.markdown(" ")
+
+    if st.button(
+        "📝  번역 실행",
+        use_container_width=True,
+        type="primary" if st.session_state.app_mode == "번역 실행" else "secondary",
+        key="nav_translate",
+    ):
+        st.session_state.app_mode = "번역 실행"
+        st.rerun()
+
+    if st.button(
+        "📚  Glossary 관리",
+        use_container_width=True,
+        type="primary" if st.session_state.app_mode == "Glossary 관리" else "secondary",
+        key="nav_glossary",
+    ):
+        st.session_state.app_mode = "Glossary 관리"
+        st.rerun()
+
+    # 추후 확장될 메뉴 — 일단 비활성화 상태로 노출해서 사용자에게 로드맵 안내
+    st.button("📊  로그 (준비 중)", use_container_width=True, disabled=True, key="nav_logs")
+
+# ── 메인 헤더: 타이틀 좌측, 사용자/로그아웃 우측 ─────────────────────────
+col_title, col_user = st.columns([7, 3])
+with col_title:
+    st.title("Fasoo Localization Agent")
+    st.caption("국문 문서를 영문으로 로컬라이즈합니다.")
+with col_user:
+    st.markdown(" ")
+    col_u_name, col_u_btn = st.columns([3, 2])
+    with col_u_name:
+        st.markdown(f"##### 👤 {st.session_state.current_user}")
+    with col_u_btn:
+        if st.button("로그아웃", use_container_width=True, key="logout_btn"):
+            st.session_state.current_user = ""
+            st.rerun()
 
 
 # ─────────────────────────────────────────────
