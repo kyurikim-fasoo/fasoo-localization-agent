@@ -401,6 +401,90 @@ def replace_terms_from_excel(
     return inserted
 
 
+def build_terms_preview_df(
+    sheet_df: pd.DataFrame,
+    source_file: str,
+    product_filter: Optional[str] = None,
+) -> pd.DataFrame:
+    """Convert a raw Excel sheet (from `pd.read_excel`) into the same UI shape
+    that [load_terms] returns, so the Step-2 Master-Excel preview can render
+    inside the existing terms editor."""
+    df = sheet_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    for col in ["KO", "EN", "Product", "DNT", "Case-sensitive", "Note", "Status"]:
+        if col not in df.columns:
+            df[col] = "" if col not in ("DNT", "Case-sensitive") else False
+
+    if product_filter:
+        df = _filter_by_product_for_preview(df, product_filter)
+
+    rows = []
+    for _, r in df.iterrows():
+        ko = _clean_text(r.get("KO"))
+        en = _clean_text(r.get("EN"))
+        if not ko or not en:
+            continue
+        rows.append({
+            "적용": True,
+            "id": None,  # 새 row — staged 상태이므로 DB id 없음
+            "Scope": "Team",
+            "KO": ko,
+            "EN": en,
+            "Product": _clean_text(r.get("Product")) or "ALL",
+            "DNT": bool(_clean_bool(r.get("DNT"))),
+            "Case-sensitive": bool(_clean_bool(r.get("Case-sensitive"))),
+            "Note": _clean_text(r.get("Note")),
+            "Status": _clean_text(r.get("Status")) or "approved",
+            "File": source_file,
+        })
+    return pd.DataFrame(rows, columns=TERM_UI_COLUMNS)
+
+
+def build_patterns_preview_df(sheet_df: pd.DataFrame, source_file: str) -> pd.DataFrame:
+    df = sheet_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    for col in ["KO", "EN", "Note", "Status"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    rows = []
+    for _, r in df.iterrows():
+        ko = _clean_text(r.get("KO"))
+        en = _clean_text(r.get("EN"))
+        if not ko or not en:
+            continue
+        rows.append({
+            "적용": True,
+            "id": None,
+            "Scope": "Team",
+            "KO": ko,
+            "EN": en,
+            "Note": _clean_text(r.get("Note")),
+            "Status": _clean_text(r.get("Status")) or "approved",
+            "File": source_file,
+        })
+    return pd.DataFrame(rows, columns=PATTERN_UI_COLUMNS)
+
+
+def _filter_by_product_for_preview(df: pd.DataFrame, product: str) -> pd.DataFrame:
+    """Mirror of the app-side product filter — kept here so previews and
+    real imports apply the same rule."""
+    import re
+    if "Product" not in df.columns:
+        return df
+    p = (product or "").strip().lower()
+    if not p:
+        return df
+
+    def keep(val):
+        s = str(val).strip().lower()
+        if not s or s == "nan":
+            return False
+        parts = re.split(r"[,;/]\s*", s)
+        return any(x.strip() in ("all", p) for x in parts)
+    return df[df["Product"].apply(keep)].copy()
+
+
 def export_to_excel(current_user: str = "", scope_filter: str = "all") -> bytes:
     """
     Bundle current user's visible terms + patterns into one xlsx workbook.

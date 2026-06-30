@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 from db.schema import DB_PATH, init_db
 from services.glossary import (
+    build_patterns_preview_df,
+    build_terms_preview_df,
     export_to_excel,
     load_patterns,
     load_terms,
@@ -637,76 +639,95 @@ if st.session_state.app_mode == "Glossary 관리":
                 try:
                     from io import BytesIO
                     sheets = pd.read_excel(BytesIO(uploaded_workbook.getvalue()), sheet_name=None)
-                    results = []
                     gpick = None
                     for sname, sdf in sheets.items():
                         if any(k in sname.lower() for k in ["glossary", "용어", "사전"]):
                             gpick = (sname, sdf); break
                     if gpick is None and sheets:
                         gpick = list(sheets.items())[0]
-                    if gpick:
-                        sname, sdf = gpick
-                        n = replace_terms_from_excel(
-                            sdf,
-                            source_file=f"{uploaded_workbook.name} [{sname}]",
-                            product_filter=active_product,
-                        )
-                        results.append(("용어", sname, n))
                     ppick = None
                     for sname, sdf in sheets.items():
                         if any(k in sname.lower() for k in ["pattern", "패턴"]):
                             ppick = (sname, sdf); break
                     if ppick is None and len(sheets) >= 2:
                         ppick = list(sheets.items())[1]
-                    if ppick:
-                        sname, sdf = ppick
-                        n = replace_patterns_from_excel(
-                            sdf, source_file=f"{uploaded_workbook.name} [{sname}]"
-                        )
-                        results.append(("패턴", sname, n))
-                    if results:
-                        lines = "\n".join(f"- **{t}** ← `{s}` ({n}건)" for t, s, n in results)
-                        st.success(f"{uploaded_workbook.name} 적용 완료:\n{lines}")
+
+                    if gpick is None and ppick is None:
+                        st.warning("적용할 시트를 찾지 못했습니다.")
+                    else:
+                        # DB는 안 건드림 — staged로 보관해 표에 미리보기로 표시.
+                        # 사용자가 [저장] 버튼을 명시적으로 눌러야 DB에 반영된다.
+                        st.session_state.staged_master = {
+                            "source": uploaded_workbook.name,
+                            "glossary_sheet": gpick,
+                            "pattern_sheet": ppick,
+                            "active_product": active_product,
+                        }
                         st.session_state.show_master_upload = False
                         st.rerun()
-                    else:
-                        st.warning("적용할 시트를 찾지 못했습니다.")
                 except Exception as e:
                     st.error(f"임포트 오류: {e}")
             if st.button("닫기", key="close_master_upload"):
                 st.session_state.show_master_upload = False
                 st.rerun()
 
+    # ── Master Excel 미리보기(staged) 알림 ───────────────────────────
+    _is_staged = "staged_master" in st.session_state
+    if _is_staged:
+        _stg = st.session_state.staged_master
+        col_warn, col_cancel = st.columns([5, 1])
+        with col_warn:
+            st.warning(
+                f"📥 **{_stg['source']}** 미리보기 중. **[저장]** 을 눌러야 DB에 반영됩니다.",
+                icon="⚠️",
+            )
+        with col_cancel:
+            st.markdown(" ")
+            if st.button("취소", key="cancel_staged_master", use_container_width=True):
+                del st.session_state.staged_master
+                st.rerun()
+
     tab1, tab2 = st.tabs(["용어", "패턴"])
 
     # ── 용어 탭 ──────────────────────────────
     with tab1:
-        col_search, col_scope, col_count = st.columns([3, 1, 1])
-        with col_search:
-            terms_search = st.text_input(
-                "검색 (KO/EN/Note)",
-                key="terms_search",
-                placeholder="예: Wrapsody, rule, 정책 …",
-                label_visibility="collapsed",
+        if _is_staged and _stg.get("glossary_sheet"):
+            # staged 모드: Master Excel glossary 시트를 미리보기 (DB 영향 X)
+            _sname, _sdf = _stg["glossary_sheet"]
+            terms_df = build_terms_preview_df(
+                _sdf,
+                source_file=f"{_stg['source']} [{_sname}]",
+                product_filter=_stg.get("active_product"),
             )
-        with col_scope:
-            terms_scope_label = st.selectbox(
-                "Scope",
-                ["전체", "Team만", "내 용어만"],
-                key="terms_scope_filter",
-                label_visibility="collapsed",
-            )
-        terms_scope = {"전체": "all", "Team만": "team", "내 용어만": "mine"}[terms_scope_label]
+            _terms_view_ids = set()
+            st.caption(f"📥 미리보기 {len(terms_df)}건 (저장 시 Team 영역 전체 교체)")
+        else:
+            col_search, col_scope, col_count = st.columns([3, 1, 1])
+            with col_search:
+                terms_search = st.text_input(
+                    "검색 (KO/EN/Note)",
+                    key="terms_search",
+                    placeholder="예: Wrapsody, rule, 정책 …",
+                    label_visibility="collapsed",
+                )
+            with col_scope:
+                terms_scope_label = st.selectbox(
+                    "Scope",
+                    ["전체", "Team만", "내 용어만"],
+                    key="terms_scope_filter",
+                    label_visibility="collapsed",
+                )
+            terms_scope = {"전체": "all", "Team만": "team", "내 용어만": "mine"}[terms_scope_label]
 
-        terms_df = load_terms(
-            product=active_product,
-            search=terms_search,
-            current_user=st.session_state.current_user,
-            scope_filter=terms_scope,
-        )
-        _terms_view_ids = {int(v) for v in terms_df["id"].dropna().tolist()}
-        with col_count:
-            st.caption(f"{len(terms_df)}개")
+            terms_df = load_terms(
+                product=active_product,
+                search=terms_search,
+                current_user=st.session_state.current_user,
+                scope_filter=terms_scope,
+            )
+            _terms_view_ids = {int(v) for v in terms_df["id"].dropna().tolist()}
+            with col_count:
+                st.caption(f"{len(terms_df)}개")
 
         edited_terms = st.data_editor(
             terms_df,
@@ -736,11 +757,15 @@ if st.session_state.app_mode == "Glossary 관리":
             key=f"terms_editor_{st.session_state.glossary_editor_key}",
         )
 
-        # 변경사항이 있으면 저장 버튼 활성화. 명시적으로 클릭해야만 DB 반영.
-        terms_changed = not edited_terms.equals(terms_df)
+        # 저장 버튼 활성화 조건:
+        # - staged 모드: 항상 활성 (미리보기 데이터를 DB에 commit해야 하므로)
+        # - 일반 모드: 표 편집이 있을 때만 활성
+        terms_changed = _is_staged or not edited_terms.equals(terms_df)
         col_status, col_save = st.columns([5, 1])
         with col_status:
-            if terms_changed:
+            if _is_staged:
+                st.caption(f"⚠️ Master Excel 미리보기 — [저장] 시 Team {len(terms_df)}건 전체 교체")
+            elif terms_changed:
                 st.caption("⚠️ 변경됨 — 저장하지 않으면 사라집니다.")
             else:
                 st.caption("✓ 저장됨")
@@ -755,46 +780,75 @@ if st.session_state.app_mode == "Glossary 관리":
 
         if save_clicked:
             try:
-                counts = save_terms_from_dataframe(
-                    edited_terms,
-                    view_ids=_terms_view_ids,
-                    current_user=st.session_state.current_user,
-                )
-                summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
-                if counts.get("denied", 0) > 0:
-                    summary += f" / 권한 없어 거부 {counts['denied']}"
-                st.toast(f"용어 저장됨 — {summary}", icon="💾")
-                st.rerun()
+                if _is_staged and _stg.get("glossary_sheet"):
+                    # staged 모드 commit — Team 영역 전체 교체
+                    _sname, _sdf = _stg["glossary_sheet"]
+                    n = replace_terms_from_excel(
+                        _sdf,
+                        source_file=f"{_stg['source']} [{_sname}]",
+                        product_filter=_stg.get("active_product"),
+                    )
+                    # patterns 시트가 있고 아직 staged면 한 번에 처리
+                    if _stg.get("pattern_sheet"):
+                        _psname, _psdf = _stg["pattern_sheet"]
+                        m = replace_patterns_from_excel(
+                            _psdf, source_file=f"{_stg['source']} [{_psname}]"
+                        )
+                        st.toast(f"Master Excel 저장됨 — 용어 {n}건 / 패턴 {m}건", icon="💾")
+                    else:
+                        st.toast(f"Master Excel 저장됨 — 용어 {n}건", icon="💾")
+                    del st.session_state.staged_master
+                    st.rerun()
+                else:
+                    counts = save_terms_from_dataframe(
+                        edited_terms,
+                        view_ids=_terms_view_ids,
+                        current_user=st.session_state.current_user,
+                    )
+                    summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
+                    if counts.get("denied", 0) > 0:
+                        summary += f" / 권한 없어 거부 {counts['denied']}"
+                    st.toast(f"용어 저장됨 — {summary}", icon="💾")
+                    st.rerun()
             except Exception as e:
                 st.error(f"저장 오류: {e}")
 
     # ── 패턴 탭 ──────────────────────────────
     with tab2:
-        col_search, col_scope, col_count = st.columns([3, 1, 1])
-        with col_search:
-            patterns_search = st.text_input(
-                "검색 (KO/EN/Note)",
-                key="patterns_search",
-                placeholder="예: 클릭, click, 화면 …",
-                label_visibility="collapsed",
+        if _is_staged and _stg.get("pattern_sheet"):
+            _psname, _psdf = _stg["pattern_sheet"]
+            patterns_df = build_patterns_preview_df(
+                _psdf,
+                source_file=f"{_stg['source']} [{_psname}]",
             )
-        with col_scope:
-            patterns_scope_label = st.selectbox(
-                "Scope",
-                ["전체", "Team만", "내 패턴만"],
-                key="patterns_scope_filter",
-                label_visibility="collapsed",
-            )
-        patterns_scope = {"전체": "all", "Team만": "team", "내 패턴만": "mine"}[patterns_scope_label]
+            _patterns_view_ids = set()
+            st.caption(f"📥 미리보기 {len(patterns_df)}건 (저장 시 Team 영역 전체 교체)")
+        else:
+            col_search, col_scope, col_count = st.columns([3, 1, 1])
+            with col_search:
+                patterns_search = st.text_input(
+                    "검색 (KO/EN/Note)",
+                    key="patterns_search",
+                    placeholder="예: 클릭, click, 화면 …",
+                    label_visibility="collapsed",
+                )
+            with col_scope:
+                patterns_scope_label = st.selectbox(
+                    "Scope",
+                    ["전체", "Team만", "내 패턴만"],
+                    key="patterns_scope_filter",
+                    label_visibility="collapsed",
+                )
+            patterns_scope = {"전체": "all", "Team만": "team", "내 패턴만": "mine"}[patterns_scope_label]
 
-        patterns_df = load_patterns(
-            search=patterns_search,
-            current_user=st.session_state.current_user,
-            scope_filter=patterns_scope,
-        )
-        _patterns_view_ids = {int(v) for v in patterns_df["id"].dropna().tolist()}
-        with col_count:
-            st.caption(f"{len(patterns_df)}개")
+            patterns_df = load_patterns(
+                search=patterns_search,
+                current_user=st.session_state.current_user,
+                scope_filter=patterns_scope,
+            )
+            _patterns_view_ids = {int(v) for v in patterns_df["id"].dropna().tolist()}
+            with col_count:
+                st.caption(f"{len(patterns_df)}개")
 
         edited_patterns = st.data_editor(
             patterns_df,
@@ -821,10 +875,12 @@ if st.session_state.app_mode == "Glossary 관리":
             key=f"patterns_editor_{st.session_state.pattern_editor_key}",
         )
 
-        patterns_changed = not edited_patterns.equals(patterns_df)
+        patterns_changed = _is_staged or not edited_patterns.equals(patterns_df)
         col_status_p, col_save_p = st.columns([5, 1])
         with col_status_p:
-            if patterns_changed:
+            if _is_staged:
+                st.caption(f"⚠️ Master Excel 미리보기 — [저장] 시 Team {len(patterns_df)}건 전체 교체")
+            elif patterns_changed:
                 st.caption("⚠️ 변경됨 — 저장하지 않으면 사라집니다.")
             else:
                 st.caption("✓ 저장됨")
@@ -839,16 +895,35 @@ if st.session_state.app_mode == "Glossary 관리":
 
         if save_p_clicked:
             try:
-                counts = save_patterns_from_dataframe(
-                    edited_patterns,
-                    view_ids=_patterns_view_ids,
-                    current_user=st.session_state.current_user,
-                )
-                summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
-                if counts.get("denied", 0) > 0:
-                    summary += f" / 권한 없어 거부 {counts['denied']}"
-                st.toast(f"패턴 저장됨 — {summary}", icon="💾")
-                st.rerun()
+                if _is_staged and _stg.get("pattern_sheet"):
+                    # staged 모드 commit — 두 시트 모두 한 번에 처리
+                    _psname, _psdf = _stg["pattern_sheet"]
+                    m = replace_patterns_from_excel(
+                        _psdf, source_file=f"{_stg['source']} [{_psname}]"
+                    )
+                    if _stg.get("glossary_sheet"):
+                        _sname, _sdf = _stg["glossary_sheet"]
+                        n = replace_terms_from_excel(
+                            _sdf,
+                            source_file=f"{_stg['source']} [{_sname}]",
+                            product_filter=_stg.get("active_product"),
+                        )
+                        st.toast(f"Master Excel 저장됨 — 용어 {n}건 / 패턴 {m}건", icon="💾")
+                    else:
+                        st.toast(f"Master Excel 저장됨 — 패턴 {m}건", icon="💾")
+                    del st.session_state.staged_master
+                    st.rerun()
+                else:
+                    counts = save_patterns_from_dataframe(
+                        edited_patterns,
+                        view_ids=_patterns_view_ids,
+                        current_user=st.session_state.current_user,
+                    )
+                    summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
+                    if counts.get("denied", 0) > 0:
+                        summary += f" / 권한 없어 거부 {counts['denied']}"
+                    st.toast(f"패턴 저장됨 — {summary}", icon="💾")
+                    st.rerun()
             except Exception as e:
                 st.error(f"저장 오류: {e}")
 
