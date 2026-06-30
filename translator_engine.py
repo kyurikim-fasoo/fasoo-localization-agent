@@ -517,36 +517,81 @@ _BOLD_SEGMENT_RE = re.compile(r"⟦B⟧(.+?)⟦/B⟧", re.DOTALL)
 _INNER_MARKER_RE = re.compile(r"⟦[A-Za-z/]+(?::[A-Za-z]+)?\d*⟧")
 
 
+# 1x1 transparent PNG — sanitize_docx 폴백 placeholder.
+# (70 bytes; PIL로 생성하고 verify 통과한 valid PNG)
+_FALLBACK_PNG = bytes.fromhex(
+    "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C489"
+    "0000000D49444154789C6360606060000000050001A5F645400000000049454E44"
+    "AE426082"
+)
+
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".svg", ".webp", ".emf", ".wmf")
+
+
 def sanitize_docx(in_path: str) -> str:
     """
     Return a path to a docx whose zip entries all pass CRC-32 verification.
 
     .docx is a zip container; pipelines like Wrapsody decrypt occasionally
     leave one embedded image with a CRC mismatch, and python-docx then refuses
-    to open the whole file. We probe every entry; if all read cleanly the
-    original path is returned untouched, otherwise we copy every readable
-    entry into a fresh temp .docx and return that path. The dropped entries
-    are almost always images that the translation pipeline doesn't use.
+    to open the whole file. Strategy:
+
+    1. Probe every entry. If all read cleanly → return the original path.
+    2. Otherwise rebuild the zip:
+       - readable entries → copied as-is
+       - broken **image** entries → replaced with a valid placeholder PNG
+         (preferring another valid image from the same docx for visual
+         consistency, falling back to a 1x1 transparent PNG). The filename
+         and zip path stay the same so the rels/content-types references
+         that point to it keep working.
+       - broken **non-image** entries → re-raised, because dropping or
+         emptying word/document.xml or a rels file would silently corrupt
+         the document.
     """
+    # ── 1차 probe: 어떤 entry가 깨졌는지 + valid image bytes 한 개 확보 ─
+    bad_entries: list[str] = []
+    valid_image_bytes: Optional[bytes] = None
     try:
         with zipfile.ZipFile(in_path, "r") as z:
-            for name in z.namelist():
-                z.read(name)
-        return in_path
+            for zinfo in z.infolist():
+                try:
+                    data = z.read(zinfo.filename)
+                    lname = zinfo.filename.lower()
+                    if valid_image_bytes is None and lname.endswith(_IMAGE_EXTS):
+                        valid_image_bytes = data
+                except (zipfile.BadZipFile, zlib.error, RuntimeError):
+                    bad_entries.append(zinfo.filename)
     except (zipfile.BadZipFile, zlib.error, RuntimeError):
-        pass  # fall through to repair
+        # zip 자체가 깨졌으면 손쓸 도리 없음 — 원본 그대로 넘김
+        return in_path
 
+    if not bad_entries:
+        return in_path
+
+    placeholder = valid_image_bytes or _FALLBACK_PNG
+
+    # 깨진 entry 중 이미지가 아닌 것이 하나라도 있으면 안전하게 복구할 수 없음
+    non_image_bad = [n for n in bad_entries if not n.lower().endswith(_IMAGE_EXTS)]
+    if non_image_bad:
+        raise RuntimeError(
+            "docx 내부 파일이 손상되었습니다 (이미지 외 part): "
+            + ", ".join(non_image_bad[:3])
+            + " — Wrapsody에서 decrypt를 다시 시도해 주세요."
+        )
+
+    # ── 새 zip으로 rebuild ─────────────────────────────────────────
     fd, dst = tempfile.mkstemp(suffix=".docx", prefix="repaired_")
     os.close(fd)
+    bad_set = set(bad_entries)
     with zipfile.ZipFile(in_path, "r") as zin, \
          zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
         for zinfo in zin.infolist():
-            try:
+            if zinfo.filename in bad_set:
+                # 깨진 이미지 → placeholder bytes로 교체. 이름/경로/확장자 유지.
+                zout.writestr(zinfo.filename, placeholder)
+            else:
                 data = zin.read(zinfo.filename)
                 zout.writestr(zinfo, data)
-            except (zipfile.BadZipFile, zlib.error, RuntimeError):
-                # 손상된 part(보통 word/media/*.png) — 통과시켜도 텍스트 추출에 무관
-                continue
     return dst
 
 
