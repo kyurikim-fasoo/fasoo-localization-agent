@@ -456,6 +456,74 @@ if not st.session_state.current_user:
 # 로그인 후 — 사이드바 nav + 메인 헤더 + 메뉴별 콘텐츠
 # ──────────────────────────────────────────────────────────────────────
 
+# ── 페이지 이탈 가드 — unsaved 변경이 있으면 모달로 한 번 더 확인 ───────
+# 사용 패턴:
+#   사이드바 nav 또는 "이전" 같은 페이지 이동 버튼은 직접 app_mode/step을
+#   바꾸지 말고 _try_navigate(target)를 호출. 변경 사항이 있으면 모달이
+#   뜨고, 모달의 "예"를 눌러야만 실제로 이동한다.
+def _has_unsaved_changes() -> bool:
+    """현재 페이지에 저장 안 된 변경이 있는지."""
+    mode = st.session_state.get("app_mode")
+    # Localize Step 2: UI 텍스트 매핑에 EN 입력이 있으면 unsaved
+    if mode == "Localize" and st.session_state.get("step") == 2:
+        rows = st.session_state.get("ui_text_mapping_rows", [])
+        if any(str(r.get("EN (입력)") or "").strip() for r in rows):
+            return True
+    # Glossary 관리: staged_master 또는 표 편집 dirty 플래그
+    if mode == "Glossary 관리":
+        if "staged_master" in st.session_state:
+            return True
+        if st.session_state.get("glossary_table_dirty"):
+            return True
+    return False
+
+
+def _clear_unsaved_state() -> None:
+    """사용자가 '예, 버리고 이동'을 선택했을 때 임시 상태를 정리."""
+    for k in (
+        "ui_text_mapping_rows", "ui_text_source_sig", "ui_text_input_path",
+        "ui_text_preload_counts", "staged_master", "glossary_table_dirty",
+    ):
+        st.session_state.pop(k, None)
+
+
+def _apply_nav_target(target: dict) -> None:
+    """모달 통과 또는 unsaved 없음 → 실제 이동."""
+    if "app_mode" in target:
+        st.session_state.app_mode = target["app_mode"]
+    if "step" in target:
+        st.session_state.step = target["step"]
+
+
+def _try_navigate(target: dict) -> None:
+    """페이지 이동 트리거. unsaved 있으면 모달 큐, 없으면 즉시 이동."""
+    if _has_unsaved_changes():
+        st.session_state.pending_nav_target = target
+    else:
+        _apply_nav_target(target)
+    st.rerun()
+
+
+@st.dialog("저장하지 않은 변경사항이 있어요")
+def _confirm_nav_dialog():
+    st.warning("저장하지 않은 입력/편집이 사라집니다.", icon="⚠️")
+    st.write("정말 다른 화면으로 이동하시겠어요?")
+    col_no, col_yes = st.columns(2)
+    if col_no.button("취소 (계속 작성)", use_container_width=True, type="primary"):
+        st.session_state.pop("pending_nav_target", None)
+        st.rerun()
+    if col_yes.button("예, 버리고 이동", use_container_width=True):
+        target = st.session_state.pop("pending_nav_target", None) or {}
+        _clear_unsaved_state()
+        _apply_nav_target(target)
+        st.rerun()
+
+
+# 페이지 렌더링 시작 전, 모달 큐가 있으면 띄움
+if st.session_state.get("pending_nav_target"):
+    _confirm_nav_dialog()
+
+
 # ── 사이드바: 메뉴 nav (헤더 라벨 없음, 테두리 없는 Wrapsody 스타일) ────
 with st.sidebar:
     if st.button(
@@ -464,8 +532,7 @@ with st.sidebar:
         type="primary" if st.session_state.app_mode == "Localize" else "secondary",
         key="nav_translate",
     ):
-        st.session_state.app_mode = "Localize"
-        st.rerun()
+        _try_navigate({"app_mode": "Localize"})
 
     if st.button(
         "Glossary 관리",
@@ -473,8 +540,7 @@ with st.sidebar:
         type="primary" if st.session_state.app_mode == "Glossary 관리" else "secondary",
         key="nav_glossary",
     ):
-        st.session_state.app_mode = "Glossary 관리"
-        st.rerun()
+        _try_navigate({"app_mode": "Glossary 관리"})
 
     if st.button(
         "로그",
@@ -482,8 +548,7 @@ with st.sidebar:
         type="primary" if st.session_state.app_mode == "로그" else "secondary",
         key="nav_logs",
     ):
-        st.session_state.app_mode = "로그"
-        st.rerun()
+        _try_navigate({"app_mode": "로그"})
 
 # ── 메인 헤더 ─────────────────────────────────────────────────────────
 # 우측 상단: 원형 이니셜 아이콘 (popover trigger). 클릭하면 사용자 이름 +
@@ -768,6 +833,9 @@ if st.session_state.app_mode == "Glossary 관리":
         # - staged 모드: 항상 활성 (미리보기 데이터를 DB에 commit해야 하므로)
         # - 일반 모드: 표 편집이 있을 때만 활성
         terms_changed = _is_staged or not edited_terms.equals(terms_df)
+        # 페이지 이탈 가드용 — 다른 탭/메뉴 이동 시 unsaved 알림 트리거
+        if terms_changed:
+            st.session_state.glossary_table_dirty = True
         col_status, col_save = st.columns([5, 1])
         with col_status:
             if _is_staged:
@@ -805,6 +873,7 @@ if st.session_state.app_mode == "Glossary 관리":
                     else:
                         st.toast(f"Master Excel 저장됨 — 용어 {n}건", icon="💾")
                     del st.session_state.staged_master
+                    st.session_state.pop("glossary_table_dirty", None)
                     st.rerun()
                 else:
                     counts = save_terms_from_dataframe(
@@ -816,6 +885,7 @@ if st.session_state.app_mode == "Glossary 관리":
                     if counts.get("denied", 0) > 0:
                         summary += f" / 권한 없어 거부 {counts['denied']}"
                     st.toast(f"용어 저장됨 — {summary}", icon="💾")
+                    st.session_state.pop("glossary_table_dirty", None)
                     st.rerun()
             except Exception as e:
                 st.error(f"저장 오류: {e}")
@@ -883,6 +953,8 @@ if st.session_state.app_mode == "Glossary 관리":
         )
 
         patterns_changed = _is_staged or not edited_patterns.equals(patterns_df)
+        if patterns_changed:
+            st.session_state.glossary_table_dirty = True
         col_status_p, col_save_p = st.columns([5, 1])
         with col_status_p:
             if _is_staged:
@@ -903,7 +975,6 @@ if st.session_state.app_mode == "Glossary 관리":
         if save_p_clicked:
             try:
                 if _is_staged and _stg.get("pattern_sheet"):
-                    # staged 모드 commit — 두 시트 모두 한 번에 처리
                     _psname, _psdf = _stg["pattern_sheet"]
                     m = replace_patterns_from_excel(
                         _psdf, source_file=f"{_stg['source']} [{_psname}]"
@@ -919,6 +990,7 @@ if st.session_state.app_mode == "Glossary 관리":
                     else:
                         st.toast(f"Master Excel 저장됨 — 패턴 {m}건", icon="💾")
                     del st.session_state.staged_master
+                    st.session_state.pop("glossary_table_dirty", None)
                     st.rerun()
                 else:
                     counts = save_patterns_from_dataframe(
@@ -930,6 +1002,7 @@ if st.session_state.app_mode == "Glossary 관리":
                     if counts.get("denied", 0) > 0:
                         summary += f" / 권한 없어 거부 {counts['denied']}"
                     st.toast(f"패턴 저장됨 — {summary}", icon="💾")
+                    st.session_state.pop("glossary_table_dirty", None)
                     st.rerun()
             except Exception as e:
                 st.error(f"저장 오류: {e}")
@@ -966,19 +1039,20 @@ if st.session_state.app_mode == "로그":
     if _logs_df.empty:
         st.info("아직 번역 이력이 없습니다. **Localize** 메뉴에서 첫 번역을 실행해 보세요.", icon="ℹ️")
     else:
-        # 표용 데이터 가공 — 핵심 컬럼만 (UI 매핑은 본문 별도 표시)
+        # 표용 데이터 가공 — 핵심 컬럼만. ID는 selectbox 내부 식별자로만 쓰고
+        # 표에서는 숨기고 사용자 이름을 노출한다.
         _list_view = _logs_df[[
-            "id", "created_at", "product", "source_file",
+            "user", "created_at", "product", "source_file",
             "paragraphs_translated", "total_tokens", "mapping_count", "note",
         ]].copy()
-        _list_view.columns = ["ID", "날짜", "제품", "원본 파일", "단락 수", "토큰", "매핑 수", "메모"]
+        _list_view.columns = ["사용자", "날짜", "제품", "원본 파일", "단락 수", "토큰", "매핑 수", "메모"]
 
         st.dataframe(
             _list_view,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "ID": st.column_config.NumberColumn("ID", width="small"),
+                "사용자": st.column_config.TextColumn("사용자", width="small"),
                 "날짜": st.column_config.TextColumn("날짜", width="medium"),
                 "제품": st.column_config.TextColumn("제품", width="small"),
                 "원본 파일": st.column_config.TextColumn("원본 파일"),
@@ -993,7 +1067,7 @@ if st.session_state.app_mode == "로그":
         st.markdown("##### 🔎 상세 보기 / 관리")
         _id_options = _logs_df["id"].tolist()
         _id_labels = {
-            int(row["id"]): f"#{int(row['id'])} — {row['created_at']} — {row['source_file']}"
+            int(row["id"]): f"{row['created_at']} — {row['user']} — {row['source_file']}"
             for _, row in _logs_df.iterrows()
         }
         _selected_id = st.selectbox(
@@ -1032,7 +1106,7 @@ if st.session_state.app_mode == "로그":
                     else:
                         st.caption("이 번역에서는 UI 텍스트 매핑을 사용하지 않았습니다.")
 
-                    st.markdown("##### 메모 / 비고")
+                    st.markdown("##### 메모")
                     _note_value = st.text_area(
                         "메모",
                         value=_detail.get("note", ""),
@@ -1168,49 +1242,6 @@ if st.session_state.step == 2:
                 st.session_state.ui_text_source_sig = file_sig
                 st.session_state.ui_text_input_path = str(tmp_path)
                 st.session_state.ui_text_preload_counts = _source_counts
-
-                # 🐛 일회용 진단 정보 — Wrapsody row가 왜 안 잡히는지 확인용
-                _extracted_set = [ko for ko, _ in bold_with_ctx]
-                _terms_for_dbg = _terms_df.copy()
-                _product_uniques = sorted(_terms_for_dbg["Product"].dropna().astype(str).unique().tolist())
-                _smart_in_lookup = "스마트 클리너" in _glossary_lookup
-                _smart_in_extracted = "스마트 클리너" in _extracted_set
-                _smart_in_terms = _terms_for_dbg["KO"].astype(str).str.strip().eq("스마트 클리너").any()
-
-                # DB에 raw query — load_terms 필터를 거치지 않고 직접 봄
-                from db.schema import db_session as _db_session
-                with _db_session() as _conn:
-                    _smart_raw = [
-                        dict(r) for r in _conn.execute(
-                            "SELECT id, ko, en, product, owner, "
-                            "LENGTH(ko) as ko_len, HEX(ko) as ko_hex, "
-                            "LENGTH(product) as product_len, HEX(product) as product_hex "
-                            "FROM terms WHERE ko LIKE '%스마트%' OR ko LIKE '%클리너%' "
-                            "OR en LIKE '%Cleaner%' OR en LIKE '%cleaner%'"
-                        )
-                    ]
-                    _wrapsody_raw = [
-                        dict(r) for r in _conn.execute(
-                            "SELECT id, ko, product, owner, LENGTH(product) as plen, HEX(product) as phex "
-                            "FROM terms WHERE LOWER(product) LIKE '%wrapsody%'"
-                        )
-                    ]
-
-                st.session_state.ui_text_debug = {
-                    "selected_product": st.session_state.selected_product,
-                    "selected_product_hex": st.session_state.selected_product.encode("utf-8").hex().upper() if st.session_state.selected_product else "",
-                    "current_user": st.session_state.current_user,
-                    "terms_df_count": int(len(_terms_for_dbg)),
-                    "product_unique_values_in_terms_df": _product_uniques,
-                    "lookup_keys_total": len(_glossary_lookup),
-                    "스마트 클리너 in _terms_df.KO": bool(_smart_in_terms),
-                    "스마트 클리너 in lookup": _smart_in_lookup,
-                    "스마트 클리너 in extracted": _smart_in_extracted,
-                    "DB raw: 스마트/클리너 매칭 row 수": len(_smart_raw),
-                    "DB raw: 스마트/클리너 row 상세": _smart_raw,
-                    "DB raw: wrapsody product row 수": len(_wrapsody_raw),
-                    "DB raw: wrapsody product row 상세": _wrapsody_raw,
-                }
             except Exception as e:
                 st.error(f"문서에서 볼드 텍스트 추출 실패: {e}")
 
@@ -1276,24 +1307,6 @@ if st.session_state.step == 2:
                     bits.append(f"글로서리에서 **{_counts['글로서리']}개**")
                 st.caption(f"💡 {' / '.join(bits)} 자동 매칭됨")
 
-            # 🐛 일회용 진단 expander
-            _dbg = st.session_state.get("ui_text_debug")
-            if _dbg:
-                with st.expander("🐛 진단 정보 (개발용)", expanded=True):
-                    st.write("**selected_product:**", repr(_dbg["selected_product"]))
-                    st.write("**selected_product hex (utf-8):**", _dbg["selected_product_hex"])
-                    st.write("**load_terms로 가져온 row 수:**", _dbg["terms_df_count"])
-                    st.write("**filtered _terms_df의 Product unique 값들:**")
-                    st.json(_dbg["product_unique_values_in_terms_df"])
-                    st.markdown("---")
-                    st.write(f"**DB raw — '스마트/클리너' 매칭 row 수:** {_dbg['DB raw: 스마트/클리너 매칭 row 수']}")
-                    st.write("**상세 (id/ko/en/product/owner + product의 LENGTH/HEX):**")
-                    st.json(_dbg["DB raw: 스마트/클리너 row 상세"])
-                    st.markdown("---")
-                    st.write(f"**DB raw — product LIKE '%wrapsody%' row 수:** {_dbg['DB raw: wrapsody product row 수']}")
-                    st.write("**상세:**")
-                    st.json(_dbg["DB raw: wrapsody product row 상세"])
-
             st.markdown(f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)")
             ui_mapping_df = st.data_editor(
                 ui_mapping_df,
@@ -1319,68 +1332,60 @@ if st.session_state.step == 2:
             )
 
     st.markdown("---")
-    # ── "이전" 클릭 시 입력한 매핑이 사라지는 사고 방지 ─────────────
-    # data_editor에 들어간 EN 입력이 한 row라도 있으면 모달로 한 번 더 확인.
-    # 자동 매칭으로 채워진 것도 있으니 단순히 "EN이 비어있지 않은 row"가
-    # 한 개라도 있으면 확인을 띄운다 — false-positive가 좀 있어도 데이터
-    # 손실보다 훨씬 낫다.
-    @st.dialog("입력한 UI 텍스트 매핑이 사라집니다")
-    def _confirm_leave_step2():
-        st.warning("작성하신 EN 매핑이 모두 사라집니다.", icon="⚠️")
-        st.write("정말 이전 화면으로 돌아가시겠어요?")
-        col_no, col_yes = st.columns(2)
-        if col_no.button("취소 (계속 작성)", use_container_width=True, type="primary"):
-            st.rerun()
-        if col_yes.button("예, 돌아가기 (입력 버림)", use_container_width=True):
-            st.session_state.step = 1
-            st.session_state.pop("ui_text_mapping_rows", None)
-            st.session_state.pop("ui_text_source_sig", None)
-            st.session_state.pop("ui_text_input_path", None)
-            st.session_state.pop("ui_text_preload_counts", None)
-            st.rerun()
-
     col_back, col_translate = st.columns(2)
 
+    # 번역 진행 중 플래그 — True면 두 버튼 모두 비활성, progress 영역만 표시.
+    _translating = bool(st.session_state.get("translating_now"))
+
     with col_back:
-        if st.button("이전", use_container_width=True):
-            _rows = st.session_state.get("ui_text_mapping_rows", [])
-            _has_input = any(str(r.get("EN (입력)") or "").strip() for r in _rows)
-            if _has_input:
-                _confirm_leave_step2()
-            else:
-                st.session_state.step = 1
-                st.rerun()
+        if st.button("이전", use_container_width=True, disabled=_translating):
+            _try_navigate({"step": 1})
 
     with col_translate:
         translate_clicked = st.button(
-            "번역 시작",
+            "번역 시작" if not _translating else "번역 진행 중…",
             type="primary",
             use_container_width=True,
-            disabled=(uploaded_docx is None),
+            disabled=(uploaded_docx is None) or _translating,
         )
 
-    if translate_clicked:
+    # 클릭 시점: 플래그만 set하고 rerun → 다음 렌더에서 button이 disabled로 그려지고
+    # 그 직후 _translating 분기에서 실제 번역 실행.
+    if translate_clicked and not _translating:
         if uploaded_docx is None:
             st.error("Word 파일을 업로드하세요.")
         else:
-            # 파일은 위에서 미리 저장됐을 수도 (추출 시점) — 없으면 지금 저장
-            if saved_input_path is None or not saved_input_path.exists():
-                saved_input_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
-            input_path = saved_input_path
-            output_filename = make_default_output_filename(
-                st.session_state.selected_product,
-                uploaded_docx.name,
-            )
-            output_path = OUTPUT_DIR / output_filename
-
-            # 사용자가 입력한 UI 텍스트 매핑 dict로 변환 (빈 EN 제외)
-            ui_overrides = {}
+            # 매핑 입력값을 미리 dict로 저장 (실행 분기에서 사용)
+            _ui_overrides_pending = {}
             if ui_mapping_df is not None and not ui_mapping_df.empty:
                 for _, row in ui_mapping_df.iterrows():
                     ko = str(row.get("KO (Bold)", "") or "").strip()
                     en = str(row.get("EN (입력)", "") or "").strip()
                     if ko and en:
-                        ui_overrides[ko] = en
+                        _ui_overrides_pending[ko] = en
+            st.session_state.pending_translate = {
+                "uploaded_name": uploaded_docx.name,
+                "ui_overrides": _ui_overrides_pending,
+            }
+            st.session_state.translating_now = True
+            st.rerun()
+
+    if _translating:
+        _pending = st.session_state.get("pending_translate") or {}
+        if uploaded_docx is None:
+            st.session_state.translating_now = False
+            st.session_state.pop("pending_translate", None)
+            st.error("Word 파일을 찾을 수 없습니다. 다시 업로드해주세요.")
+        else:
+            if saved_input_path is None or not saved_input_path.exists():
+                saved_input_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
+            input_path = saved_input_path
+            output_filename = make_default_output_filename(
+                st.session_state.selected_product,
+                _pending.get("uploaded_name") or uploaded_docx.name,
+            )
+            output_path = OUTPUT_DIR / output_filename
+            ui_overrides = _pending.get("ui_overrides") or {}
 
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -1409,13 +1414,13 @@ if st.session_state.step == 2:
                 st.session_state.last_output_path = str(output_path)
                 st.session_state.last_output_filename = output_filename
 
-                # 번역 로그 자동 저장 — 메타 + UI 매핑 + 토큰. 메모는 Step 3에서 입력.
+                # 번역 로그 자동 저장
                 try:
                     new_log_id = create_log(
                         user=st.session_state.current_user,
                         product=st.session_state.selected_product or "",
                         translation_mode=st.session_state.translation_mode or "",
-                        source_file=uploaded_docx.name,
+                        source_file=_pending.get("uploaded_name") or uploaded_docx.name,
                         output_file=output_filename,
                         ui_text_overrides=ui_overrides or {},
                         metrics=result,
@@ -1423,18 +1428,21 @@ if st.session_state.step == 2:
                     )
                     st.session_state.last_log_id = new_log_id
                 except Exception as log_err:
-                    # 로그 저장 실패는 사용자 흐름을 막지 않음
                     st.warning(f"로그 저장 중 경고: {log_err}")
 
-                # UI 텍스트 매핑은 일회성 — 다음 번역 위해 정리
+                # 임시 상태 정리
                 st.session_state.pop("ui_text_mapping_rows", None)
                 st.session_state.pop("ui_text_source_sig", None)
                 st.session_state.pop("ui_text_input_path", None)
+                st.session_state.pop("pending_translate", None)
+                st.session_state.translating_now = False
 
                 st.session_state.step = 3
                 st.rerun()
 
             except Exception as e:
+                st.session_state.translating_now = False
+                st.session_state.pop("pending_translate", None)
                 st.error(f"오류: {e}")
 
 
@@ -1485,7 +1493,7 @@ elif st.session_state.step == 3:
     if _log_id:
         st.markdown(" ")
         with st.container(border=True):
-            st.markdown("##### 📝 메모 / 비고 (선택)")
+            st.markdown("##### 📝 메모 (선택)")
             st.caption(
                 "이번 번역에 대한 메모를 남겨두면 나중에 '로그' 메뉴에서 검색해 다시 찾기 쉽습니다. "
                 "UI 텍스트 매핑도 함께 저장돼 있어 같은 문서를 다시 번역할 때 불러올 수 있어요."
