@@ -1169,19 +1169,47 @@ if st.session_state.step == 2:
                 st.session_state.ui_text_input_path = str(tmp_path)
                 st.session_state.ui_text_preload_counts = _source_counts
 
-                # 🐛 일회용 진단 정보 — 매칭 안 되는 원인 파악용
-                _extracted_bold_set = [ko for ko, _ in bold_with_ctx]
-                _matched = [ko for ko in _extracted_bold_set if ko in _glossary_lookup]
-                _not_matched = [ko for ko in _extracted_bold_set if ko not in _glossary_lookup]
+                # 🐛 일회용 진단 정보 — Wrapsody row가 왜 안 잡히는지 확인용
+                _extracted_set = [ko for ko, _ in bold_with_ctx]
+                _terms_for_dbg = _terms_df.copy()
+                _product_uniques = sorted(_terms_for_dbg["Product"].dropna().astype(str).unique().tolist())
+                _smart_in_lookup = "스마트 클리너" in _glossary_lookup
+                _smart_in_extracted = "스마트 클리너" in _extracted_set
+                _smart_in_terms = _terms_for_dbg["KO"].astype(str).str.strip().eq("스마트 클리너").any()
+
+                # DB에 raw query — load_terms 필터를 거치지 않고 직접 봄
+                from db.schema import db_session as _db_session
+                with _db_session() as _conn:
+                    _smart_raw = [
+                        dict(r) for r in _conn.execute(
+                            "SELECT id, ko, en, product, owner, "
+                            "LENGTH(ko) as ko_len, HEX(ko) as ko_hex, "
+                            "LENGTH(product) as product_len, HEX(product) as product_hex "
+                            "FROM terms WHERE ko LIKE '%스마트%' OR ko LIKE '%클리너%' "
+                            "OR en LIKE '%Cleaner%' OR en LIKE '%cleaner%'"
+                        )
+                    ]
+                    _wrapsody_raw = [
+                        dict(r) for r in _conn.execute(
+                            "SELECT id, ko, product, owner, LENGTH(product) as plen, HEX(product) as phex "
+                            "FROM terms WHERE LOWER(product) LIKE '%wrapsody%'"
+                        )
+                    ]
+
                 st.session_state.ui_text_debug = {
-                    "glossary_rows_count": len(glossary_rows),
-                    "lookup_keys_count": len(_glossary_lookup),
-                    "lookup_sample": list(_glossary_lookup.keys())[:30],
-                    "extracted_bold": _extracted_bold_set,
-                    "matched": _matched,
-                    "not_matched": _not_matched,
                     "selected_product": st.session_state.selected_product,
+                    "selected_product_hex": st.session_state.selected_product.encode("utf-8").hex().upper() if st.session_state.selected_product else "",
                     "current_user": st.session_state.current_user,
+                    "terms_df_count": int(len(_terms_for_dbg)),
+                    "product_unique_values_in_terms_df": _product_uniques,
+                    "lookup_keys_total": len(_glossary_lookup),
+                    "스마트 클리너 in _terms_df.KO": bool(_smart_in_terms),
+                    "스마트 클리너 in lookup": _smart_in_lookup,
+                    "스마트 클리너 in extracted": _smart_in_extracted,
+                    "DB raw: 스마트/클리너 매칭 row 수": len(_smart_raw),
+                    "DB raw: 스마트/클리너 row 상세": _smart_raw,
+                    "DB raw: wrapsody product row 수": len(_wrapsody_raw),
+                    "DB raw: wrapsody product row 상세": _wrapsody_raw,
                 }
             except Exception as e:
                 st.error(f"문서에서 볼드 텍스트 추출 실패: {e}")
@@ -1248,22 +1276,23 @@ if st.session_state.step == 2:
                     bits.append(f"글로서리에서 **{_counts['글로서리']}개**")
                 st.caption(f"💡 {' / '.join(bits)} 자동 매칭됨")
 
-            # 🐛 일회용 진단 expander — 원인 파악 후 제거 예정
+            # 🐛 일회용 진단 expander
             _dbg = st.session_state.get("ui_text_debug")
             if _dbg:
-                with st.expander("🐛 진단 정보 (개발용 — 원인 파악 후 제거 예정)", expanded=False):
-                    st.write("**선택된 제품(Step 1):**", _dbg["selected_product"])
-                    st.write("**현재 사용자:**", _dbg["current_user"])
-                    st.write("**load_terms로 가져온 row 수:**", _dbg["glossary_rows_count"])
-                    st.write("**glossary lookup 키 개수:**", _dbg["lookup_keys_count"])
-                    st.write(f"**lookup 키 샘플 (최대 30개):**")
-                    st.json(_dbg["lookup_sample"])
-                    st.write(f"**추출된 bold KO ({len(_dbg['extracted_bold'])}개):**")
-                    st.json(_dbg["extracted_bold"])
-                    st.write(f"**✅ 매칭된 KO ({len(_dbg['matched'])}개):**")
-                    st.json(_dbg["matched"])
-                    st.write(f"**❌ 매칭 안 된 KO ({len(_dbg['not_matched'])}개):**")
-                    st.json(_dbg["not_matched"])
+                with st.expander("🐛 진단 정보 (개발용)", expanded=True):
+                    st.write("**selected_product:**", repr(_dbg["selected_product"]))
+                    st.write("**selected_product hex (utf-8):**", _dbg["selected_product_hex"])
+                    st.write("**load_terms로 가져온 row 수:**", _dbg["terms_df_count"])
+                    st.write("**filtered _terms_df의 Product unique 값들:**")
+                    st.json(_dbg["product_unique_values_in_terms_df"])
+                    st.markdown("---")
+                    st.write(f"**DB raw — '스마트/클리너' 매칭 row 수:** {_dbg['DB raw: 스마트/클리너 매칭 row 수']}")
+                    st.write("**상세 (id/ko/en/product/owner + product의 LENGTH/HEX):**")
+                    st.json(_dbg["DB raw: 스마트/클리너 row 상세"])
+                    st.markdown("---")
+                    st.write(f"**DB raw — product LIKE '%wrapsody%' row 수:** {_dbg['DB raw: wrapsody product row 수']}")
+                    st.write("**상세:**")
+                    st.json(_dbg["DB raw: wrapsody product row 상세"])
 
             st.markdown(f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)")
             ui_mapping_df = st.data_editor(
