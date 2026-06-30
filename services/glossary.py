@@ -10,6 +10,7 @@ data_editor flow can stay almost unchanged.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional, Set  # noqa: F401  (Set kept for clarity in 3.9 typing)
 
 import pandas as pd
@@ -469,7 +470,6 @@ def build_patterns_preview_df(sheet_df: pd.DataFrame, source_file: str) -> pd.Da
 def _filter_by_product_for_preview(df: pd.DataFrame, product: str) -> pd.DataFrame:
     """Mirror of the app-side product filter — kept here so previews and
     real imports apply the same rule."""
-    import re
     if "Product" not in df.columns:
         return df
     p = (product or "").strip().lower()
