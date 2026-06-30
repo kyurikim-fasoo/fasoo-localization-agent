@@ -1,5 +1,9 @@
 import copy
+import os
 import re
+import tempfile
+import zipfile
+import zlib
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Iterable, Optional, Callable, Any
@@ -513,6 +517,39 @@ _BOLD_SEGMENT_RE = re.compile(r"⟦B⟧(.+?)⟦/B⟧", re.DOTALL)
 _INNER_MARKER_RE = re.compile(r"⟦[A-Za-z/]+(?::[A-Za-z]+)?\d*⟧")
 
 
+def sanitize_docx(in_path: str) -> str:
+    """
+    Return a path to a docx whose zip entries all pass CRC-32 verification.
+
+    .docx is a zip container; pipelines like Wrapsody decrypt occasionally
+    leave one embedded image with a CRC mismatch, and python-docx then refuses
+    to open the whole file. We probe every entry; if all read cleanly the
+    original path is returned untouched, otherwise we copy every readable
+    entry into a fresh temp .docx and return that path. The dropped entries
+    are almost always images that the translation pipeline doesn't use.
+    """
+    try:
+        with zipfile.ZipFile(in_path, "r") as z:
+            for name in z.namelist():
+                z.read(name)
+        return in_path
+    except (zipfile.BadZipFile, zlib.error, RuntimeError):
+        pass  # fall through to repair
+
+    fd, dst = tempfile.mkstemp(suffix=".docx", prefix="repaired_")
+    os.close(fd)
+    with zipfile.ZipFile(in_path, "r") as zin, \
+         zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for zinfo in zin.infolist():
+            try:
+                data = zin.read(zinfo.filename)
+                zout.writestr(zinfo, data)
+            except (zipfile.BadZipFile, zlib.error, RuntimeError):
+                # 손상된 part(보통 word/media/*.png) — 통과시켜도 텍스트 추출에 무관
+                continue
+    return dst
+
+
 def extract_bold_texts(in_path: str) -> List[str]:
     """
     Pull every bold-formatted text segment containing Korean from a docx file.
@@ -524,7 +561,7 @@ def extract_bold_texts(in_path: str) -> List[str]:
     Nested markers (drawings, hyperlinks, highlights) inside a bold span are
     stripped — only the human-readable text is returned.
     """
-    doc = Document(in_path)
+    doc = Document(sanitize_docx(in_path))
     seen: set = set()
     result: List[str] = []
     for p in iter_all_paragraphs(doc):
@@ -1526,7 +1563,7 @@ def translate_document(
     glossary_pairs_for_qa = [(e.ko, e.en) for e in glossary_entries]
 
     client = OpenAI(api_key=api_key)
-    doc = Document(in_path)
+    doc = Document(sanitize_docx(in_path))
     cache: Dict[str, str] = {}
 
     # ── 문서 내 기존 영문 단락 수집 ────────────────────────────────────
