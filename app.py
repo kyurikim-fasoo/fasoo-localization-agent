@@ -19,6 +19,14 @@ from services.glossary import (
     save_patterns_from_dataframe,
     save_terms_from_dataframe,
 )
+from services.translation_logs import (
+    create_log,
+    delete_log,
+    find_logs_by_source_file,
+    get_log,
+    list_logs,
+    update_note,
+)
 from services.users import add_user, list_users
 from translator_engine import extract_bold_texts, translate_document
 
@@ -459,7 +467,14 @@ with st.sidebar:
         st.session_state.app_mode = "Glossary 관리"
         st.rerun()
 
-    st.button("로그 (준비 중)", use_container_width=True, disabled=True, key="nav_logs")
+    if st.button(
+        "로그",
+        use_container_width=True,
+        type="primary" if st.session_state.app_mode == "로그" else "secondary",
+        key="nav_logs",
+    ):
+        st.session_state.app_mode = "로그"
+        st.rerun()
 
 # ── 메인 헤더 ─────────────────────────────────────────────────────────
 # 우측 상단: 원형 이니셜 아이콘 (popover trigger). 클릭하면 사용자 이름 +
@@ -842,6 +857,149 @@ if st.session_state.app_mode == "Glossary 관리":
 
 
 # ─────────────────────────────────────────────
+# 로그 페이지 — 번역 이력 + UI 매핑 reuse + 메모 관리
+# ─────────────────────────────────────────────
+
+if st.session_state.app_mode == "로그":
+    st.subheader("로그")
+    st.caption(
+        "본인이 실행한 번역 이력입니다. 각 행에는 그때 사용한 UI 텍스트 매핑이 함께 저장되어 있어 "
+        "동일 문서 재번역이나 에이전트 테스트 시 매핑을 그대로 불러올 수 있습니다."
+    )
+
+    _log_search = st.text_input(
+        "검색 (파일명 / 제품 / 메모)",
+        key="log_search",
+        placeholder="예: Wrapsody, getting-started.docx, 에이전트 테스트 …",
+        label_visibility="collapsed",
+    )
+
+    _logs_df = list_logs(
+        user=st.session_state.current_user,
+        search=_log_search,
+        limit=200,
+    )
+    st.caption(f"{len(_logs_df)}개")
+
+    if _logs_df.empty:
+        st.info("아직 번역 이력이 없습니다. **Localize** 메뉴에서 첫 번역을 실행해 보세요.", icon="ℹ️")
+    else:
+        # 표용 데이터 가공 — 핵심 컬럼만 (UI 매핑은 본문 별도 표시)
+        _list_view = _logs_df[[
+            "id", "created_at", "product", "source_file",
+            "paragraphs_translated", "total_tokens", "mapping_count", "note",
+        ]].copy()
+        _list_view.columns = ["ID", "날짜", "제품", "원본 파일", "단락 수", "토큰", "매핑 수", "메모"]
+
+        st.dataframe(
+            _list_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "ID": st.column_config.NumberColumn("ID", width="small"),
+                "날짜": st.column_config.TextColumn("날짜", width="medium"),
+                "제품": st.column_config.TextColumn("제품", width="small"),
+                "원본 파일": st.column_config.TextColumn("원본 파일"),
+                "단락 수": st.column_config.NumberColumn("단락 수", width="small"),
+                "토큰": st.column_config.NumberColumn("토큰", width="small"),
+                "매핑 수": st.column_config.NumberColumn("매핑 수", width="small"),
+                "메모": st.column_config.TextColumn("메모"),
+            },
+        )
+
+        st.markdown(" ")
+        st.markdown("##### 🔎 상세 보기 / 관리")
+        _id_options = _logs_df["id"].tolist()
+        _id_labels = {
+            int(row["id"]): f"#{int(row['id'])} — {row['created_at']} — {row['source_file']}"
+            for _, row in _logs_df.iterrows()
+        }
+        _selected_id = st.selectbox(
+            "로그 선택",
+            options=_id_options,
+            format_func=lambda i: _id_labels.get(int(i), str(i)),
+            key="log_selected_id",
+        )
+
+        if _selected_id is not None:
+            _detail = get_log(int(_selected_id))
+            if _detail:
+                with st.container(border=True):
+                    col_d_a, col_d_b, col_d_c = st.columns(3)
+                    col_d_a.markdown(f"**날짜**\n\n{_detail['created_at']}")
+                    col_d_a.markdown(f"**사용자**\n\n{_detail['user']}")
+                    col_d_b.markdown(f"**제품**\n\n{_detail['product'] or '(없음)'}")
+                    col_d_b.markdown(f"**유형**\n\n{_detail['translation_mode'] or '(없음)'}")
+                    col_d_c.markdown(f"**원본 파일**\n\n{_detail['source_file']}")
+                    col_d_c.markdown(f"**결과 파일**\n\n{_detail['output_file']}")
+
+                    st.markdown(" ")
+                    col_m_a, col_m_b, col_m_c, col_m_d = st.columns(4)
+                    col_m_a.metric("단락 수", f"{_detail['paragraphs_translated']:,}")
+                    col_m_b.metric("입력 토큰", f"{_detail['input_tokens']:,}")
+                    col_m_c.metric("출력 토큰", f"{_detail['output_tokens']:,}")
+                    col_m_d.metric("총 토큰", f"{_detail['total_tokens']:,}")
+
+                    st.markdown("##### UI 텍스트 매핑")
+                    _mapping = _detail.get("ui_text_overrides") or {}
+                    if _mapping:
+                        _map_df = pd.DataFrame(
+                            [{"KO (Bold)": k, "EN (입력)": v} for k, v in _mapping.items()]
+                        )
+                        st.dataframe(_map_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("이 번역에서는 UI 텍스트 매핑을 사용하지 않았습니다.")
+
+                    st.markdown("##### 메모 / 비고")
+                    _note_value = st.text_area(
+                        "메모",
+                        value=_detail.get("note", ""),
+                        key=f"log_note_{_selected_id}",
+                        label_visibility="collapsed",
+                        height=80,
+                    )
+
+                    col_act_save, col_act_load, col_act_del = st.columns(3)
+                    with col_act_save:
+                        if st.button("메모 저장", use_container_width=True, key=f"log_note_save_{_selected_id}"):
+                            try:
+                                update_note(int(_selected_id), _note_value.strip())
+                                st.toast("메모 저장됨", icon="💾")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"메모 저장 오류: {e}")
+                    with col_act_load:
+                        _can_load = bool(_mapping)
+                        if st.button(
+                            "이 매핑으로 새 번역",
+                            use_container_width=True,
+                            disabled=not _can_load,
+                            type="primary" if _can_load else "secondary",
+                            key=f"log_load_{_selected_id}",
+                        ):
+                            # 다음 Localize Step 2에서 이 매핑을 빈 EN 칸에 채워주도록 보관
+                            st.session_state["preload_ui_mapping"] = dict(_mapping)
+                            st.session_state.app_mode = "Localize"
+                            st.session_state.step = 1
+                            st.toast("매핑 가져왔습니다. Localize → Step 2에서 자동 적용됩니다.", icon="📥")
+                            st.rerun()
+                    with col_act_del:
+                        if st.button(
+                            "🗑️ 로그 삭제",
+                            use_container_width=True,
+                            key=f"log_del_{_selected_id}",
+                        ):
+                            try:
+                                delete_log(int(_selected_id))
+                                st.toast("로그 삭제됨", icon="🗑️")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"삭제 오류: {e}")
+
+    st.stop()
+
+
+# ─────────────────────────────────────────────
 # Step 2 — 파일 업로드 & 번역 (번역 실행 모드)
 # ─────────────────────────────────────────────
 
@@ -851,7 +1009,7 @@ if st.session_state.step == 2:
         "Word 파일을 올리면 **볼드(Bold)로 표시된 한국어**를 자동으로 뽑아 표에 보여드립니다. "
         "그대로 쓰고 싶은 영문 표기가 있으면 EN 칸에 입력하세요. "
         "비워두면 LLM이 알아서 번역하고, 입력한 항목은 그 표기 그대로 사용됩니다. "
-        "여기 입력한 매핑은 **이번 번역 한 번만** 적용되고 저장되지 않습니다."
+        "이 매핑은 자동으로 **[로그] 메뉴에 기록**되어, 나중에 같은 문서를 다시 번역할 때 불러올 수 있어요."
     )
     render_summary_pills(
         st.session_state.selected_product,
@@ -902,18 +1060,30 @@ if st.session_state.step == 2:
                     for r in glossary_rows
                     if r.get("KO") and r.get("EN")
                 }
+                # 로그에서 가져온 매핑 (로그 페이지의 "이 매핑으로 새 번역" 진입) — 글로서리보다 우선
+                _preloaded = st.session_state.pop("preload_ui_mapping", None) or {}
+
                 initial_rows = []
+                _source_counts = {"글로서리": 0, "로그": 0}
                 for ko in bold_list:
-                    matched_en = _glossary_lookup.get(ko, "")
+                    if ko in _preloaded:
+                        en = _preloaded[ko]; src = "로그"
+                        _source_counts["로그"] += 1
+                    elif ko in _glossary_lookup:
+                        en = _glossary_lookup[ko]; src = "글로서리"
+                        _source_counts["글로서리"] += 1
+                    else:
+                        en = ""; src = ""
                     initial_rows.append({
                         "KO (Bold)": ko,
-                        "EN (입력)": matched_en,
-                        "출처": "글로서리" if matched_en else "",
+                        "EN (입력)": en,
+                        "출처": src,
                     })
 
                 st.session_state.ui_text_mapping_rows = initial_rows
                 st.session_state.ui_text_source_sig = file_sig
                 st.session_state.ui_text_input_path = str(tmp_path)
+                st.session_state.ui_text_preload_counts = _source_counts
             except Exception as e:
                 st.error(f"문서에서 볼드 텍스트 추출 실패: {e}")
 
@@ -926,6 +1096,59 @@ if st.session_state.step == 2:
         if ui_mapping_df.empty:
             st.info("이 문서에는 볼드 처리된 한국어 텍스트가 없습니다. 그대로 번역을 진행하세요.", icon="ℹ️")
         else:
+            # 같은 파일명의 이전 로그가 있으면 알림 + 매핑 불러오기 옵션
+            _prev_logs = find_logs_by_source_file(
+                user=st.session_state.current_user,
+                source_file=uploaded_docx.name,
+                limit=5,
+            )
+            if not _prev_logs.empty:
+                with st.container(border=True):
+                    st.markdown(
+                        f"📚 **이 파일 `{uploaded_docx.name}`은(는) 이전에 "
+                        f"{len(_prev_logs)}번 번역되었습니다.** 이전 매핑을 가져와서 빈 EN 칸을 채울 수 있어요."
+                    )
+                    _prev_options = {
+                        int(r["id"]): f"#{int(r['id'])} — {r['created_at']} — "
+                                       f"매핑 {len(json.loads(r['ui_text_overrides'] or '{}'))}개"
+                                       + (f" — {r['note']}" if r.get('note') else "")
+                        for _, r in _prev_logs.iterrows()
+                    }
+                    col_pl_sel, col_pl_btn = st.columns([3, 1])
+                    with col_pl_sel:
+                        _pl_id = st.selectbox(
+                            "가져올 로그",
+                            options=list(_prev_options.keys()),
+                            format_func=lambda i: _prev_options.get(int(i), str(i)),
+                            label_visibility="collapsed",
+                            key="prev_log_picker",
+                        )
+                    with col_pl_btn:
+                        if st.button("매핑 불러오기", use_container_width=True, key="prev_log_load"):
+                            _ld = get_log(int(_pl_id))
+                            _ld_map = (_ld or {}).get("ui_text_overrides") or {}
+                            # 빈 EN 칸만 채움 (사용자가 이미 입력한 건 안 건드림)
+                            _filled = 0
+                            for row in st.session_state.ui_text_mapping_rows:
+                                if not row.get("EN (입력)"):
+                                    ko = row.get("KO (Bold)")
+                                    if ko in _ld_map:
+                                        row["EN (입력)"] = _ld_map[ko]
+                                        row["출처"] = "로그"
+                                        _filled += 1
+                            st.toast(f"로그 #{_pl_id}에서 {_filled}개 매핑을 채웠습니다.", icon="📥")
+                            st.rerun()
+
+            # 자동 매칭 결과 요약
+            _counts = st.session_state.get("ui_text_preload_counts", {})
+            if _counts.get("글로서리", 0) or _counts.get("로그", 0):
+                bits = []
+                if _counts.get("로그", 0):
+                    bits.append(f"이전 로그에서 **{_counts['로그']}개**")
+                if _counts.get("글로서리", 0):
+                    bits.append(f"글로서리에서 **{_counts['글로서리']}개**")
+                st.caption(f"💡 {' / '.join(bits)} 자동 매칭됨")
+
             st.markdown(f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)")
             ui_mapping_df = st.data_editor(
                 ui_mapping_df,
@@ -1007,6 +1230,23 @@ if st.session_state.step == 2:
                 st.session_state.last_output_path = str(output_path)
                 st.session_state.last_output_filename = output_filename
 
+                # 번역 로그 자동 저장 — 메타 + UI 매핑 + 토큰. 메모는 Step 3에서 입력.
+                try:
+                    new_log_id = create_log(
+                        user=st.session_state.current_user,
+                        product=st.session_state.selected_product or "",
+                        translation_mode=st.session_state.translation_mode or "",
+                        source_file=uploaded_docx.name,
+                        output_file=output_filename,
+                        ui_text_overrides=ui_overrides or {},
+                        metrics=result,
+                        note="",
+                    )
+                    st.session_state.last_log_id = new_log_id
+                except Exception as log_err:
+                    # 로그 저장 실패는 사용자 흐름을 막지 않음
+                    st.warning(f"로그 저장 중 경고: {log_err}")
+
                 # UI 텍스트 매핑은 일회성 — 다음 번역 위해 정리
                 st.session_state.pop("ui_text_mapping_rows", None)
                 st.session_state.pop("ui_text_source_sig", None)
@@ -1060,6 +1300,30 @@ elif st.session_state.step == 3:
             type="primary",
             use_container_width=True,
         )
+
+    # ── 메모 입력 (이번 번역에 대한 비고) ─────────────────────────────
+    _log_id = st.session_state.get("last_log_id")
+    if _log_id:
+        st.markdown(" ")
+        with st.container(border=True):
+            st.markdown("##### 📝 메모 / 비고 (선택)")
+            st.caption(
+                "이번 번역에 대한 메모를 남겨두면 나중에 '로그' 메뉴에서 검색해 다시 찾기 쉽습니다. "
+                "UI 텍스트 매핑도 함께 저장돼 있어 같은 문서를 다시 번역할 때 불러올 수 있어요."
+            )
+            note_text = st.text_area(
+                "메모",
+                key="step3_note",
+                placeholder="예: 에이전트 테스트 2차 — '저장' 라벨만 'Apply'로 강제 매핑",
+                label_visibility="collapsed",
+                height=80,
+            )
+            if st.button("메모 저장", key="save_note_step3"):
+                try:
+                    update_note(int(_log_id), note_text.strip())
+                    st.toast("메모 저장됨", icon="💾")
+                except Exception as e:
+                    st.error(f"메모 저장 오류: {e}")
 
     st.markdown("---")
     col_prev, col_restart = st.columns(2)

@@ -84,6 +84,27 @@ CREATE TABLE IF NOT EXISTS patterns (
 
 CREATE INDEX IF NOT EXISTS ix_patterns_ko ON patterns(ko);
 -- ix_patterns_owner is created in _migrate() (same reason as ix_terms_owner).
+
+CREATE TABLE IF NOT EXISTS translation_logs (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at              TEXT    NOT NULL,
+    user                    TEXT    NOT NULL,
+    product                 TEXT    DEFAULT '',
+    translation_mode        TEXT    DEFAULT '',
+    source_file             TEXT    DEFAULT '',
+    output_file             TEXT    DEFAULT '',
+    ui_text_overrides       TEXT    DEFAULT '{}',   -- JSON {ko: en}
+    input_tokens            INTEGER DEFAULT 0,
+    cached_tokens           INTEGER DEFAULT 0,
+    output_tokens           INTEGER DEFAULT 0,
+    total_tokens            INTEGER DEFAULT 0,
+    paragraphs_translated   INTEGER DEFAULT 0,
+    note                    TEXT    DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS ix_logs_user        ON translation_logs(user);
+CREATE INDEX IF NOT EXISTS ix_logs_created     ON translation_logs(created_at);
+CREATE INDEX IF NOT EXISTS ix_logs_source_file ON translation_logs(source_file);
 """
 
 
