@@ -16,6 +16,7 @@ from typing import Optional, Set  # noqa: F401  (Set kept for clarity in 3.9 typ
 import pandas as pd
 
 from db.schema import db_session, init_db, now_iso
+from services.sync import sync_db
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,6 +275,7 @@ def save_terms_from_dataframe(
             conn.execute("DELETE FROM terms WHERE id=?", (did,))
             counts["deleted"] += 1
 
+    sync_db(f"terms: +{counts['inserted']} ~{counts['updated']} -{counts['deleted']} by {current_user}")
     return counts
 
 
@@ -337,6 +339,7 @@ def save_patterns_from_dataframe(
             conn.execute("DELETE FROM patterns WHERE id=?", (did,))
             counts["deleted"] += 1
 
+    sync_db(f"patterns: +{counts['inserted']} ~{counts['updated']} -{counts['deleted']} by {current_user}")
     return counts
 
 
@@ -399,6 +402,7 @@ def replace_terms_from_excel(
             )
             inserted += 1
 
+    sync_db(f"Master glossary replaced: {inserted} terms from {source_file}")
     return inserted
 
 
@@ -544,4 +548,5 @@ def replace_patterns_from_excel(sheet_df: pd.DataFrame, source_file: str) -> int
             )
             inserted += 1
 
+    sync_db(f"Master patterns replaced: {inserted} patterns from {source_file}")
     return inserted

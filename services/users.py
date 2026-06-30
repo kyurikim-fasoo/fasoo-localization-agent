@@ -47,6 +47,11 @@ def add_user(name: str) -> str:
     if not name:
         raise ValueError("이름이 비어 있습니다.")
     users = set(_read())
+    was_new = name not in users
     users.add(name)
     _write(sorted(users))
+    if was_new:
+        # 영속화 (Streamlit Cloud ephemeral 회피)
+        from services.sync import sync_users
+        sync_users(f"Add user: {name}")
     return name

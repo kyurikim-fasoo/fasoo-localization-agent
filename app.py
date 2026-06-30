@@ -53,6 +53,13 @@ OPENAI_API_KEY = _secret_or_env("OPENAI_API_KEY", "")
 COST_PER_1K_INPUT_TOKENS = float(_secret_or_env("MODEL_COST_PER_1K_INPUT_TOKENS", "0.005"))
 COST_PER_1K_OUTPUT_TOKENS = float(_secret_or_env("MODEL_COST_PER_1K_OUTPUT_TOKENS", "0.015"))
 
+# GitHub 자동 백업 (Streamlit Cloud ephemeral 회피).
+# secrets에 둔 값을 환경변수로 export — services/sync.py가 os.getenv로 읽음.
+for _k in ("GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_BRANCH"):
+    _v = _secret_or_env(_k, "")
+    if _v:
+        os.environ[_k] = _v
+
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "outputs"

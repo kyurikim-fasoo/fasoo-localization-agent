@@ -15,6 +15,7 @@ from typing import Dict, Optional
 import pandas as pd
 
 from db.schema import db_session, init_db, now_iso
+from services.sync import sync_db
 
 
 def create_log(
@@ -50,7 +51,10 @@ def create_log(
                 note,
             ),
         )
-        return int(cur.lastrowid)
+        new_id = int(cur.lastrowid)
+
+    sync_db(f"Log #{new_id} ({source_file}) by {user}")
+    return new_id
 
 
 def list_logs(
@@ -124,12 +128,14 @@ def update_note(log_id: int, note: str) -> None:
         conn.execute(
             "UPDATE translation_logs SET note = ? WHERE id = ?", (note, log_id)
         )
+    sync_db(f"Log #{log_id} note updated")
 
 
 def delete_log(log_id: int) -> None:
     init_db()
     with db_session() as conn:
         conn.execute("DELETE FROM translation_logs WHERE id = ?", (log_id,))
+    sync_db(f"Log #{log_id} deleted")
 
 
 def find_logs_by_source_file(user: str, source_file: str, limit: int = 5) -> pd.DataFrame:
