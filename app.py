@@ -28,7 +28,7 @@ from services.translation_logs import (
     update_note,
 )
 from services.users import add_user, list_users
-from translator_engine import extract_bold_texts, translate_document
+from translator_engine import extract_bold_texts_with_context, translate_document
 
 
 load_dotenv()
@@ -1052,7 +1052,7 @@ if st.session_state.step == 2:
         if st.session_state.get("ui_text_source_sig") != file_sig:
             try:
                 tmp_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
-                bold_list = extract_bold_texts(str(tmp_path))
+                bold_with_ctx = extract_bold_texts_with_context(str(tmp_path))
 
                 # 글로서리 자동 매칭 (KO 일치)
                 _glossary_lookup = {
@@ -1060,24 +1060,24 @@ if st.session_state.step == 2:
                     for r in glossary_rows
                     if r.get("KO") and r.get("EN")
                 }
-                # 로그에서 가져온 매핑 (로그 페이지의 "이 매핑으로 새 번역" 진입) — 글로서리보다 우선
+                # 로그에서 가져온 매핑 — 글로서리보다 우선
                 _preloaded = st.session_state.pop("preload_ui_mapping", None) or {}
 
                 initial_rows = []
                 _source_counts = {"글로서리": 0, "로그": 0}
-                for ko in bold_list:
+                for ko, ctx in bold_with_ctx:
                     if ko in _preloaded:
-                        en = _preloaded[ko]; src = "로그"
+                        en = _preloaded[ko]
                         _source_counts["로그"] += 1
                     elif ko in _glossary_lookup:
-                        en = _glossary_lookup[ko]; src = "글로서리"
+                        en = _glossary_lookup[ko]
                         _source_counts["글로서리"] += 1
                     else:
-                        en = ""; src = ""
+                        en = ""
                     initial_rows.append({
                         "KO (Bold)": ko,
+                        "맥락": ctx,
                         "EN (입력)": en,
-                        "출처": src,
                     })
 
                 st.session_state.ui_text_mapping_rows = initial_rows
@@ -1090,7 +1090,7 @@ if st.session_state.step == 2:
         saved_input_path = Path(st.session_state.ui_text_input_path) if st.session_state.get("ui_text_input_path") else None
         ui_mapping_df = pd.DataFrame(
             st.session_state.get("ui_text_mapping_rows", []),
-            columns=["KO (Bold)", "EN (입력)", "출처"],
+            columns=["KO (Bold)", "맥락", "EN (입력)"],
         )
 
         if ui_mapping_df.empty:
@@ -1155,11 +1155,19 @@ if st.session_state.step == 2:
                 use_container_width=True,
                 hide_index=True,
                 num_rows="fixed",
-                disabled=["KO (Bold)", "출처"],
+                disabled=["KO (Bold)", "맥락"],
                 column_config={
-                    "KO (Bold)": st.column_config.TextColumn("KO (Bold)"),
-                    "EN (입력)": st.column_config.TextColumn("EN (입력)", help="비워두면 LLM이 번역. 입력하면 이 표기 그대로 사용."),
-                    "출처": st.column_config.TextColumn("출처", help="글로서리에서 자동으로 채워준 항목"),
+                    "KO (Bold)": st.column_config.TextColumn("KO (Bold)", width="small"),
+                    "맥락": st.column_config.TextColumn(
+                        "맥락 (앞뒤 문장)",
+                        help="해당 단어가 본문에서 등장한 위치의 앞뒤 문맥. 「대상」 으로 강조 표시.",
+                        width="large",
+                    ),
+                    "EN (입력)": st.column_config.TextColumn(
+                        "EN (입력)",
+                        help="비워두면 LLM이 번역. 입력하면 이 표기 그대로 사용.",
+                        width="medium",
+                    ),
                 },
                 key="ui_text_editor",
             )

@@ -595,6 +595,54 @@ def sanitize_docx(in_path: str) -> str:
     return dst
 
 
+def _make_context_excerpt(paragraph_text: str, target: str, around: int = 30) -> str:
+    """
+    Carve a short window of the source paragraph around `target` and wrap the
+    target with 「…」 for visual emphasis. Streamlit's data_editor cells render
+    as plain text, so we use a marker character pair rather than markdown.
+    """
+    idx = paragraph_text.find(target)
+    if idx < 0:
+        return f"「{target}」"
+    start = max(0, idx - around)
+    end = min(len(paragraph_text), idx + len(target) + around)
+    excerpt = paragraph_text[start:end].strip()
+    excerpt = excerpt.replace(target, f"「{target}」", 1)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(paragraph_text) else ""
+    return f"{prefix}{excerpt}{suffix}"
+
+
+def extract_bold_texts_with_context(in_path: str) -> List[Tuple[str, str]]:
+    """
+    Like [extract_bold_texts], but for each unique bold KO segment also returns
+    the sentence-level context in which it first appears, with the target
+    surrounded by 「…」 so the user can disambiguate "관리" (메뉴 라벨인지 직책인지)
+    while filling out the mapping table.
+
+    Returns a list of (ko, context_excerpt) tuples, preserving first-occurrence order.
+    """
+    doc = Document(sanitize_docx(in_path))
+    seen: set = set()
+    result: List[Tuple[str, str]] = []
+    for p in iter_all_paragraphs(doc):
+        if is_heading_paragraph(p):
+            continue
+        marked, _, _ = paragraph_to_marked_text(p)
+        # 컨텍스트는 plain text 기준 — 모든 마커 제거 후 단락 텍스트
+        plain_para = re.sub(r"⟦[^⟧]+⟧", "", marked)
+        for match in _BOLD_SEGMENT_RE.finditer(marked):
+            text = _INNER_MARKER_RE.sub("", match.group(1)).strip()
+            if not text or not contains_korean(text):
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            context = _make_context_excerpt(plain_para, text)
+            result.append((text, context))
+    return result
+
+
 def extract_bold_texts(in_path: str) -> List[str]:
     """
     Pull every bold-formatted text segment containing Korean from a docx file.
