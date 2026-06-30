@@ -1185,10 +1185,36 @@ def iter_all_paragraphs(doc: Document) -> Iterable:
 
 
 def is_heading_paragraph(p) -> bool:
-    if not p.style or not getattr(p.style, "name", None):
-        return False
-    name = (p.style.name or "").lower()
-    return name.startswith("heading") or name in ("title",)
+    """
+    Recognise heading / title paragraphs across Word locales and custom styles.
+
+    Checks the paragraph's style **and its style ancestor chain**, so a
+    user-defined style that inherits from `Heading 1` is also treated as a
+    heading. Both English ("Heading 1", "Title") and Korean ("제목 1", "표제")
+    style names / IDs are recognised.
+    """
+    style = getattr(p, "style", None)
+    seen_ids: set = set()
+    while style is not None:
+        sid = (getattr(style, "style_id", None) or "")
+        name = (getattr(style, "name", None) or "")
+        sid_l = sid.lower()
+        name_l = name.lower()
+
+        if sid_l.startswith("heading") or sid_l == "title":
+            return True
+        if name_l.startswith("heading") or name_l in ("title",):
+            return True
+        # 한국어 Word: "제목 1", "제목 2" 등 — 스타일 이름이 한글로 표시됨
+        if name.startswith("제목") or name in ("표제",):
+            return True
+
+        # 무한 루프 방어
+        if sid in seen_ids:
+            break
+        seen_ids.add(sid)
+        style = getattr(style, "base_style", None)
+    return False
 
 
 def paragraph_has_hyperlink(paragraph) -> bool:

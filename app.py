@@ -1161,6 +1161,21 @@ if st.session_state.step == 2:
                 st.session_state.ui_text_source_sig = file_sig
                 st.session_state.ui_text_input_path = str(tmp_path)
                 st.session_state.ui_text_preload_counts = _source_counts
+
+                # 🐛 일회용 진단 정보 — 매칭 안 되는 원인 파악용
+                _extracted_bold_set = [ko for ko, _ in bold_with_ctx]
+                _matched = [ko for ko in _extracted_bold_set if ko in _glossary_lookup]
+                _not_matched = [ko for ko in _extracted_bold_set if ko not in _glossary_lookup]
+                st.session_state.ui_text_debug = {
+                    "glossary_rows_count": len(glossary_rows),
+                    "lookup_keys_count": len(_glossary_lookup),
+                    "lookup_sample": list(_glossary_lookup.keys())[:30],
+                    "extracted_bold": _extracted_bold_set,
+                    "matched": _matched,
+                    "not_matched": _not_matched,
+                    "selected_product": st.session_state.selected_product,
+                    "current_user": st.session_state.current_user,
+                }
             except Exception as e:
                 st.error(f"문서에서 볼드 텍스트 추출 실패: {e}")
 
@@ -1225,6 +1240,23 @@ if st.session_state.step == 2:
                 if _counts.get("글로서리", 0):
                     bits.append(f"글로서리에서 **{_counts['글로서리']}개**")
                 st.caption(f"💡 {' / '.join(bits)} 자동 매칭됨")
+
+            # 🐛 일회용 진단 expander — 원인 파악 후 제거 예정
+            _dbg = st.session_state.get("ui_text_debug")
+            if _dbg:
+                with st.expander("🐛 진단 정보 (개발용 — 원인 파악 후 제거 예정)", expanded=False):
+                    st.write("**선택된 제품(Step 1):**", _dbg["selected_product"])
+                    st.write("**현재 사용자:**", _dbg["current_user"])
+                    st.write("**load_terms로 가져온 row 수:**", _dbg["glossary_rows_count"])
+                    st.write("**glossary lookup 키 개수:**", _dbg["lookup_keys_count"])
+                    st.write(f"**lookup 키 샘플 (최대 30개):**")
+                    st.json(_dbg["lookup_sample"])
+                    st.write(f"**추출된 bold KO ({len(_dbg['extracted_bold'])}개):**")
+                    st.json(_dbg["extracted_bold"])
+                    st.write(f"**✅ 매칭된 KO ({len(_dbg['matched'])}개):**")
+                    st.json(_dbg["matched"])
+                    st.write(f"**❌ 매칭 안 된 KO ({len(_dbg['not_matched'])}개):**")
+                    st.json(_dbg["not_matched"])
 
             st.markdown(f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)")
             ui_mapping_df = st.data_editor(
