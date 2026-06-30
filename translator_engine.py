@@ -603,13 +603,19 @@ def extract_bold_texts(in_path: str) -> List[str]:
     sentences/words that appear inside ⟦B⟧…⟦/B⟧ in the document. Returned
     list is de-duplicated and preserves the order each segment first appears.
 
-    Nested markers (drawings, hyperlinks, highlights) inside a bold span are
-    stripped — only the human-readable text is returned.
+    Skips:
+    - Heading / Title paragraphs (Heading 1/2/…, Title): these are document
+      structure labels, not UI strings, so the user writes their own English
+      version separately and they shouldn't pollute the mapping table.
+    - Nested markers (drawings, hyperlinks, highlights) inside a bold span:
+      stripped — only the human-readable text is returned.
     """
     doc = Document(sanitize_docx(in_path))
     seen: set = set()
     result: List[str] = []
     for p in iter_all_paragraphs(doc):
+        if is_heading_paragraph(p):
+            continue  # heading/title은 UI 텍스트 매핑 대상이 아님
         marked, _, _ = paragraph_to_marked_text(p)
         for match in _BOLD_SEGMENT_RE.finditer(marked):
             text = _INNER_MARKER_RE.sub("", match.group(1)).strip()
