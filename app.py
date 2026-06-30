@@ -1047,8 +1047,10 @@ if st.session_state.step == 2:
     saved_input_path: Optional[Path] = None
 
     if uploaded_docx is not None:
-        # 파일 바뀌면 재추출 (파일명 + size로 변화 감지)
-        file_sig = f"{uploaded_docx.name}::{uploaded_docx.size}"
+        # 파일 바뀌면 재추출 (파일명 + size + 컬럼 스키마 버전).
+        # 스키마 버전은 ui_text_mapping_rows의 키 구조를 바꿀 때마다 올린다 —
+        # 그래야 이전 세션의 row가 새 컬럼과 안 맞을 때 자동 재추출된다.
+        file_sig = f"{uploaded_docx.name}::{uploaded_docx.size}::ctx_v1"
         if st.session_state.get("ui_text_source_sig") != file_sig:
             try:
                 tmp_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
@@ -1076,8 +1078,8 @@ if st.session_state.step == 2:
                         en = ""
                     initial_rows.append({
                         "KO (Bold)": ko,
-                        "맥락": ctx,
                         "EN (입력)": en,
+                        "맥락": ctx,
                     })
 
                 st.session_state.ui_text_mapping_rows = initial_rows
@@ -1090,7 +1092,7 @@ if st.session_state.step == 2:
         saved_input_path = Path(st.session_state.ui_text_input_path) if st.session_state.get("ui_text_input_path") else None
         ui_mapping_df = pd.DataFrame(
             st.session_state.get("ui_text_mapping_rows", []),
-            columns=["KO (Bold)", "맥락", "EN (입력)"],
+            columns=["KO (Bold)", "EN (입력)", "맥락"],
         )
 
         if ui_mapping_df.empty:
@@ -1156,17 +1158,18 @@ if st.session_state.step == 2:
                 hide_index=True,
                 num_rows="fixed",
                 disabled=["KO (Bold)", "맥락"],
+                column_order=["KO (Bold)", "EN (입력)", "맥락"],
                 column_config={
                     "KO (Bold)": st.column_config.TextColumn("KO (Bold)", width="small"),
-                    "맥락": st.column_config.TextColumn(
-                        "맥락 (앞뒤 문장)",
-                        help="해당 단어가 본문에서 등장한 위치의 앞뒤 문맥. 「대상」 으로 강조 표시.",
-                        width="large",
-                    ),
                     "EN (입력)": st.column_config.TextColumn(
                         "EN (입력)",
                         help="비워두면 LLM이 번역. 입력하면 이 표기 그대로 사용.",
                         width="medium",
+                    ),
+                    "맥락": st.column_config.TextColumn(
+                        "맥락 (앞뒤 문장)",
+                        help="해당 단어가 본문에서 등장한 위치의 앞뒤 문맥. 「대상」 으로 강조 표시.",
+                        width="large",
                     ),
                 },
                 key="ui_text_editor",
