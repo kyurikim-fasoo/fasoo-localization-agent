@@ -509,6 +509,37 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
     return "".join(parts), drawing_map, hyperlink_map
 
 
+_BOLD_SEGMENT_RE = re.compile(r"⟦B⟧(.+?)⟦/B⟧", re.DOTALL)
+_INNER_MARKER_RE = re.compile(r"⟦[A-Za-z/]+(?::[A-Za-z]+)?\d*⟧")
+
+
+def extract_bold_texts(in_path: str) -> List[str]:
+    """
+    Pull every bold-formatted text segment containing Korean from a docx file.
+
+    Used by the UI text-mapping screen so the user can pre-translate the
+    sentences/words that appear inside ⟦B⟧…⟦/B⟧ in the document. Returned
+    list is de-duplicated and preserves the order each segment first appears.
+
+    Nested markers (drawings, hyperlinks, highlights) inside a bold span are
+    stripped — only the human-readable text is returned.
+    """
+    doc = Document(in_path)
+    seen: set = set()
+    result: List[str] = []
+    for p in iter_all_paragraphs(doc):
+        marked, _, _ = paragraph_to_marked_text(p)
+        for match in _BOLD_SEGMENT_RE.finditer(marked):
+            text = _INNER_MARKER_RE.sub("", match.group(1)).strip()
+            if not text or not contains_korean(text):
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+    return result
+
+
 # Per-run styling tags that must NOT be inherited by rebuilt runs —
 # each segment carries its own bold/italic/etc. from the translated markers.
 _FORMATTING_TAGS = frozenset(
@@ -1461,10 +1492,36 @@ def translate_document(
     model: str = "gpt-5.2",
     translation_mode: str = "Manual",
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    ui_text_overrides: Optional[Dict[str, str]] = None,
 ) -> Dict[str, int]:
     reset_token_counters()
 
     glossary_entries = build_glossary_entries_from_rows(glossary_rows)
+
+    # UI 텍스트 매핑(사용자가 Step 2에서 입력한 일회성 매핑)을 glossary로 합침.
+    # case_sensitive=True로 둬서 사용자가 입력한 EN을 그대로 보존한다.
+    # 길이 desc 정렬 유지를 위해 다시 sort.
+    if ui_text_overrides:
+        ui_entries: List[GlossaryEntry] = []
+        for ko, en in ui_text_overrides.items():
+            ko_s = (ko or "").strip()
+            en_s = (en or "").strip()
+            if not ko_s or not en_s:
+                continue
+            ui_entries.append(GlossaryEntry(
+                ko=ko_s,
+                en=en_s,
+                dnt=False,
+                case_sensitive=True,
+                product="",
+                note="UI text override",
+            ))
+        if ui_entries:
+            # 중복 제거 (UI 매핑이 글로서리와 같은 ko를 가지면 UI 매핑 우선)
+            ui_ko_set = {e.ko for e in ui_entries}
+            glossary_entries = [e for e in glossary_entries if e.ko not in ui_ko_set] + ui_entries
+            glossary_entries.sort(key=lambda e: len(e.ko), reverse=True)
+
     patterns = build_pattern_pairs_from_rows(pattern_rows)
     glossary_pairs_for_qa = [(e.ko, e.en) for e in glossary_entries]
 

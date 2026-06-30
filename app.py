@@ -20,7 +20,7 @@ from services.glossary import (
     save_terms_from_dataframe,
 )
 from services.users import add_user, list_users
-from translator_engine import translate_document
+from translator_engine import extract_bold_texts, translate_document
 
 
 load_dotenv()
@@ -141,7 +141,7 @@ def init_session_state():
     """모든 session_state 초기값을 한 곳에서 관리합니다."""
     defaults = {
         "step": 1,
-        "app_mode": "번역 실행",
+        "app_mode": "Localize",
         "selected_product": None,
         "translation_mode": "매뉴얼",
         "enable_cache": True,
@@ -403,7 +403,7 @@ if not st.session_state.current_user:
                 disabled=(chosen == "(선택)"),
             ):
                 st.session_state.current_user = chosen
-                st.session_state.app_mode = "번역 실행"
+                st.session_state.app_mode = "Localize"
                 st.rerun()
             st.markdown(" ")
             st.markdown("**또는 새 사용자 등록**")
@@ -424,7 +424,7 @@ if not st.session_state.current_user:
         ):
             add_user(new_name.strip())
             st.session_state.current_user = new_name.strip()
-            st.session_state.app_mode = "번역 실행"
+            st.session_state.app_mode = "Localize"
             st.rerun()
 
         st.markdown(" ")
@@ -442,12 +442,12 @@ if not st.session_state.current_user:
 # ── 사이드바: 메뉴 nav (헤더 라벨 없음, 테두리 없는 Wrapsody 스타일) ────
 with st.sidebar:
     if st.button(
-        "번역 실행",
+        "Localize",
         use_container_width=True,
-        type="primary" if st.session_state.app_mode == "번역 실행" else "secondary",
+        type="primary" if st.session_state.app_mode == "Localize" else "secondary",
         key="nav_translate",
     ):
-        st.session_state.app_mode = "번역 실행"
+        st.session_state.app_mode = "Localize"
         st.rerun()
 
     if st.button(
@@ -493,7 +493,7 @@ def _render_user_menu() -> None:
             st.rerun()
 
 
-if st.session_state.app_mode == "번역 실행":
+if st.session_state.app_mode == "Localize":
     col_title, col_user = st.columns([9, 1])
     with col_title:
         st.title("Fasoo Localization Agent")
@@ -513,7 +513,7 @@ else:
 # Step 1 — 기본 정보 (번역 실행 모드에서만 노출)
 # ─────────────────────────────────────────────
 
-if st.session_state.app_mode == "번역 실행" and st.session_state.step == 1:
+if st.session_state.app_mode == "Localize" and st.session_state.step == 1:
     st.subheader("Step 1. 기본 정보")
     st.markdown("번역할 텍스트 유형과 제품을 선택하세요.")
 
@@ -846,8 +846,13 @@ if st.session_state.app_mode == "Glossary 관리":
 # ─────────────────────────────────────────────
 
 if st.session_state.step == 2:
-    st.subheader("Step 2. 업로드")
-    st.markdown("로컬라이즈할 Word 파일을 업로드하거나 끌어서 놓으세요.")
+    st.subheader("Step 2. 업로드 & UI 텍스트 매핑")
+    st.caption(
+        "Word 파일을 올리면 **볼드(Bold)로 표시된 한국어**를 자동으로 뽑아 표에 보여드립니다. "
+        "그대로 쓰고 싶은 영문 표기가 있으면 EN 칸에 입력하세요. "
+        "비워두면 LLM이 알아서 번역하고, 입력한 항목은 그 표기 그대로 사용됩니다. "
+        "여기 입력한 매핑은 **이번 번역 한 번만** 적용되고 저장되지 않습니다."
+    )
     render_summary_pills(
         st.session_state.selected_product,
         st.session_state.translation_mode,
@@ -855,7 +860,7 @@ if st.session_state.step == 2:
         st.session_state.enable_qa,
     )
 
-    # DB에서 직접 로드 — Team + 본인 Personal 합쳐서 사용
+    # DB에서 직접 로드 — Team + 본인 Personal 합쳐서 사용 (번역 시점)
     _terms_df = load_terms(
         product=st.session_state.selected_product,
         current_user=st.session_state.current_user,
@@ -879,6 +884,63 @@ if st.session_state.step == 2:
         label_visibility="collapsed",
     )
 
+    # ── 파일 업로드 후: bold 추출 + 글로서리 자동 매칭 → 매핑 입력 표 ─
+    ui_mapping_df = None
+    saved_input_path: Optional[Path] = None
+
+    if uploaded_docx is not None:
+        # 파일 바뀌면 재추출 (파일명 + size로 변화 감지)
+        file_sig = f"{uploaded_docx.name}::{uploaded_docx.size}"
+        if st.session_state.get("ui_text_source_sig") != file_sig:
+            try:
+                tmp_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
+                bold_list = extract_bold_texts(str(tmp_path))
+
+                # 글로서리 자동 매칭 (KO 일치)
+                _glossary_lookup = {
+                    r["KO"]: r["EN"]
+                    for r in glossary_rows
+                    if r.get("KO") and r.get("EN")
+                }
+                initial_rows = []
+                for ko in bold_list:
+                    matched_en = _glossary_lookup.get(ko, "")
+                    initial_rows.append({
+                        "KO (Bold)": ko,
+                        "EN (입력)": matched_en,
+                        "출처": "글로서리" if matched_en else "",
+                    })
+
+                st.session_state.ui_text_mapping_rows = initial_rows
+                st.session_state.ui_text_source_sig = file_sig
+                st.session_state.ui_text_input_path = str(tmp_path)
+            except Exception as e:
+                st.error(f"문서에서 볼드 텍스트 추출 실패: {e}")
+
+        saved_input_path = Path(st.session_state.ui_text_input_path) if st.session_state.get("ui_text_input_path") else None
+        ui_mapping_df = pd.DataFrame(
+            st.session_state.get("ui_text_mapping_rows", []),
+            columns=["KO (Bold)", "EN (입력)", "출처"],
+        )
+
+        if ui_mapping_df.empty:
+            st.info("이 문서에는 볼드 처리된 한국어 텍스트가 없습니다. 그대로 번역을 진행하세요.", icon="ℹ️")
+        else:
+            st.markdown(f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)")
+            ui_mapping_df = st.data_editor(
+                ui_mapping_df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                disabled=["KO (Bold)", "출처"],
+                column_config={
+                    "KO (Bold)": st.column_config.TextColumn("KO (Bold)"),
+                    "EN (입력)": st.column_config.TextColumn("EN (입력)", help="비워두면 LLM이 번역. 입력하면 이 표기 그대로 사용."),
+                    "출처": st.column_config.TextColumn("출처", help="글로서리에서 자동으로 채워준 항목"),
+                },
+                key="ui_text_editor",
+            )
+
     st.markdown("---")
     col_back, col_translate = st.columns(2)
 
@@ -892,24 +954,34 @@ if st.session_state.step == 2:
             "번역 시작",
             type="primary",
             use_container_width=True,
-            disabled=(uploaded_docx is None),   # 파일 없으면 비활성화
+            disabled=(uploaded_docx is None),
         )
 
     if translate_clicked:
-        # 파일 필수 체크 (disabled로 대부분 막히지만 안전장치)
         if uploaded_docx is None:
             st.error("Word 파일을 업로드하세요.")
         else:
-            input_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
+            # 파일은 위에서 미리 저장됐을 수도 (추출 시점) — 없으면 지금 저장
+            if saved_input_path is None or not saved_input_path.exists():
+                saved_input_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
+            input_path = saved_input_path
             output_filename = make_default_output_filename(
                 st.session_state.selected_product,
                 uploaded_docx.name,
             )
             output_path = OUTPUT_DIR / output_filename
 
+            # 사용자가 입력한 UI 텍스트 매핑 dict로 변환 (빈 EN 제외)
+            ui_overrides = {}
+            if ui_mapping_df is not None and not ui_mapping_df.empty:
+                for _, row in ui_mapping_df.iterrows():
+                    ko = str(row.get("KO (Bold)", "") or "").strip()
+                    en = str(row.get("EN (입력)", "") or "").strip()
+                    if ko and en:
+                        ui_overrides[ko] = en
+
             progress_bar = st.progress(0)
             status_text = st.empty()
-
             label = "번역/QA 진행 중" if st.session_state.enable_qa else "번역 중"
 
             def update_progress(done, total):
@@ -928,11 +1000,18 @@ if st.session_state.step == 2:
                     enable_qa=st.session_state.enable_qa,
                     translation_mode=st.session_state.translation_mode,
                     progress_callback=update_progress,
+                    ui_text_overrides=ui_overrides or None,
                 )
 
                 st.session_state.last_result = result
                 st.session_state.last_output_path = str(output_path)
                 st.session_state.last_output_filename = output_filename
+
+                # UI 텍스트 매핑은 일회성 — 다음 번역 위해 정리
+                st.session_state.pop("ui_text_mapping_rows", None)
+                st.session_state.pop("ui_text_source_sig", None)
+                st.session_state.pop("ui_text_input_path", None)
+
                 st.session_state.step = 3
                 st.rerun()
 
