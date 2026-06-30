@@ -1319,12 +1319,37 @@ if st.session_state.step == 2:
             )
 
     st.markdown("---")
+    # ── "이전" 클릭 시 입력한 매핑이 사라지는 사고 방지 ─────────────
+    # data_editor에 들어간 EN 입력이 한 row라도 있으면 모달로 한 번 더 확인.
+    # 자동 매칭으로 채워진 것도 있으니 단순히 "EN이 비어있지 않은 row"가
+    # 한 개라도 있으면 확인을 띄운다 — false-positive가 좀 있어도 데이터
+    # 손실보다 훨씬 낫다.
+    @st.dialog("입력한 UI 텍스트 매핑이 사라집니다")
+    def _confirm_leave_step2():
+        st.warning("작성하신 EN 매핑이 모두 사라집니다.", icon="⚠️")
+        st.write("정말 이전 화면으로 돌아가시겠어요?")
+        col_no, col_yes = st.columns(2)
+        if col_no.button("취소 (계속 작성)", use_container_width=True, type="primary"):
+            st.rerun()
+        if col_yes.button("예, 돌아가기 (입력 버림)", use_container_width=True):
+            st.session_state.step = 1
+            st.session_state.pop("ui_text_mapping_rows", None)
+            st.session_state.pop("ui_text_source_sig", None)
+            st.session_state.pop("ui_text_input_path", None)
+            st.session_state.pop("ui_text_preload_counts", None)
+            st.rerun()
+
     col_back, col_translate = st.columns(2)
 
     with col_back:
         if st.button("이전", use_container_width=True):
-            st.session_state.step = 1
-            st.rerun()
+            _rows = st.session_state.get("ui_text_mapping_rows", [])
+            _has_input = any(str(r.get("EN (입력)") or "").strip() for r in _rows)
+            if _has_input:
+                _confirm_leave_step2()
+            else:
+                st.session_state.step = 1
+                st.rerun()
 
     with col_translate:
         translate_clicked = st.button(
