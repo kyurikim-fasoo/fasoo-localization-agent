@@ -1223,13 +1223,35 @@ def restore_sentence_period(translated: str, source: str) -> str:
     return translated
 
 
+_LIST_LINE_RE = re.compile(r"^\s*([-•∙*]|\d+[.)]|[a-zA-Z][.)])\s+")
+
+
 def normalize_paragraph_breaks(s: str) -> str:
+    """
+    A translated Word paragraph should stay one continuous line in the docx
+    output. LLMs occasionally emit line breaks inside the response for
+    prose paragraphs, which show up as rogue soft line breaks in the final
+    document. We collapse those into spaces — but preserve line breaks when
+    the paragraph is actually a bulleted / numbered list (each line begins
+    with a bullet or number marker).
+    """
     if not s:
         return s
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"\n{3,}", "\n\n", s)
     s = s.strip("\n")
-    return s
+
+    if "\n" not in s:
+        return s
+
+    lines = s.split("\n")
+    non_empty = [ln for ln in lines if ln.strip()]
+    # 2번째 라인부터 다수가 list marker로 시작하면 list로 간주 → 원본 유지
+    if len(non_empty) >= 2 and sum(bool(_LIST_LINE_RE.match(ln)) for ln in non_empty[1:]) >= 1:
+        s = re.sub(r"\n{3,}", "\n\n", s)
+        return s
+
+    # 그 외엔 단순 산문 — 모든 line break를 space로 흡수
+    return re.sub(r"\s*\n+\s*", " ", s).strip()
 
 
 def iter_all_paragraphs(doc: Document) -> Iterable:
@@ -1244,12 +1266,16 @@ def iter_all_paragraphs(doc: Document) -> Iterable:
 
 def is_heading_paragraph(p) -> bool:
     """
-    Recognise heading / title paragraphs across Word locales and custom styles.
+    Recognise heading / title paragraphs across Word locales, custom styles,
+    and manually-outlined paragraphs.
 
-    Checks the paragraph's style **and its style ancestor chain**, so a
-    user-defined style that inherits from `Heading 1` is also treated as a
-    heading. Both English ("Heading 1", "Title") and Korean ("제목 1", "표제")
-    style names / IDs are recognised.
+    Detection order:
+    1. Style name / style_id (English "Heading 1"/"Title", Korean "제목 1"/"표제")
+       and its ancestor style chain — so a user-defined style that inherits
+       from Heading 1 is caught.
+    2. The paragraph's `w:pPr/w:outlineLvl` value. Any explicit outline level
+       (0-8) means the author marked this paragraph as a heading via
+       Word's Outline setting, even if the applied style isn't a heading style.
     """
     style = getattr(p, "style", None)
     seen_ids: set = set()
@@ -1263,15 +1289,27 @@ def is_heading_paragraph(p) -> bool:
             return True
         if name_l.startswith("heading") or name_l in ("title",):
             return True
-        # 한국어 Word: "제목 1", "제목 2" 등 — 스타일 이름이 한글로 표시됨
         if name.startswith("제목") or name in ("표제",):
             return True
 
-        # 무한 루프 방어
         if sid in seen_ids:
             break
         seen_ids.add(sid)
         style = getattr(style, "base_style", None)
+
+    # outline level 확인 — 스타일과 무관하게 Word "Outline" 설정된 경우
+    try:
+        p_elem = getattr(p, "_p", None)
+        if p_elem is not None:
+            outline_nodes = p_elem.findall(f".//{{{_W}}}pPr/{{{_W}}}outlineLvl")
+            if outline_nodes:
+                val = outline_nodes[0].get(f"{{{_W}}}val")
+                # 0-8은 heading level. 9는 body text.
+                if val is not None and val.isdigit() and int(val) < 9:
+                    return True
+    except Exception:
+        pass
+
     return False
 
 
@@ -1583,6 +1621,13 @@ Existing English content:
 
 
 _QA_HEADER_RE = re.compile(r"\[(\d+)\]")
+# 메타 라벨 감지 — 이런 label이 들어있으면 LLM이 프롬프트를 무시하고 다양한
+# 버전 비교를 응답에 담은 경우. 안전을 위해 그 revision을 통째로 버림.
+_QA_META_LABEL_RE = re.compile(
+    r"\b(Draft|Revised|Original|Before|After|Correction|Suggestion|Alternative|"
+    r"Option\s+[A-Z]|Version\s*\d|v\d\s*[:.]|Candidate\s*\d)\s*[:.]",
+    re.IGNORECASE,
+)
 
 
 def parse_qa_response(text: str) -> Dict[int, str]:
@@ -1592,6 +1637,11 @@ def parse_qa_response(text: str) -> Dict[int, str]:
     Multi-line revisions are supported: each [N] header captures everything up
     to the next [N] header (or end of text). Returns {} when the LLM signals
     no changes (output is empty or 'NONE').
+
+    Safety net: if any [N] block contains meta labels (Draft/Revised/Before/
+    After/Option A/…) it means the LLM ignored the prompt and returned
+    version-comparison text instead of a clean revision. We skip that block
+    so the pass-1 translation is kept as-is.
     """
     revisions: Dict[int, str] = {}
     if not text:
@@ -1604,8 +1654,12 @@ def parse_qa_response(text: str) -> Dict[int, str]:
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[start:end].strip()
-        if body and body.upper() != "NONE":
-            revisions[idx] = body
+        if not body or body.upper() == "NONE":
+            continue
+        if _QA_META_LABEL_RE.search(body):
+            # LLM이 여러 버전 비교 형식으로 응답 — pass-1 유지 (revision 무시)
+            continue
+        revisions[idx] = body
     return revisions
 
 
@@ -1667,6 +1721,16 @@ Output format:
 - For each item that needs revision: a header line `[N]` followed by the revised translation. Nothing else for that item.
 - If nothing needs revision, output exactly: NONE
 - Do NOT add explanations, comments, or numbering of any other kind.
+
+ABSOLUTELY FORBIDDEN in your output — if you emit ANY of these your revision will be discarded:
+- Meta labels of ANY kind: "Draft:", "Revised:", "Original:", "Before:", "After:",
+  "Correction:", "Suggestion:", "Alternative:", "Option A/B", "Version 1/2", "v1/v2".
+- Any before/after comparison, side-by-side text, or multiple candidate versions.
+- Any preamble like "Here is the revised text" or trailing commentary.
+- Line breaks WITHIN a single item's revised text unless the source itself had a
+  bulleted/numbered list. A single-paragraph source must produce a single-line revision.
+
+Emit ONE clean, final revised sentence per [N] header. Nothing else.
 
 Style guide:
 {style_guide or "(no style guide available)"}
@@ -1807,18 +1871,25 @@ def translate_document(
     for idx, p in enumerate(paras):
         src, drawing_map, hyperlink_map = marked_texts[idx]
 
+        # heading 여부를 미리 계산 — UI 매핑 적용 여부와 case-sensitive 재복원
+        # 여부를 이 값으로 갈라야 하기 때문.
+        is_heading = is_heading_paragraph(p) or looks_like_heading_text(src)
+
         if enable_cache and src in cache:
             translated = cache[src]
         else:
             # 1) Glossary 치환 (본문 전체)
             gl_pre, gl_map = preprocess_with_glossary_placeholders(src, glossary_entries)
-            # 2) UI 텍스트 매핑 치환 (⟦B⟧…⟦/B⟧ 안에만) — idx는 glossary 다음부터
-            ui_pre, ui_map, _ = preprocess_ui_overrides_in_bold(
-                gl_pre, ui_overrides_clean, start_idx=len(gl_map)
-            )
-            gl_pre = ui_pre
-            if ui_map:
-                gl_map = {**gl_map, **ui_map}
+            # 2) UI 텍스트 매핑 치환 — 오직 non-heading에서만.
+            #    Heading은 무조건 sentence case로 정규화될 예정이므로 UI 매핑을
+            #    적용해봐야 결국 case가 바뀌어 의미가 없고, 오히려 어색해질 수 있다.
+            if not is_heading:
+                ui_pre, ui_map, _ = preprocess_ui_overrides_in_bold(
+                    gl_pre, ui_overrides_clean, start_idx=len(gl_map)
+                )
+                gl_pre = ui_pre
+                if ui_map:
+                    gl_map = {**gl_map, **ui_map}
 
             selected_pattern_examples = select_relevant_patterns(gl_pre, patterns)
 
@@ -1859,13 +1930,7 @@ def translate_document(
                 translated = restore_glossary_placeholders(translated, gl_map or {})
                 translated = normalize_colon_label_line(translated)
 
-            # 5) heading 판단
-            is_heading = (
-                is_heading_paragraph(p)
-                or looks_like_heading_text(src)
-            )
-
-            # 6) heading / 일반 문단 후처리
+            # 5) heading / 일반 문단 후처리 (is_heading은 위에서 계산됨)
             if is_heading:
                 translated = normalize_heading_text(translated)
                 translated = normalize_ui_label_text(translated)
@@ -1877,16 +1942,18 @@ def translate_document(
                 translated = normalize_ui_in_bold_segments(translated)
                 translated = _cap_first_alpha(translated)
 
-            # 7) 마지막 품질 보정
+            # 6) 마지막 품질 보정
             translated = fix_indefinite_articles(translated)
             translated = capitalize_bullet_lines(translated)
             translated = restore_sentence_period(translated, src)
             translated = normalize_paragraph_breaks(translated)
 
-            # 8) case-sensitive/DNT glossary 용어의 정확한 대소문자 복원
-            #    (heading sentence-case, _cap_first_alpha 등이 'Wrapsody eCo'를
-            #    'Wrapsody eco'로 망가뜨리는 문제를 잡는다)
-            translated = enforce_case_sensitive_glossary(translated, glossary_entries)
+            # 7) case-sensitive/DNT glossary 용어의 정확한 대소문자 복원.
+            #    Heading에서는 절대 호출하지 않는다 — heading은 항상 sentence
+            #    case가 원칙이므로 "Wrapsody eCo" 같은 case-sensitive 용어도
+            #    heading에서는 "Wrapsody eco"로 자연스럽게 두는 게 맞다.
+            if not is_heading:
+                translated = enforce_case_sensitive_glossary(translated, glossary_entries)
 
             if enable_cache:
                 cache[src] = translated
