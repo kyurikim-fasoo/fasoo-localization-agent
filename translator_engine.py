@@ -1498,6 +1498,13 @@ Rules:
 - NEVER merge markers with words. "⟦B⟧rule" is correct; "⟦Brule" is invalid.
 - Keep markers as separate tokens.
 - Output ONLY the translated text. No explanation, no extra lines.
+- ABSOLUTELY DO NOT emit meta labels ("Draft:", "Revised:", "Original:",
+  "Before:", "After:", "Version 1:", "v2:", "Option A:", "Improved:",
+  "Correction:") or any before/after comparison. Give ONE clean final
+  translation, no alternatives, no explanation.
+- The output for one input paragraph must be a single line (or a single
+  bulleted/numbered list). Do NOT insert soft line breaks in the middle of
+  running prose.
 {style_rules}{style_ref_block}
 Reference pattern examples:
 {pattern_block}
@@ -1621,6 +1628,50 @@ Existing English content:
 
 
 _QA_HEADER_RE = re.compile(r"\[(\d+)\]")
+
+# 메타 라벨 정규식들 — LLM이 무단으로 "Draft: X Revised: Y" 형태를 반환하는
+# 경우를 감지·복구하기 위함. Draft/Revised 뿐 아니라 흔한 대체 표현도 커버.
+_META_LABEL_EARLIER = (
+    r"Draft|Original|Before|Version\s*1|Ver\s*1|v1|Candidate\s*1|Option\s*A|Initial"
+)
+_META_LABEL_LATER = (
+    r"Revised|Final(?:\s*version)?|After|Corrected|Version\s*2|Ver\s*2|v2|"
+    r"Candidate\s*2|Option\s*B|Improved|Better|Updated"
+)
+_META_LATER_RE = re.compile(rf"\b(?:{_META_LABEL_LATER})\s*[:.\-]", re.IGNORECASE)
+_META_EARLIER_LEADING_RE = re.compile(
+    rf"^\s*(?:{_META_LABEL_EARLIER})\s*[:.\-]\s*", re.IGNORECASE
+)
+_META_LABEL_ANY_RE = re.compile(
+    rf"\b(?:{_META_LABEL_EARLIER}|{_META_LABEL_LATER})\s*[:.\-]",
+    re.IGNORECASE,
+)
+
+
+def strip_meta_version_labels(text: str) -> str:
+    """
+    Remove "Draft: X ... Revised: Y" style meta-version noise that occasionally
+    leaks into pass-1 or pass-2 output despite the prompt forbidding it.
+
+    Strategy:
+    1. If a "later-version" label (Revised/Final/After/Improved/...) appears,
+       keep only the text AFTER that label — the LLM's own final choice.
+    2. If only an "earlier-version" label (Draft/Original/Before/...) appears
+       at the start, strip that label.
+    3. If neither, return the text unchanged.
+
+    This is a safety net; the prompt still asks the LLM not to emit these,
+    but we never trust the LLM to obey.
+    """
+    if not text:
+        return text
+    m = _META_LATER_RE.search(text)
+    if m:
+        text = text[m.end():].strip()
+    # After removing later-version prefix there may still be a leading "Draft:"
+    # on a residual line — or the text may only have had "Draft:" from the start.
+    text = _META_EARLIER_LEADING_RE.sub("", text).strip()
+    return text
 # 메타 라벨 감지 — 이런 label이 들어있으면 LLM이 프롬프트를 무시하고 다양한
 # 버전 비교를 응답에 담은 경우. 안전을 위해 그 revision을 통째로 버림.
 _QA_META_LABEL_RE = re.compile(
@@ -1947,6 +1998,8 @@ def translate_document(
             translated = capitalize_bullet_lines(translated)
             translated = restore_sentence_period(translated, src)
             translated = normalize_paragraph_breaks(translated)
+            # pass-1이 "Draft: X ... Revised: Y" 형태를 뱉는 경우 방어
+            translated = strip_meta_version_labels(translated)
 
             # 7) case-sensitive/DNT glossary 용어의 정확한 대소문자 복원.
             #    Heading에서는 절대 호출하지 않는다 — heading은 항상 sentence
@@ -2018,6 +2071,9 @@ def translate_document(
                 revised = repair_hl_markers(revised)
                 revised = normalize_bold_spaces(revised)
                 revised = apply_highlight_fallback(revised, item["src"])
+                # QA 응답에서도 line break/meta label 정리 (pass-1과 동일 수준으로)
+                revised = normalize_paragraph_breaks(revised)
+                revised = strip_meta_version_labels(revised)
                 # QA가 case-sensitive 용어를 흐트러뜨리는 경우도 복원
                 revised = enforce_case_sensitive_glossary(revised, glossary_entries)
                 for r in item["group"]:
