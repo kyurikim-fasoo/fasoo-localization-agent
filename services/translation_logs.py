@@ -156,3 +156,43 @@ def find_logs_by_source_file(user: str, source_file: str, limit: int = 5) -> pd.
             )
         ]
     return pd.DataFrame(rows)
+
+
+def find_related_logs(
+    source_file: str,
+    product: str,
+    limit: int = 15,
+) -> pd.DataFrame:
+    """
+    Return past translation logs whose UI mapping could plausibly be reused
+    for the current job.
+
+    Union of:
+    - Same source filename (strongest signal — often a re-translation run)
+    - Same product (same UI vocabulary, worth trying)
+
+    Team-wide (any user), latest first, file matches ranked above product
+    matches. Only logs that actually carried a UI mapping are returned —
+    an empty mapping is useless for reuse and would just clutter the picker.
+    """
+    init_db()
+    sql = """
+        SELECT id, created_at, user, product, source_file, note,
+               ui_text_overrides,
+               CASE
+                 WHEN source_file = :sf  THEN 'file'
+                 WHEN product = :pr AND product != '' THEN 'product'
+                 ELSE 'other'
+               END AS match_type
+        FROM translation_logs
+        WHERE (source_file = :sf OR (product = :pr AND product != ''))
+          AND ui_text_overrides NOT IN ('', '{}')
+        ORDER BY
+          CASE WHEN source_file = :sf THEN 0 ELSE 1 END,
+          created_at DESC
+        LIMIT :lim
+    """
+    params = {"sf": source_file, "pr": product, "lim": limit}
+    with db_session() as conn:
+        rows = [dict(r) for r in conn.execute(sql, params)]
+    return pd.DataFrame(rows)

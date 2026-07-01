@@ -25,6 +25,7 @@ from services.translation_logs import (
     create_log,
     delete_log,
     find_logs_by_source_file,
+    find_related_logs,
     get_log,
     list_logs,
     update_note,
@@ -1262,24 +1263,41 @@ if st.session_state.step == 2:
         if ui_mapping_df.empty:
             st.info("이 문서에는 볼드 처리된 한국어 텍스트가 없습니다. 그대로 번역을 진행하세요.", icon="ℹ️")
         else:
-            # 같은 파일명의 이전 로그가 있으면 알림 + 매핑 불러오기 옵션
-            _prev_logs = find_logs_by_source_file(
-                user=st.session_state.current_user,
+            # 같은 파일 또는 같은 제품의 이전 로그가 있으면 매핑 재사용 옵션 제공
+            _related_logs = find_related_logs(
                 source_file=uploaded_docx.name,
-                limit=5,
+                product=st.session_state.selected_product or "",
+                limit=15,
             )
-            if not _prev_logs.empty:
+            if not _related_logs.empty:
+                _file_matches = _related_logs[_related_logs["match_type"] == "file"]
+                _product_matches = _related_logs[_related_logs["match_type"] == "product"]
+
                 with st.container(border=True):
+                    _headline_bits = []
+                    if not _file_matches.empty:
+                        _headline_bits.append(f"동일 파일 **{len(_file_matches)}건**")
+                    if not _product_matches.empty:
+                        _headline_bits.append(
+                            f"동일 제품(**{st.session_state.selected_product}**) "
+                            f"**{len(_product_matches)}건**"
+                        )
                     st.markdown(
-                        f"📚 **이 파일 `{uploaded_docx.name}`은(는) 이전에 "
-                        f"{len(_prev_logs)}번 번역되었습니다.** 이전 매핑을 가져와서 빈 EN 칸을 채울 수 있어요."
+                        "📚 **이전 번역의 UI 매핑을 재사용할 수 있어요** — "
+                        + " · ".join(_headline_bits)
+                        + ". 매핑 개수와 메모를 보고 선택하세요."
                     )
-                    _prev_options = {
-                        int(r["id"]): f"#{int(r['id'])} — {r['created_at']} — "
-                                       f"매핑 {len(json.loads(r['ui_text_overrides'] or '{}'))}개"
-                                       + (f" — {r['note']}" if r.get('note') else "")
-                        for _, r in _prev_logs.iterrows()
-                    }
+
+                    _prev_options = {}
+                    for _, r in _related_logs.iterrows():
+                        _icon = "📄" if r["match_type"] == "file" else "🏷️"
+                        _map_count = len(json.loads(r["ui_text_overrides"] or "{}"))
+                        _note_bit = f" — {r['note']}" if r.get("note") else ""
+                        _prev_options[int(r["id"])] = (
+                            f"{_icon} {r['created_at']} — {r['user']} — "
+                            f"{r['source_file']} — 매핑 {_map_count}개{_note_bit}"
+                        )
+
                     col_pl_sel, col_pl_btn = st.columns([3, 1])
                     with col_pl_sel:
                         _pl_id = st.selectbox(
@@ -1293,17 +1311,19 @@ if st.session_state.step == 2:
                         if st.button("매핑 불러오기", use_container_width=True, key="prev_log_load"):
                             _ld = get_log(int(_pl_id))
                             _ld_map = (_ld or {}).get("ui_text_overrides") or {}
-                            # 빈 EN 칸만 채움 (사용자가 이미 입력한 건 안 건드림)
                             _filled = 0
                             for row in st.session_state.ui_text_mapping_rows:
                                 if not row.get("EN (입력)"):
                                     ko = row.get("KO (Bold)")
                                     if ko in _ld_map:
                                         row["EN (입력)"] = _ld_map[ko]
-                                        row["출처"] = "로그"
                                         _filled += 1
-                            st.toast(f"로그 #{_pl_id}에서 {_filled}개 매핑을 채웠습니다.", icon="📥")
+                            st.toast(f"로그에서 {_filled}개 매핑을 채웠습니다.", icon="📥")
                             st.rerun()
+                    st.caption(
+                        "📄 = 같은 파일 · 🏷️ = 같은 제품. "
+                        "매핑에 있는 KO 중 이 문서의 볼드 KO와 일치하는 것만 자동으로 채워집니다 (기존 입력은 덮어쓰지 않음)."
+                    )
 
             # 자동 매칭 결과 요약
             _counts = st.session_state.get("ui_text_preload_counts", {})
