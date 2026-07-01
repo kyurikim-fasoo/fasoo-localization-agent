@@ -241,6 +241,64 @@ def preprocess_with_glossary_placeholders(
     return out, mapping
 
 
+def preprocess_ui_overrides_in_bold(
+    text: str,
+    ui_overrides: Dict[str, str],
+    start_idx: int = 0,
+) -> Tuple[str, Dict[str, GlossaryEntry], int]:
+    """
+    Replace UI text-mapping KO terms with ⟦G#⟧ placeholders **only within
+    ⟦B⟧…⟦/B⟧ (bold) segments**.
+
+    UI text mappings are entered by the user to force specific EN wording
+    for on-screen labels — which are always rendered as bold in the source
+    docx. Applying the same replacement to non-bold occurrences (regular
+    prose that happens to contain the same Korean word) produces awkward
+    output like "Change the file Retention policy or Delete them", so the
+    substitution is confined to bold spans.
+
+    `start_idx` lets callers continue an existing G-index sequence (e.g.
+    after a preceding call to `preprocess_with_glossary_placeholders`) so
+    the resulting placeholders don't collide.
+
+    Returns (out, mapping, next_idx).
+    """
+    if not ui_overrides:
+        return text, {}, start_idx
+
+    mapping: Dict[str, GlossaryEntry] = {}
+    idx = start_idx
+    # 긴 term부터 시도 — 짧은 term이 긴 term 안에서 매치되어 부분 치환되는 것 방지
+    sorted_terms = sorted(
+        [(ko, en) for ko, en in ui_overrides.items() if ko and en],
+        key=lambda kv: len(kv[0]),
+        reverse=True,
+    )
+
+    def _replace_inside_bold(match):
+        nonlocal idx
+        inner = match.group(1)
+        for ko, en in sorted_terms:
+            escaped_parts = [re.escape(part) for part in ko.split()]
+            pattern = r"\s*".join(escaped_parts) if escaped_parts else re.escape(ko)
+            if re.search(pattern, inner):
+                ph = make_marker(G_PREFIX, idx)
+                idx += 1
+                inner = re.sub(pattern, ph, inner)
+                mapping[ph] = GlossaryEntry(
+                    ko=ko.strip(),
+                    en=en.strip(),
+                    dnt=False,
+                    case_sensitive=True,
+                    product="",
+                    note="UI text override (bold only)",
+                )
+        return f"{B_OPEN}{inner}{B_CLOSE}"
+
+    out = re.sub(rf"{re.escape(B_OPEN)}(.+?){re.escape(B_CLOSE)}", _replace_inside_bold, text, flags=re.DOTALL)
+    return out, mapping, idx
+
+
 def _is_at_sentence_or_bold_start(text_before: str) -> bool:
     """
     Return True if the position immediately after text_before is the start of
@@ -1660,32 +1718,26 @@ def translate_document(
 
     glossary_entries = build_glossary_entries_from_rows(glossary_rows)
 
-    # UI 텍스트 매핑(사용자가 Step 2에서 입력한 일회성 매핑)을 glossary로 합침.
-    # case_sensitive=True로 둬서 사용자가 입력한 EN을 그대로 보존한다.
-    # 길이 desc 정렬 유지를 위해 다시 sort.
+    # UI 텍스트 매핑은 Glossary와 달리 **⟦B⟧…⟦/B⟧ (bold) 영역 안에만** 적용한다.
+    # (Glossary는 본문 어디든 치환. 하지만 UI 라벨은 화면에서 bold이므로
+    #  본문에 같은 KO가 나와도 자연 번역을 유지해야 한다.)
+    # → glossary_entries에 합치지 않고 별도 dict으로 유지. 각 단락 preprocess
+    #   시 preprocess_ui_overrides_in_bold로 별도 치환.
+    ui_overrides_clean: Dict[str, str] = {}
     if ui_text_overrides:
-        ui_entries: List[GlossaryEntry] = []
         for ko, en in ui_text_overrides.items():
             ko_s = (ko or "").strip()
             en_s = (en or "").strip()
-            if not ko_s or not en_s:
-                continue
-            ui_entries.append(GlossaryEntry(
-                ko=ko_s,
-                en=en_s,
-                dnt=False,
-                case_sensitive=True,
-                product="",
-                note="UI text override",
-            ))
-        if ui_entries:
-            # 중복 제거 (UI 매핑이 글로서리와 같은 ko를 가지면 UI 매핑 우선)
-            ui_ko_set = {e.ko for e in ui_entries}
-            glossary_entries = [e for e in glossary_entries if e.ko not in ui_ko_set] + ui_entries
-            glossary_entries.sort(key=lambda e: len(e.ko), reverse=True)
+            if ko_s and en_s:
+                ui_overrides_clean[ko_s] = en_s
+        # 충돌 방지 — glossary에 같은 ko가 있으면 UI 매핑 우선하므로 glossary에서 제거
+        if ui_overrides_clean:
+            ui_ko_set = set(ui_overrides_clean.keys())
+            glossary_entries = [e for e in glossary_entries if e.ko not in ui_ko_set]
 
     patterns = build_pattern_pairs_from_rows(pattern_rows)
-    glossary_pairs_for_qa = [(e.ko, e.en) for e in glossary_entries]
+    # QA prompt엔 UI 매핑도 참고용으로 함께 (일관성 유지 위해)
+    glossary_pairs_for_qa = [(e.ko, e.en) for e in glossary_entries] + list(ui_overrides_clean.items())
 
     client = OpenAI(api_key=api_key)
     doc = Document(sanitize_docx(in_path))
@@ -1758,7 +1810,16 @@ def translate_document(
         if enable_cache and src in cache:
             translated = cache[src]
         else:
+            # 1) Glossary 치환 (본문 전체)
             gl_pre, gl_map = preprocess_with_glossary_placeholders(src, glossary_entries)
+            # 2) UI 텍스트 매핑 치환 (⟦B⟧…⟦/B⟧ 안에만) — idx는 glossary 다음부터
+            ui_pre, ui_map, _ = preprocess_ui_overrides_in_bold(
+                gl_pre, ui_overrides_clean, start_idx=len(gl_map)
+            )
+            gl_pre = ui_pre
+            if ui_map:
+                gl_map = {**gl_map, **ui_map}
+
             selected_pattern_examples = select_relevant_patterns(gl_pre, patterns)
 
             translated = translate_paragraph_with_patterns(

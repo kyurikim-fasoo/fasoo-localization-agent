@@ -508,11 +508,18 @@ def _try_navigate(target: dict) -> None:
 def _confirm_nav_dialog():
     st.warning("저장하지 않은 입력/편집이 사라집니다.", icon="⚠️")
     st.write("정말 다른 화면으로 이동하시겠어요?")
-    col_no, col_yes = st.columns(2)
-    if col_no.button("취소 (계속 작성)", use_container_width=True, type="primary"):
+    col_keep, col_leave = st.columns(2)
+    # 왼쪽 — 계속 작성 (안전한 default, 흰색/secondary)
+    if col_keep.button("계속 작성", use_container_width=True, key="confirm_nav_keep"):
         st.session_state.pop("pending_nav_target", None)
         st.rerun()
-    if col_yes.button("예, 버리고 이동", use_container_width=True):
+    # 오른쪽 — 저장하지 않고 나가기 (위험한 액션, 빨간색/primary)
+    if col_leave.button(
+        "저장하지 않고 나가기",
+        use_container_width=True,
+        type="primary",
+        key="confirm_nav_leave",
+    ):
         target = st.session_state.pop("pending_nav_target", None) or {}
         _clear_unsaved_state()
         _apply_nav_target(target)
@@ -1018,7 +1025,7 @@ if st.session_state.app_mode == "Glossary 관리":
 if st.session_state.app_mode == "로그":
     st.subheader("로그")
     st.caption(
-        "본인이 실행한 번역 이력입니다. 각 행에는 그때 사용한 UI 텍스트 매핑이 함께 저장되어 있어 "
+        "팀 전체의 번역 이력입니다. 각 행에는 그때 사용한 UI 텍스트 매핑이 함께 저장되어 있어 "
         "동일 문서 재번역이나 에이전트 테스트 시 매핑을 그대로 불러올 수 있습니다."
     )
 
@@ -1029,8 +1036,9 @@ if st.session_state.app_mode == "로그":
         label_visibility="collapsed",
     )
 
+    # 모든 사용자의 번역 이력 — 팀 작업 추적용. 사용자 컬럼이 표에 있어 누구 것인지 식별 가능.
     _logs_df = list_logs(
-        user=st.session_state.current_user,
+        user=None,
         search=_log_search,
         limit=200,
     )
