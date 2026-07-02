@@ -24,6 +24,7 @@ TOTAL_TOKENS = 0
 
 B_OPEN = "⟦B⟧"
 B_CLOSE = "⟦/B⟧"
+BR_MARKER = "⟦BR⟧"   # soft line break — Word `<w:br/>` element
 
 G_PREFIX = "⟦G"
 D_PREFIX = "⟦D"
@@ -36,7 +37,8 @@ H_OPEN_RE    = re.compile(r"⟦H(\d+)⟧")
 H_CLOSE_RE   = re.compile(r"⟦/H(\d+)⟧")
 HL_OPEN_RE   = re.compile(r"⟦HL:([a-zA-Z]+)⟧")
 HL_CLOSE     = "⟦/HL⟧"
-ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧)")
+BR_MARKER_RE = re.compile(re.escape(BR_MARKER))
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦BR⟧)")
 MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)")
 
 UI_LOWER_WORDS = {
@@ -531,10 +533,19 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
                 ph = f"{D_PREFIX}{d_idx}{SUFFIX}"
                 parts.append(ph); drawing_map[ph] = child; d_idx += 1
                 continue
-            t_elem = _lxml_text_elem(child)
-            if t_elem is None:
+            # 한 run 안의 자식 요소들을 문서 순서대로 훑는다 — <w:t> 외에
+            # <w:br/> (soft line break) 도 만나면 ⟦BR⟧ 마커로 편입시켜, 원문의
+            # 줄바꿈 위치가 번역·재쓰기 단계까지 살아남게 한다.
+            text_parts: List[str] = []
+            for sub in child:
+                sub_tag = sub.tag.split("}")[1] if "}" in sub.tag else sub.tag
+                if sub_tag == "t":
+                    text_parts.append(sub.text or "")
+                elif sub_tag == "br":
+                    text_parts.append(BR_MARKER)
+            if not text_parts:
                 continue
-            text = t_elem.text or ""
+            text = "".join(text_parts)
             if not text:
                 continue
             is_bold = _lxml_run_is_bold(child)
@@ -762,7 +773,13 @@ def _make_rPr_template(rPr_src):
 
 
 def _make_run(rPr_template, text: str, props):
-    """Create a fresh w:r with a cloned rPr template, bold flag, and text."""
+    """Create a fresh w:r with a cloned rPr template, bold flag, and text.
+
+    If `text` contains any ⟦BR⟧ markers they are converted to actual
+    <w:br/> soft-line-break elements interleaved with <w:t> chunks — this
+    preserves the original document's paragraph-internal line breaks
+    across translation.
+    """
     is_bold = props.get("bold", False) if isinstance(props, dict) else bool(props)
     hl_val  = props.get("hl",   None)  if isinstance(props, dict) else None
     r = etree.Element(f"{{{_W}}}r")
@@ -781,10 +798,23 @@ def _make_run(rPr_template, text: str, props):
         if hl_val:
             hl_el = etree.SubElement(rPr_new, f"{{{_W}}}highlight")
             hl_el.set(f"{{{_W}}}val", hl_val)
-    t_elem = etree.SubElement(r, f"{{{_W}}}t")
-    t_elem.text = text
-    if text and (text[0] == " " or text[-1] == " "):
-        t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
+
+    # ⟦BR⟧ 마커가 있으면 <w:t> + <w:br/> + <w:t> ... 순으로 여러 요소를 삽입
+    if BR_MARKER in text:
+        chunks = text.split(BR_MARKER)
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                etree.SubElement(r, f"{{{_W}}}br")
+            if chunk:
+                t_elem = etree.SubElement(r, f"{{{_W}}}t")
+                t_elem.text = chunk
+                if chunk[0] == " " or chunk[-1] == " ":
+                    t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
+    else:
+        t_elem = etree.SubElement(r, f"{{{_W}}}t")
+        t_elem.text = text
+        if text and (text[0] == " " or text[-1] == " "):
+            t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
     return r
 
 
@@ -1466,7 +1496,8 @@ def translate_paragraph_with_patterns(
 Translate Korean to natural, professional English. Produce a draft, then revise it so a native English speaker would not flag awkwardness, grammar errors, or literal-translation tells.
 
 Rules:
-- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧.
+- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦BR⟧.
+- ⟦BR⟧ = soft line break in the source. Emit it at the SAME semantic position in your translation so the paragraph keeps its line break there.
 - ⟦G#⟧ placeholders are FIXED glossary terms. Output them BYTE-FOR-BYTE unchanged.
   NEVER translate, paraphrase, expand, or substitute a ⟦G#⟧ placeholder with any word.
 - ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
@@ -1549,7 +1580,7 @@ def translate_remaining_korean(
 Translate any remaining Korean in the text into natural English.
 
 Rules:
-- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦G#⟧.
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦G#⟧, ⟦BR⟧.
 - ⟦G#⟧ placeholders are FIXED terms — output them UNCHANGED. Do NOT translate them.
 - Do NOT alter, rephrase, or improve any English that is already present.
 - Only translate Korean words/phrases; leave everything else exactly as-is.
@@ -1764,7 +1795,7 @@ Revise a translation ONLY when it has a clear problem:
 Do NOT revise translations that are already acceptable. Do NOT make stylistic preference changes that are not grounded in the style guide. Do NOT shorten or expand for taste. When in doubt, leave it alone.
 
 Strict rules:
-- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦HL:colour⟧, ⟦/HL⟧, ⟦H#⟧, ⟦/H#⟧, ⟦D#⟧.
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦HL:colour⟧, ⟦/HL⟧, ⟦H#⟧, ⟦/H#⟧, ⟦D#⟧, ⟦BR⟧.
 - Glossary translations listed below are mandatory — keep those exact English words with their exact casing.
 - Do NOT translate or alter any English already present (other than the specific problems above).
 
