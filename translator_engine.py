@@ -897,6 +897,14 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
         rPr template cloned from first run (stripping per-segment styling).
         All direct w:r removed; rebuilt one per (bold, text) segment.
     """
+    # 최종 안전장치 — LLM/QA가 응답 끝에 원본에 없던 ⟦LB⟧를 붙이는 경우가
+    # 관측됨. 문단 전체의 trailing ⟦LB⟧(들)는 시각적으로 여분이 되므로 여기서
+    # 최종적으로 제거한다. paragraph_to_marked_text에서 이미 소스 쪽 trailing
+    # LB를 잘라내지만, 번역/QA 파이프라인이 다시 붙이는 케이스를 잡는 이중 방어.
+    translated_marked = re.sub(
+        rf"({re.escape(BR_MARKER)}\s*)+$", "", translated_marked or ""
+    )
+
     all_runs = _lxml_all_runs(p_elem)
     if not all_runs:
         return
