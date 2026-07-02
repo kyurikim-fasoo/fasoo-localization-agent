@@ -24,7 +24,11 @@ TOTAL_TOKENS = 0
 
 B_OPEN = "⟦B⟧"
 B_CLOSE = "⟦/B⟧"
-BR_MARKER = "⟦BR⟧"   # soft line break — Word `<w:br/>` element
+# soft line break marker — Word `<w:br/>` element.
+# **Must NOT start with the letter B** to avoid the LLM confusing it with the
+# bold-open ⟦B⟧ marker and splitting it into "⟦B⟧R⟧" style garbage. ⟦LB⟧
+# ("line break") is far enough away visually.
+BR_MARKER = "⟦LB⟧"
 
 G_PREFIX = "⟦G"
 D_PREFIX = "⟦D"
@@ -38,8 +42,12 @@ H_CLOSE_RE   = re.compile(r"⟦/H(\d+)⟧")
 HL_OPEN_RE   = re.compile(r"⟦HL:([a-zA-Z]+)⟧")
 HL_CLOSE     = "⟦/HL⟧"
 BR_MARKER_RE = re.compile(re.escape(BR_MARKER))
-ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦BR⟧)")
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧)")
 MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)")
+
+# 안전장치용 정규식 — LLM이 ⟦LB⟧를 파괴적으로 응답해서 "⟦L⟧B⟧" 같은 잔해나
+# 이전 ⟦BR⟧ 잔해가 남을 때 감지·복구. `_make_run` 직전에 실행.
+_LB_REMNANT_RE = re.compile(r"⟦L\s*⟧\s*B\s*⟧|⟦B\s*R\s*⟧|⟦BR⟧|⟦B\s*⟧R\s*⟧|R\s*⟧(?=\s*[A-Z가-힣])", re.IGNORECASE)
 
 UI_LOWER_WORDS = {
     "name",
@@ -772,14 +780,37 @@ def _make_rPr_template(rPr_src):
     return tmpl
 
 
+def _repair_lb_remnants(text: str) -> str:
+    """
+    Salvage line-break marker damage the LLM may have caused.
+
+    If the LLM (rare but observed) writes ⟦BR⟧ as literal, or splits ⟦LB⟧
+    into "⟦L⟧B⟧" / "⟦B⟧R⟧" / trailing "R⟧", we normalise those artefacts
+    back to a clean ⟦LB⟧ so the downstream <w:br/> substitution still fires
+    at the right place instead of leaving garbage in the final docx.
+    """
+    if not text or "⟦" not in text and "R⟧" not in text and "B⟧" not in text:
+        return text
+    # Ordered replacements — most specific first.
+    text = re.sub(r"⟦BR⟧", BR_MARKER, text)              # ⟦BR⟧ → ⟦LB⟧
+    text = re.sub(r"⟦L\s*⟧\s*B\s*⟧", BR_MARKER, text)   # ⟦L⟧B⟧ → ⟦LB⟧
+    text = re.sub(r"⟦B\s*⟧\s*R\s*⟧", BR_MARKER, text)   # ⟦B⟧R⟧ → ⟦LB⟧
+    text = re.sub(r"⟦B\s*R\s*⟧", BR_MARKER, text)        # ⟦BR⟧ variant → ⟦LB⟧
+    # 마지막 안전장치: 남아있는 "R⟧" (앞에 ⟦B⟧가 이미 처리된 잔해)를 제거
+    text = re.sub(r"(?<![⟦A-Za-z0-9])R\s*⟧\s*", BR_MARKER, text)
+    return text
+
+
 def _make_run(rPr_template, text: str, props):
     """Create a fresh w:r with a cloned rPr template, bold flag, and text.
 
-    If `text` contains any ⟦BR⟧ markers they are converted to actual
+    If `text` contains any ⟦LB⟧ markers they are converted to actual
     <w:br/> soft-line-break elements interleaved with <w:t> chunks — this
     preserves the original document's paragraph-internal line breaks
-    across translation.
+    across translation. Also repairs any damaged BR/LB marker remnants
+    that leaked in from LLM responses.
     """
+    text = _repair_lb_remnants(text)
     is_bold = props.get("bold", False) if isinstance(props, dict) else bool(props)
     hl_val  = props.get("hl",   None)  if isinstance(props, dict) else None
     r = etree.Element(f"{{{_W}}}r")
@@ -1496,8 +1527,11 @@ def translate_paragraph_with_patterns(
 Translate Korean to natural, professional English. Produce a draft, then revise it so a native English speaker would not flag awkwardness, grammar errors, or literal-translation tells.
 
 Rules:
-- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦BR⟧.
-- ⟦BR⟧ = soft line break in the source. Emit it at the SAME semantic position in your translation so the paragraph keeps its line break there.
+- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦LB⟧.
+- ⟦LB⟧ = soft line break (Line Break) in the source. Emit it at the SAME
+  semantic position in your translation so the paragraph keeps its line break
+  there. NEVER split it — always write the 4 characters ⟦LB⟧ together as a
+  single atomic token.
 - ⟦G#⟧ placeholders are FIXED glossary terms. Output them BYTE-FOR-BYTE unchanged.
   NEVER translate, paraphrase, expand, or substitute a ⟦G#⟧ placeholder with any word.
 - ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
@@ -1580,7 +1614,7 @@ def translate_remaining_korean(
 Translate any remaining Korean in the text into natural English.
 
 Rules:
-- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦G#⟧, ⟦BR⟧.
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦G#⟧, ⟦LB⟧.
 - ⟦G#⟧ placeholders are FIXED terms — output them UNCHANGED. Do NOT translate them.
 - Do NOT alter, rephrase, or improve any English that is already present.
 - Only translate Korean words/phrases; leave everything else exactly as-is.
@@ -1795,7 +1829,7 @@ Revise a translation ONLY when it has a clear problem:
 Do NOT revise translations that are already acceptable. Do NOT make stylistic preference changes that are not grounded in the style guide. Do NOT shorten or expand for taste. When in doubt, leave it alone.
 
 Strict rules:
-- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦HL:colour⟧, ⟦/HL⟧, ⟦H#⟧, ⟦/H#⟧, ⟦D#⟧, ⟦BR⟧.
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦HL:colour⟧, ⟦/HL⟧, ⟦H#⟧, ⟦/H#⟧, ⟦D#⟧, ⟦LB⟧.
 - Glossary translations listed below are mandatory — keep those exact English words with their exact casing.
 - Do NOT translate or alter any English already present (other than the specific problems above).
 
