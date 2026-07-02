@@ -587,7 +587,13 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
     if in_bold: parts.append(B_CLOSE)
     if in_hl:   parts.append(HL_CLOSE)
 
-    return "".join(parts), drawing_map, hyperlink_map
+    marked = "".join(parts)
+    # 문단 끝에 붙은 ⟦LB⟧는 시각적으로 빈 줄이 되므로 제거.
+    # 문단 사이 간격은 XML paragraph 자체가 이미 제공하기 때문에 마지막
+    # soft line break는 항상 여분이다. 여러 개 연속돼도 모두 제거.
+    marked = re.sub(rf"({re.escape(BR_MARKER)}\s*)+$", "", marked)
+
+    return marked, drawing_map, hyperlink_map
 
 
 _BOLD_SEGMENT_RE = re.compile(r"⟦B⟧(.+?)⟦/B⟧", re.DOTALL)
