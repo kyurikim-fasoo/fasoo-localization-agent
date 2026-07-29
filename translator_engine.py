@@ -29,6 +29,9 @@ B_CLOSE = "⟦/B⟧"
 # bold-open ⟦B⟧ marker and splitting it into "⟦B⟧R⟧" style garbage. ⟦LB⟧
 # ("line break") is far enough away visually.
 BR_MARKER = "⟦LB⟧"
+# tab marker — Word `<w:tab/>` element inside a run. Same naming constraint as
+# BR_MARKER: must not collide visually with ⟦B⟧.
+TAB_MARKER = "⟦TB⟧"
 
 G_PREFIX = "⟦G"
 D_PREFIX = "⟦D"
@@ -42,7 +45,12 @@ H_CLOSE_RE   = re.compile(r"⟦/H(\d+)⟧")
 HL_OPEN_RE   = re.compile(r"⟦HL:([a-zA-Z]+)⟧")
 HL_CLOSE     = "⟦/HL⟧"
 BR_MARKER_RE = re.compile(re.escape(BR_MARKER))
-ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧)")
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧)")
+# ⟦LB⟧ / ⟦TB⟧ 는 run 내부에서 <w:br/> · <w:tab/> 요소로 되살려야 하므로
+# _make_run에서 텍스트를 이 마커 기준으로 쪼갠다.
+LAYOUT_MARKER_SPLIT_RE = re.compile(
+    rf"({re.escape(BR_MARKER)}|{re.escape(TAB_MARKER)})"
+)
 MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)")
 
 # 안전장치용 정규식 — LLM이 ⟦LB⟧를 파괴적으로 응답해서 "⟦L⟧B⟧" 같은 잔해나
@@ -447,6 +455,22 @@ def _lxml_text_elem(r_elem):
     return r_elem.find(f"{{{_W}}}t")
 
 
+def _run_has_writable_content(r_elem) -> bool:
+    """
+    True when the run holds content the rewrite step regenerates itself —
+    text (<w:t>), a soft line break (<w:br/>), or a tab (<w:tab/>).
+
+    Runs holding *only* a break or a tab used to be invisible to the rebuild
+    logic (it looked for <w:t> alone), so they survived while the same break
+    was also re-emitted from the ⟦LB⟧ marker — silently doubling every blank
+    line in the output.
+    """
+    return any(
+        r_elem.find(f"{{{_W}}}{tag}") is not None
+        for tag in ("t", "br", "tab")
+    )
+
+
 def _run_is_non_text(r_elem) -> bool:
     """True when the run contains a drawing, symbol, or embedded object
     (i.e. an icon) rather than translatable text."""
@@ -504,12 +528,14 @@ def _parse_marked_segments(marked: str) -> List[Tuple]:
     return [(b, t) for b, t in segments if t]
 
 
-def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
+def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict, int]:
     """
     Extract paragraph text with:
     - ⟦B⟧…⟦/B⟧  bold markers
     - ⟦D0⟧        inline drawing placeholders
     - ⟦H0⟧…⟦/H0⟧ hyperlink span markers (so the LLM can keep link text together)
+    - ⟦LB⟧        soft line break (<w:br/>)
+    - ⟦TB⟧        tab (<w:tab/>)
 
     Walks *direct children* of w:p so hyperlink nodes are handled as a unit
     rather than mixing their inner runs with regular paragraph runs.
@@ -519,6 +545,9 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
     marked_text   : str
     drawing_map   : {placeholder_str: lxml_run_element}
     hyperlink_map : {index: {'elem': w:hyperlink_element, 'runs': [run_elements]}}
+    trailing_lb   : how many soft line breaks the source had at the very end
+                    (stripped from marked_text, re-applied verbatim on write-back
+                    so the author's intentional blank line survives)
     """
     p_elem = paragraph._p
     parts: List[str] = []
@@ -542,8 +571,9 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
                 parts.append(ph); drawing_map[ph] = child; d_idx += 1
                 continue
             # 한 run 안의 자식 요소들을 문서 순서대로 훑는다 — <w:t> 외에
-            # <w:br/> (soft line break) 도 만나면 ⟦BR⟧ 마커로 편입시켜, 원문의
-            # 줄바꿈 위치가 번역·재쓰기 단계까지 살아남게 한다.
+            # <w:br/> (soft line break) 와 <w:tab/> 도 만나면 ⟦LB⟧ / ⟦TB⟧
+            # 마커로 편입시켜, 원문의 줄바꿈·탭 위치가 번역·재쓰기 단계까지
+            # 살아남게 한다.
             text_parts: List[str] = []
             for sub in child:
                 sub_tag = sub.tag.split("}")[1] if "}" in sub.tag else sub.tag
@@ -551,6 +581,8 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
                     text_parts.append(sub.text or "")
                 elif sub_tag == "br":
                     text_parts.append(BR_MARKER)
+                elif sub_tag == "tab":
+                    text_parts.append(TAB_MARKER)
             if not text_parts:
                 continue
             text = "".join(text_parts)
@@ -588,12 +620,17 @@ def paragraph_to_marked_text(paragraph) -> Tuple[str, Dict, Dict]:
     if in_hl:   parts.append(HL_CLOSE)
 
     marked = "".join(parts)
-    # 문단 끝에 붙은 ⟦LB⟧는 시각적으로 빈 줄이 되므로 제거.
-    # 문단 사이 간격은 XML paragraph 자체가 이미 제공하기 때문에 마지막
-    # soft line break는 항상 여분이다. 여러 개 연속돼도 모두 제거.
-    marked = re.sub(rf"({re.escape(BR_MARKER)}\s*)+$", "", marked)
+    # 문단 끝의 ⟦LB⟧는 번역 대상 텍스트에서 떼어낸다 — LLM에게 넘기면 위치가
+    # 흐트러지고, QA가 없던 걸 덧붙이기도 하기 때문. 다만 **버리지는 않고**
+    # 개수를 세어 두었다가 write-back 시 그대로 복원한다. 작성자가 의도적으로
+    # 넣은 빈 줄(= 단락 사이 시각적 간격)이 사라지지 않게 하기 위함.
+    m_tail = re.search(rf"((?:{re.escape(BR_MARKER)}\s*)+)$", marked)
+    trailing_lb = 0
+    if m_tail:
+        trailing_lb = m_tail.group(1).count(BR_MARKER)
+        marked = marked[: m_tail.start()]
 
-    return marked, drawing_map, hyperlink_map
+    return marked, drawing_map, hyperlink_map, trailing_lb
 
 
 _BOLD_SEGMENT_RE = re.compile(r"⟦B⟧(.+?)⟦/B⟧", re.DOTALL)
@@ -711,7 +748,7 @@ def extract_bold_texts_with_context(in_path: str) -> List[Tuple[str, str]]:
     for p in iter_all_paragraphs(doc):
         if is_heading_paragraph(p):
             continue
-        marked, _, _ = paragraph_to_marked_text(p)
+        marked, _, _, _ = paragraph_to_marked_text(p)
         # 컨텍스트는 plain text 기준 — 모든 마커 제거 후 단락 텍스트
         plain_para = re.sub(r"⟦[^⟧]+⟧", "", marked)
         for match in _BOLD_SEGMENT_RE.finditer(marked):
@@ -747,7 +784,7 @@ def extract_bold_texts(in_path: str) -> List[str]:
     for p in iter_all_paragraphs(doc):
         if is_heading_paragraph(p):
             continue  # heading/title은 UI 텍스트 매핑 대상이 아님
-        marked, _, _ = paragraph_to_marked_text(p)
+        marked, _, _, _ = paragraph_to_marked_text(p)
         for match in _BOLD_SEGMENT_RE.finditer(marked):
             text = _INNER_MARKER_RE.sub("", match.group(1)).strip()
             if not text or not contains_korean(text):
@@ -802,6 +839,9 @@ def _repair_lb_remnants(text: str) -> str:
     text = re.sub(r"⟦L\s*⟧\s*B\s*⟧", BR_MARKER, text)   # ⟦L⟧B⟧ → ⟦LB⟧
     text = re.sub(r"⟦B\s*⟧\s*R\s*⟧", BR_MARKER, text)   # ⟦B⟧R⟧ → ⟦LB⟧
     text = re.sub(r"⟦B\s*R\s*⟧", BR_MARKER, text)        # ⟦BR⟧ variant → ⟦LB⟧
+    # 탭 마커도 같은 방식으로 훼손될 수 있다 (⟦T⟧B⟧ / ⟦T B⟧)
+    text = re.sub(r"⟦T\s*⟧\s*B\s*⟧", TAB_MARKER, text)
+    text = re.sub(r"⟦T\s*B\s*⟧", TAB_MARKER, text)
     # 마지막 안전장치: 남아있는 "R⟧" (앞에 ⟦B⟧가 이미 처리된 잔해)를 제거
     text = re.sub(r"(?<![⟦A-Za-z0-9])R\s*⟧\s*", BR_MARKER, text)
     return text
@@ -836,16 +876,18 @@ def _make_run(rPr_template, text: str, props):
             hl_el = etree.SubElement(rPr_new, f"{{{_W}}}highlight")
             hl_el.set(f"{{{_W}}}val", hl_val)
 
-    # ⟦BR⟧ 마커가 있으면 <w:t> + <w:br/> + <w:t> ... 순으로 여러 요소를 삽입
-    if BR_MARKER in text:
-        chunks = text.split(BR_MARKER)
-        for i, chunk in enumerate(chunks):
-            if i > 0:
+    # ⟦LB⟧ / ⟦TB⟧ 마커가 있으면 <w:t> + <w:br/> + <w:tab/> + <w:t> ... 순으로
+    # 여러 요소를 문서 순서 그대로 삽입한다.
+    if BR_MARKER in text or TAB_MARKER in text:
+        for piece in LAYOUT_MARKER_SPLIT_RE.split(text):
+            if piece == BR_MARKER:
                 etree.SubElement(r, f"{{{_W}}}br")
-            if chunk:
+            elif piece == TAB_MARKER:
+                etree.SubElement(r, f"{{{_W}}}tab")
+            elif piece:
                 t_elem = etree.SubElement(r, f"{{{_W}}}t")
-                t_elem.text = chunk
-                if chunk[0] == " " or chunk[-1] == " ":
+                t_elem.text = piece
+                if piece[0] == " " or piece[-1] == " ":
                     t_elem.set(f"{{{_XML_SPACE}}}space", "preserve")
     else:
         t_elem = etree.SubElement(r, f"{{{_W}}}t")
@@ -880,7 +922,8 @@ def _set_run_text(r_elem, text: str, is_bold: bool) -> None:
 
 
 def _write_paragraph_inplace(p_elem, translated_marked: str,
-                             drawing_map: Dict, hyperlink_map: Dict) -> None:
+                             drawing_map: Dict, hyperlink_map: Dict,
+                             trailing_lb: int = 0) -> None:
     """
     Write translated text back into the paragraph XML — three-path strategy.
 
@@ -897,13 +940,15 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
         rPr template cloned from first run (stripping per-segment styling).
         All direct w:r removed; rebuilt one per (bold, text) segment.
     """
-    # 최종 안전장치 — LLM/QA가 응답 끝에 원본에 없던 ⟦LB⟧를 붙이는 경우가
-    # 관측됨. 문단 전체의 trailing ⟦LB⟧(들)는 시각적으로 여분이 되므로 여기서
-    # 최종적으로 제거한다. paragraph_to_marked_text에서 이미 소스 쪽 trailing
-    # LB를 잘라내지만, 번역/QA 파이프라인이 다시 붙이는 케이스를 잡는 이중 방어.
+    # 끝부분 ⟦LB⟧는 번역/QA가 임의로 붙였을 수 있으므로 일단 전부 걷어낸 뒤,
+    # **원문이 실제로 갖고 있던 개수(trailing_lb)만큼만** 다시 붙인다.
+    # → 원문의 의도적인 빈 줄(단락 사이 간격)은 살리고, LLM이 지어낸 여분의
+    #   빈 줄은 들어오지 못하게 하는 양방향 방어.
     translated_marked = re.sub(
         rf"({re.escape(BR_MARKER)}\s*)+$", "", translated_marked or ""
     )
+    if trailing_lb > 0:
+        translated_marked += BR_MARKER * trailing_lb
 
     all_runs = _lxml_all_runs(p_elem)
     if not all_runs:
@@ -994,7 +1039,7 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
         if ctag == "r" and _run_is_non_text(child):
             run_groups.append(cur_runs); hl_groups.append(cur_hls)
             cur_runs = []; cur_hls = []
-        elif ctag == "r" and not _run_is_comment_ref(child) and _lxml_text_elem(child) is not None:
+        elif ctag == "r" and not _run_is_comment_ref(child) and _run_has_writable_content(child):
             cur_runs.append(child)
         elif ctag == "hyperlink" and any(info["elem"] is child for info in hyperlink_map.values()):
             cur_hls.append(child)
@@ -1243,6 +1288,14 @@ def fix_indefinite_articles(text: str) -> str:
 
 
 def capitalize_bullet_lines(text: str) -> str:
+    # ⟦LB⟧로 표현된 soft line break도 하나의 "줄"로 취급해야 한다. 그렇지
+    # 않으면 "1. …⟦LB⟧2. …" 형태의 문단에서 두 번째 항목 이후가 대문자화되지
+    # 않는다.
+    if BR_MARKER in text:
+        return BR_MARKER.join(
+            capitalize_bullet_lines(seg) for seg in text.split(BR_MARKER)
+        )
+
     lines = text.splitlines()
     out_lines = []
     num_prefix_re = re.compile(r"^\s*\d+[\.\)]\s+")
@@ -1287,7 +1340,17 @@ def restore_sentence_period(translated: str, source: str) -> str:
 
     The LLM occasionally drops the trailing period when the sentence ends with
     a glossary placeholder (e.g. 'Enter ⟦B⟧basic information⟦/B⟧' → no '.').
+
+    When both sides carry the same number of ⟦LB⟧ soft line breaks the check is
+    made per line, so each line of a multi-line paragraph keeps (or loses) its
+    period independently instead of only the last one being considered.
     """
+    if BR_MARKER in source and line_breaks_match(translated, source):
+        return BR_MARKER.join(
+            restore_sentence_period(t, s)
+            for t, s in zip(translated.split(BR_MARKER), source.split(BR_MARKER))
+        )
+
     src_stripped = source.rstrip()
     if not src_stripped.endswith("."):
         return translated          # source had no period — nothing to restore
@@ -1301,19 +1364,33 @@ def restore_sentence_period(translated: str, source: str) -> str:
 _LIST_LINE_RE = re.compile(r"^\s*([-•∙*]|\d+[.)]|[a-zA-Z][.)])\s+")
 
 
-def normalize_paragraph_breaks(s: str) -> str:
+def normalize_paragraph_breaks(s: str, source_marked: str = "") -> str:
     """
-    A translated Word paragraph should stay one continuous line in the docx
-    output. LLMs occasionally emit line breaks inside the response for
-    prose paragraphs, which show up as rogue soft line breaks in the final
-    document. We collapse those into spaces — but preserve line breaks when
-    the paragraph is actually a bulleted / numbered list (each line begins
-    with a bullet or number marker).
+    Reconcile the line structure of an LLM response with the source paragraph.
+
+    Two regimes, decided by whether the SOURCE paragraph had soft line breaks:
+
+    * source has ⟦LB⟧ — the author deliberately broke this paragraph into
+      several lines (Shift+Enter). The model very often answers with real
+      newline characters instead of the ⟦LB⟧ token, so we *promote* every
+      newline to ⟦LB⟧ rather than destroying it. Collapsing here was the main
+      reason multi-line notes came back as one run-on line.
+
+    * source has no ⟦LB⟧ — a translated Word paragraph should stay one
+      continuous line, so stray newlines are collapsed into spaces. Line
+      breaks are still preserved when the paragraph is actually a bulleted /
+      numbered list (each line begins with a bullet or number marker).
     """
     if not s:
         return s
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = s.strip("\n")
+
+    if source_marked and BR_MARKER in source_marked:
+        # 개행 → ⟦LB⟧ 승격. 마커 주변 공백은 정리하되 줄 자체는 유지.
+        s = re.sub(r"[ \t]*\n+[ \t]*", BR_MARKER, s)
+        s = re.sub(rf"\s*{re.escape(BR_MARKER)}\s*", BR_MARKER, s)
+        return s
 
     if "\n" not in s:
         return s
@@ -1327,6 +1404,48 @@ def normalize_paragraph_breaks(s: str) -> str:
 
     # 그 외엔 단순 산문 — 모든 line break를 space로 흡수
     return re.sub(r"\s*\n+\s*", " ", s).strip()
+
+
+def line_breaks_match(translated: str, source_marked: str) -> bool:
+    """True when the translation carries exactly as many ⟦LB⟧ as the source."""
+    return (translated or "").count(BR_MARKER) == (source_marked or "").count(BR_MARKER)
+
+
+def enforce_line_breaks(translated: str, source_marked: str) -> str:
+    """
+    Last-resort reconciliation of the ⟦LB⟧ count against the source.
+
+    `translate_marked_paragraph` already guarantees the count structurally by
+    translating line-by-line, so this only has to catch damage introduced
+    afterwards (marker repair, glossary restore, QA rewrite). It never invents
+    breaks out of thin air — it only recovers ones the model expressed in a
+    different form (real newlines, damaged markers) and trims surplus ones.
+    """
+    want = (source_marked or "").count(BR_MARKER)
+    text = _repair_lb_remnants(translated or "")
+
+    if want == 0:
+        # 원문에 줄바꿈이 없었다면 번역이 만들어낸 ⟦LB⟧는 전부 여분이다.
+        if BR_MARKER in text:
+            text = re.sub(rf"\s*{re.escape(BR_MARKER)}\s*", " ", text)
+            text = re.sub(r" {2,}", " ", text).strip()
+        return text
+
+    # 모델이 ⟦LB⟧ 대신 실제 개행으로 답한 경우 승격
+    if "\n" in text:
+        text = re.sub(r"[ \t]*\n+[ \t]*", BR_MARKER, text)
+
+    have = text.count(BR_MARKER)
+    if have > want:
+        # 여분은 뒤에서부터 공백으로 흡수 (앞쪽 줄 구조가 더 신뢰도 높음)
+        parts = text.split(BR_MARKER)
+        head = parts[: want + 1]
+        tail = parts[want + 1:]
+        head[-1] = " ".join([head[-1]] + tail)
+        text = BR_MARKER.join(head)
+        text = re.sub(r" {2,}", " ", text)
+
+    return text
 
 
 def iter_all_paragraphs(doc: Document) -> Iterable:
@@ -1394,14 +1513,17 @@ def paragraph_has_hyperlink(paragraph) -> bool:
 
 def _write_paragraph(p, translated_marked: str,
                      drawing_map: Optional[Dict] = None,
-                     hyperlink_map: Optional[Dict] = None) -> None:
+                     hyperlink_map: Optional[Dict] = None,
+                     trailing_lb: int = 0) -> None:
     """Write translated text into the paragraph, preserving all XML structure."""
     if is_heading_paragraph(p):
         translated_marked = translated_marked.rstrip()
         if translated_marked.endswith("."):
             translated_marked = translated_marked[:-1].rstrip()
 
-    _write_paragraph_inplace(p._p, translated_marked, drawing_map or {}, hyperlink_map or {})
+    _write_paragraph_inplace(
+        p._p, translated_marked, drawing_map or {}, hyperlink_map or {}, trailing_lb
+    )
 
 
 def normalize_for_scoring(text: str) -> str:
@@ -1503,6 +1625,26 @@ def select_relevant_patterns(
     return [(ko, en) for score, ko, en in scored_patterns[:max_pattern]]
 
 
+def _track_usage(resp) -> None:
+    """Fold one Responses API call's usage into the module-level counters."""
+    global TOTAL_INPUT_TOKENS, TOTAL_CACHED_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_TOKENS
+
+    usage = getattr(resp, "usage", None)
+    if not usage:
+        return
+    input_tokens = getattr(usage, "input_tokens", 0) or 0
+    output_tokens = getattr(usage, "output_tokens", 0) or 0
+    total_tokens = getattr(usage, "total_tokens", 0) or 0
+
+    input_details = getattr(usage, "input_tokens_details", None)
+    cached_tokens = getattr(input_details, "cached_tokens", 0) or 0
+
+    TOTAL_INPUT_TOKENS += input_tokens
+    TOTAL_CACHED_INPUT_TOKENS += cached_tokens
+    TOTAL_OUTPUT_TOKENS += output_tokens
+    TOTAL_TOKENS += total_tokens
+
+
 def translate_paragraph_with_patterns(
     client: OpenAI,
     source_text: str,
@@ -1510,8 +1652,17 @@ def translate_paragraph_with_patterns(
     model: str = "gpt-5.2",
     translation_mode: str = "Manual",
     style_reference: str = "",
+    line_count: int = 0,
 ) -> str:
-    global TOTAL_INPUT_TOKENS, TOTAL_CACHED_INPUT_TOKENS, TOTAL_OUTPUT_TOKENS, TOTAL_TOKENS
+    """
+    Translate one marked paragraph (or one line of it).
+
+    `line_count` > 0 switches the prompt into *line-aligned* mode: the input is
+    a `[N] …` numbered list of the source's soft-line-break-separated lines and
+    the model must echo exactly that many `[N]` blocks back. See
+    `translate_marked_paragraph`.
+    """
+    line_mode = line_count > 0
 
     pattern_block = (
         "\n".join([f"- {ko} -> {en}" for ko, en in pattern_examples]) or "(none)"
@@ -1537,16 +1688,40 @@ def translate_paragraph_with_patterns(
         if style_reference else ""
     )
 
+    # ── 줄 구조 규칙 ────────────────────────────────────────────────────
+    # 예전에는 "⟦LB⟧를 유지하라"와 "출력은 반드시 한 줄이어야 한다"가 같은
+    # 프롬프트에 동시에 들어가 있어 모델이 줄바꿈을 지우는 쪽으로 기울었다.
+    # 이제 원문의 줄 구조에 따라 둘 중 하나만 제시한다.
+    if line_mode:
+        layout_rules = f"""
+- The input is a numbered list of {line_count} source line(s) in the form `[0] …`,
+  `[1] …`. These are the lines of ONE Word paragraph, separated by soft line
+  breaks in the original document.
+- Translate each line INDEPENDENTLY and output exactly {line_count} block(s),
+  each starting with its own `[N]` header on a new line, in ascending order,
+  reusing the SAME numbers. Never merge two source lines into one block and
+  never split one source line across two blocks.
+- Each `[N]` block must be a single line of text. Do NOT emit ⟦LB⟧ inside a block.
+- Do not output the `[N]` headers as part of the translated text itself.
+"""
+    else:
+        layout_rules = """
+- Output must be a SINGLE line. Do NOT insert line breaks, and do NOT emit any
+  ⟦LB⟧ marker — the source paragraph has none.
+"""
+
+    tab_rule = (
+        "- ⟦TB⟧ = a tab character in the source. Keep it, unsplit, at the same\n"
+        "  position relative to the surrounding text.\n"
+        if TAB_MARKER in source_text else ""
+    )
+
     prompt = f"""
 Translate Korean to natural, professional English. Produce a draft, then revise it so a native English speaker would not flag awkwardness, grammar errors, or literal-translation tells.
 
 Rules:
-- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦LB⟧.
-- ⟦LB⟧ = soft line break (Line Break) in the source. Emit it at the SAME
-  semantic position in your translation so the paragraph keeps its line break
-  there. NEVER split it — always write the 4 characters ⟦LB⟧ together as a
-  single atomic token.
-- ⟦G#⟧ placeholders are FIXED glossary terms. Output them BYTE-FOR-BYTE unchanged.
+- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦TB⟧.
+{tab_rule}- ⟦G#⟧ placeholders are FIXED glossary terms. Output them BYTE-FOR-BYTE unchanged.
   NEVER translate, paraphrase, expand, or substitute a ⟦G#⟧ placeholder with any word.
 - ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
 - ⟦H#⟧…⟦/H#⟧ = hyperlink span — translate the text inside, keep the markers around it.
@@ -1581,10 +1756,7 @@ Rules:
   "Before:", "After:", "Version 1:", "v2:", "Option A:", "Improved:",
   "Correction:") or any before/after comparison. Give ONE clean final
   translation, no alternatives, no explanation.
-- The output for one input paragraph must be a single line (or a single
-  bulleted/numbered list). Do NOT insert soft line breaks in the middle of
-  running prose.
-{style_rules}{style_ref_block}
+{layout_rules}{style_rules}{style_ref_block}
 Reference pattern examples:
 {pattern_block}
 
@@ -1599,21 +1771,113 @@ Text to translate:
         text={"verbosity": "low"},
     )
 
-    usage = getattr(resp, "usage", None)
-    if usage:
-        input_tokens = getattr(usage, "input_tokens", 0) or 0
-        output_tokens = getattr(usage, "output_tokens", 0) or 0
-        total_tokens = getattr(usage, "total_tokens", 0) or 0
-
-        input_details = getattr(usage, "input_tokens_details", None)
-        cached_tokens = getattr(input_details, "cached_tokens", 0) or 0
-
-        TOTAL_INPUT_TOKENS += input_tokens
-        TOTAL_CACHED_INPUT_TOKENS += cached_tokens
-        TOTAL_OUTPUT_TOKENS += output_tokens
-        TOTAL_TOKENS += total_tokens
+    _track_usage(resp)
 
     return resp.output_text.strip()
+
+
+_NUMBERED_LINE_RE = re.compile(r"^[ \t]*\[(\d+)\][ \t]?", re.MULTILINE)
+
+
+def _parse_numbered_lines(text: str, expected: int) -> Optional[List[str]]:
+    """
+    Parse a `[0] … [1] …` response into an ordered list of `expected` strings.
+
+    Returns None when the response does not cover exactly indices 0..expected-1,
+    so the caller can fall back to per-line translation rather than silently
+    losing or duplicating a line.
+    """
+    if not text:
+        return None
+    matches = list(_NUMBERED_LINE_RE.finditer(text))
+    if not matches:
+        return None
+
+    bodies: Dict[int, str] = {}
+    for i, m in enumerate(matches):
+        idx = int(m.group(1))
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[m.end():end].strip()
+        # 한 줄 안에서 모델이 개행을 넣었다면 공백으로 흡수 — 줄 경계는
+        # 어디까지나 [N] 헤더가 정의한다.
+        body = re.sub(r"\s*\n+\s*", " ", body).strip()
+        if idx in bodies:
+            return None          # 중복 인덱스 → 신뢰 불가
+        bodies[idx] = body
+
+    if sorted(bodies) != list(range(expected)):
+        return None
+    if any(not b for b in bodies.values()):
+        return None
+    return [bodies[i] for i in range(expected)]
+
+
+def translate_marked_paragraph(
+    client: OpenAI,
+    source_text: str,
+    pattern_examples: List[Tuple[str, str]],
+    model: str = "gpt-5.2",
+    translation_mode: str = "Manual",
+    style_reference: str = "",
+) -> str:
+    """
+    Translate a marked paragraph, keeping its soft-line-break structure intact.
+
+    Paragraphs without ⟦LB⟧ go straight through the normal single-shot path.
+    Paragraphs *with* ⟦LB⟧ are split into lines, translated as a numbered list,
+    and rejoined — so the number of line breaks is guaranteed by construction
+    instead of depending on the model honouring a marker. If the numbered
+    response cannot be parsed reliably we translate line by line, which is
+    slower but still structurally exact.
+    """
+    if BR_MARKER not in source_text:
+        return translate_paragraph_with_patterns(
+            client=client,
+            source_text=source_text,
+            pattern_examples=pattern_examples,
+            model=model,
+            translation_mode=translation_mode,
+            style_reference=style_reference,
+        )
+
+    lines = source_text.split(BR_MARKER)
+    # 빈 줄(연속된 ⟦LB⟧)은 번역 대상이 아니므로 자리만 지킨다.
+    todo = [i for i, ln in enumerate(lines) if ln.strip()]
+    if not todo:
+        return source_text
+
+    numbered = "\n".join(f"[{k}] {lines[i]}" for k, i in enumerate(todo))
+    try:
+        raw = translate_paragraph_with_patterns(
+            client=client,
+            source_text=numbered,
+            pattern_examples=pattern_examples,
+            model=model,
+            translation_mode=translation_mode,
+            style_reference=style_reference,
+            line_count=len(todo),
+        )
+        parsed = _parse_numbered_lines(raw, len(todo))
+    except Exception:
+        parsed = None
+
+    if parsed is None:
+        parsed = [
+            translate_paragraph_with_patterns(
+                client=client,
+                source_text=lines[i],
+                pattern_examples=pattern_examples,
+                model=model,
+                translation_mode=translation_mode,
+                style_reference=style_reference,
+            ).strip()
+            for i in todo
+        ]
+
+    out = list(lines)
+    for k, i in enumerate(todo):
+        out[i] = parsed[k]
+    return BR_MARKER.join(out)
 
 
 def translate_remaining_korean(
@@ -1628,7 +1892,9 @@ def translate_remaining_korean(
 Translate any remaining Korean in the text into natural English.
 
 Rules:
-- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦G#⟧, ⟦LB⟧.
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦G#⟧, ⟦LB⟧, ⟦TB⟧.
+- ⟦LB⟧ (soft line break) and ⟦TB⟧ (tab) must be kept in place and in the same
+  number as the input. Never split, add, or drop one.
 - ⟦G#⟧ placeholders are FIXED terms — output them UNCHANGED. Do NOT translate them.
 - Do NOT alter, rephrase, or improve any English that is already present.
 - Only translate Korean words/phrases; leave everything else exactly as-is.
@@ -1843,7 +2109,12 @@ Revise a translation ONLY when it has a clear problem:
 Do NOT revise translations that are already acceptable. Do NOT make stylistic preference changes that are not grounded in the style guide. Do NOT shorten or expand for taste. When in doubt, leave it alone.
 
 Strict rules:
-- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦HL:colour⟧, ⟦/HL⟧, ⟦H#⟧, ⟦/H#⟧, ⟦D#⟧, ⟦LB⟧.
+- Preserve markers EXACTLY: ⟦B⟧, ⟦/B⟧, ⟦HL:colour⟧, ⟦/HL⟧, ⟦H#⟧, ⟦/H#⟧, ⟦D#⟧, ⟦LB⟧, ⟦TB⟧.
+- ⟦LB⟧ is a soft line break that exists in the SOURCE. Your revision must contain
+  EXACTLY as many ⟦LB⟧ markers as the TRANSLATION you were given, in the same
+  positions. Never remove one to make the text flow as a single line, never add
+  one, and never write a real newline in its place. A revision whose ⟦LB⟧ count
+  differs from the input will be discarded.
 - Glossary translations listed below are mandatory — keep those exact English words with their exact casing.
 - Do NOT translate or alter any English already present (other than the specific problems above).
 
@@ -1857,10 +2128,11 @@ ABSOLUTELY FORBIDDEN in your output — if you emit ANY of these your revision w
   "Correction:", "Suggestion:", "Alternative:", "Option A/B", "Version 1/2", "v1/v2".
 - Any before/after comparison, side-by-side text, or multiple candidate versions.
 - Any preamble like "Here is the revised text" or trailing commentary.
-- Line breaks WITHIN a single item's revised text unless the source itself had a
-  bulleted/numbered list. A single-paragraph source must produce a single-line revision.
+- Real newline characters within a single item's revised text. If the item's
+  translation is split across several lines, those splits are represented by
+  ⟦LB⟧ markers — keep the markers and stay on one physical line.
 
-Emit ONE clean, final revised sentence per [N] header. Nothing else.
+Emit ONE clean, final revised text per [N] header. Nothing else.
 
 Style guide:
 {style_guide or "(no style guide available)"}
@@ -1962,11 +2234,11 @@ def translate_document(
     marked_texts: List = []
 
     for p in iter_all_paragraphs(doc):
-        marked_ko, drawing_map, hyperlink_map = paragraph_to_marked_text(p)
+        marked_ko, drawing_map, hyperlink_map, trailing_lb = paragraph_to_marked_text(p)
         if not contains_korean(marked_ko):
             continue
         paras.append(p)
-        marked_texts.append((marked_ko, drawing_map, hyperlink_map))
+        marked_texts.append((marked_ko, drawing_map, hyperlink_map, trailing_lb))
 
     total_paras = len(paras)
 
@@ -1986,7 +2258,7 @@ def translate_document(
     qa_estimated = 0
     if enable_qa:
         seen_for_estimate = set()
-        for idx_e, (src_e, _, _) in enumerate(marked_texts):
+        for idx_e, (src_e, _, _, _) in enumerate(marked_texts):
             if src_e in seen_for_estimate:
                 continue
             seen_for_estimate.add(src_e)
@@ -1999,7 +2271,7 @@ def translate_document(
     pass1_results: List[Dict] = []
 
     for idx, p in enumerate(paras):
-        src, drawing_map, hyperlink_map = marked_texts[idx]
+        src, drawing_map, hyperlink_map, trailing_lb = marked_texts[idx]
 
         # heading 여부를 미리 계산 — UI 매핑 적용 여부와 case-sensitive 재복원
         # 여부를 이 값으로 갈라야 하기 때문.
@@ -2023,7 +2295,7 @@ def translate_document(
 
             selected_pattern_examples = select_relevant_patterns(gl_pre, patterns)
 
-            translated = translate_paragraph_with_patterns(
+            translated = translate_marked_paragraph(
                 client=client,
                 source_text=gl_pre,
                 pattern_examples=selected_pattern_examples,
@@ -2033,6 +2305,12 @@ def translate_document(
             )
 
             translated = translated.strip()
+
+            # 0) 줄 구조 정리 — 모델이 ⟦LB⟧ 대신 개행으로 답했거나 여분을
+            #    붙였을 때 원문 기준으로 맞춘다. 이후 후처리들이 ⟦LB⟧를 "줄"로
+            #    인식하므로 가장 먼저 수행해야 한다.
+            translated = normalize_paragraph_breaks(translated, gl_pre)
+            translated = enforce_line_breaks(translated, gl_pre)
 
             # 1) marker 복구
             translated = repair_bold_markers(translated)
@@ -2053,6 +2331,7 @@ def translate_document(
             # 4) 남은 한국어 fallback 번역
             if contains_korean(translated):
                 translated = translate_remaining_korean(client, translated, model=model)
+                translated = enforce_line_breaks(translated, gl_pre)
                 translated = repair_bold_markers(translated)
                 translated = repair_hl_markers(translated)
                 translated = normalize_bold_spaces(translated)
@@ -2076,9 +2355,11 @@ def translate_document(
             translated = fix_indefinite_articles(translated)
             translated = capitalize_bullet_lines(translated)
             translated = restore_sentence_period(translated, src)
-            translated = normalize_paragraph_breaks(translated)
+            translated = normalize_paragraph_breaks(translated, src)
             # pass-1이 "Draft: X ... Revised: Y" 형태를 뱉는 경우 방어
             translated = strip_meta_version_labels(translated)
+            # 후처리 단계에서 줄 구조가 흐트러졌으면 원문 기준으로 최종 정렬
+            translated = enforce_line_breaks(translated, src)
 
             # 7) case-sensitive/DNT glossary 용어의 정확한 대소문자 복원.
             #    Heading에서는 절대 호출하지 않는다 — heading은 항상 sentence
@@ -2096,6 +2377,7 @@ def translate_document(
             "translated": translated,
             "drawing_map": drawing_map,
             "hyperlink_map": hyperlink_map,
+            "trailing_lb": trailing_lb,
         })
 
         if progress_callback:
@@ -2151,8 +2433,14 @@ def translate_document(
                 revised = normalize_bold_spaces(revised)
                 revised = apply_highlight_fallback(revised, item["src"])
                 # QA 응답에서도 line break/meta label 정리 (pass-1과 동일 수준으로)
-                revised = normalize_paragraph_breaks(revised)
+                revised = normalize_paragraph_breaks(revised, item["src"])
                 revised = strip_meta_version_labels(revised)
+                revised = enforce_line_breaks(revised, item["src"])
+                # 줄 구조를 되살릴 수 없는 리비전은 채택하지 않는다 — QA는
+                # 표현 다듬기가 목적이므로, 줄바꿈을 잃는 대가로 받아들일
+                # 만한 개선은 없다. Pass 1 결과를 그대로 유지한다.
+                if not line_breaks_match(revised, item["src"]):
+                    continue
                 # QA가 case-sensitive 용어를 흐트러뜨리는 경우도 복원
                 revised = enforce_case_sensitive_glossary(revised, glossary_entries)
                 for r in item["group"]:
@@ -2166,7 +2454,10 @@ def translate_document(
 
     # ── Final: 모든 결과를 한 번에 XML로 쓰기 ─────────────────────────
     for r in pass1_results:
-        _write_paragraph(r["p"], r["translated"], r["drawing_map"], r["hyperlink_map"])
+        _write_paragraph(
+            r["p"], r["translated"], r["drawing_map"], r["hyperlink_map"],
+            r["trailing_lb"],
+        )
 
     doc.save(out_path)
 
