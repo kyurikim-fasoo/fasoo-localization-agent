@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(.venv/Scripts/python.exe -c ' *)",
-      "Bash(.venv/Scripts/python.exe -m py_compile app.py services/translation_logs.py)"
+      "Bash(.venv/Scripts/python.exe -m py_compile app.py services/translation_logs.py)",
+      "Bash(python -c ' *)",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Read(//c/Users/kyurikim/AppData/Local/Programs/Python/**)",
+      "Bash(\"C:/Users/kyurikim/AppData/Local/Programs/Python/Python39/python.exe\" -c \"import docx, lxml; print\\('ok'\\)\")",
+      "Bash(\"C:/Users/kyurikim/AppData/Local/Programs/Python/Python39/python.exe\" \"C:/Users/kyurikim/AppData/Local/Temp/claude/c--Exception-Others-FIX-MWMW-VS-Code-docx-trasnlator-ui/3fd781f0-205f-4531-8e72-ab9782982a08/scratchpad/test_hl.py\")",
+      "Bash(PYTHONIOENCODING=utf-8 \"C:/Users/kyurikim/AppData/Local/Programs/Python/Python39/python.exe\" \"C:/Users/kyurikim/AppData/Local/Temp/claude/c--Exception-Others-FIX-MWMW-VS-Code-docx-trasnlator-ui/3fd781f0-205f-4531-8e72-ab9782982a08/scratchpad/test_hl.py\")"
     ]
   }
 }

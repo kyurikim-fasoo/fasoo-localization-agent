@@ -52,6 +52,13 @@ LAYOUT_MARKER_SPLIT_RE = re.compile(
     rf"({re.escape(BR_MARKER)}|{re.escape(TAB_MARKER)})"
 )
 MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d+⟧)")
+# 대소문자 정규화(heading sentence case, UI label 등)를 지날 때 **모든** 마커는
+# 원형 그대로 남아야 한다. ⟦B⟧/⟦G n⟧만 보호하면 ⟦HL:yellow⟧의 "HL"이 첫 알파벳으로
+# 잡혀 "⟦Hl:yellow⟧ / ⟦/hl⟧"로 훼손되고, 이후 ALL_MARKER_RE 토크나이저가 인식하지
+# 못해 마커가 문서에 그대로 찍힌다.
+ANY_MARKER_SPLIT_RE = re.compile(
+    r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦G\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧)"
+)
 
 # 안전장치용 정규식 — LLM이 ⟦LB⟧를 파괴적으로 응답해서 "⟦L⟧B⟧" 같은 잔해나
 # 이전 ⟦BR⟧ 잔해가 남을 때 감지·복구. `_make_run` 직전에 실행.
@@ -163,9 +170,19 @@ def _clean(v: Any) -> str:
 
 
 def _cap_first_alpha(s: str) -> str:
-    for i, ch in enumerate(s):
-        if ch.isalpha():
-            return s[:i] + ch.upper() + s[i + 1:]
+    """Capitalise the first alphabetic character of the *visible text*.
+
+    마커(⟦HL:yellow⟧, ⟦B⟧ …) 내부 글자는 건너뛴다 — 그렇지 않으면 마커로 시작하는
+    문단에서 마커의 첫 글자만 손대고 정작 본문 첫 글자는 소문자로 남는다.
+    """
+    parts = ANY_MARKER_SPLIT_RE.split(s)
+    for pi, part in enumerate(parts):
+        if not part or ANY_MARKER_SPLIT_RE.fullmatch(part):
+            continue
+        for i, ch in enumerate(part):
+            if ch.isalpha():
+                parts[pi] = part[:i] + ch.upper() + part[i + 1:]
+                return "".join(parts)
     return s
 
 
@@ -1134,13 +1151,24 @@ def repair_hl_markers(text: str) -> str:
     Fix common LLM garbling of ⟦HL:colour⟧ … ⟦/HL⟧ highlight markers.
 
     - ⟦HL: yellow⟧  → ⟦HL:yellow⟧  (space after colon)
+    - ⟦Hl:Yellow⟧ / ⟦/hl⟧ → ⟦HL:yellow⟧ / ⟦/HL⟧  (case garbling — LLM 응답이나
+      sentence-case 후처리로 마커 안 글자가 뒤집힌 경우. 그대로 두면 토크나이저가
+      마커로 인식하지 못해 "⟦Hl:yellow⟧" 문자열이 docx에 그대로 찍힌다.)
     - Unmatched open → append ⟦/HL⟧ at end
     - Unmatched close → remove excess ⟦/HL⟧
     """
-    if not text or "⟦HL" not in text:
+    if not text:
         return text
-    # Fix space after colon
-    text = re.sub(r"⟦HL:\s+([a-zA-Z]+)⟧", lambda m: f"⟦HL:{m.group(1)}⟧", text)
+    low = text.lower()
+    if "⟦hl" not in low and "⟦/hl" not in low:
+        return text
+    # Normalise case/space garbling back to the canonical form
+    text = re.sub(
+        r"⟦\s*[Hh][Ll]\s*:\s*([a-zA-Z]+)\s*⟧",
+        lambda m: f"⟦HL:{m.group(1).lower()}⟧",
+        text,
+    )
+    text = re.sub(r"⟦\s*/\s*[Hh][Ll]\s*⟧", HL_CLOSE, text)
     opens  = len(HL_OPEN_RE.findall(text))
     closes = text.count(HL_CLOSE)
     if opens > closes:
@@ -1171,7 +1199,11 @@ def apply_highlight_fallback(translated: str, source_marked: str) -> str:
 
 
 def _split_preserving_markers(text: str) -> List[str]:
-    return MARKER_SPLIT_RE.split(text)
+    return ANY_MARKER_SPLIT_RE.split(text)
+
+
+def _is_marker_token(part: str) -> bool:
+    return bool(ANY_MARKER_SPLIT_RE.fullmatch(part) or PLACEHOLDER_RE.fullmatch(part))
 
 
 def _sentence_case_preserving_markers(text: str) -> str:
@@ -1184,7 +1216,7 @@ def _sentence_case_preserving_markers(text: str) -> str:
             out.append(part)
             continue
 
-        if part == B_OPEN or part == B_CLOSE or PLACEHOLDER_RE.fullmatch(part):
+        if _is_marker_token(part):
             out.append(part)
             continue
 
@@ -1220,7 +1252,7 @@ def normalize_ui_label_text(text: str) -> str:
             out.append(part)
             continue
 
-        if part == B_OPEN or part == B_CLOSE or PLACEHOLDER_RE.fullmatch(part):
+        if _is_marker_token(part):
             out.append(part)
             continue
 
@@ -2360,6 +2392,10 @@ def translate_document(
             translated = strip_meta_version_labels(translated)
             # 후처리 단계에서 줄 구조가 흐트러졌으면 원문 기준으로 최종 정렬
             translated = enforce_line_breaks(translated, src)
+            # 6-b) 후처리(대소문자 정규화 등)가 마커를 훼손했을 경우 최종 복구.
+            #      깨진 마커는 write-back 토크나이저가 인식하지 못해 문서에
+            #      그대로 출력되므로 XML 기록 직전에 한 번 더 정규화한다.
+            translated = repair_hl_markers(translated)
 
             # 7) case-sensitive/DNT glossary 용어의 정확한 대소문자 복원.
             #    Heading에서는 절대 호출하지 않는다 — heading은 항상 sentence
