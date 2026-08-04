@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -33,8 +31,9 @@ from services.translation_logs import (
     list_logs,
     update_note,
 )
+from services.jobs import get_job, start_job
 from services.users import add_user, list_users
-from translator_engine import extract_bold_texts_with_context, translate_document
+from translator_engine import extract_bold_texts_with_context
 
 
 load_dotenv()
@@ -103,77 +102,24 @@ def make_default_output_filename(product: str, source_name: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# 백그라운드 번역 잡
+# 번역 진행 화면
 #
 # 번역을 스크립트 실행에 인라인으로 두면, 웹소켓이 한 번 끊겼다 붙는
 # 것만으로 Streamlit이 스크립트를 처음부터 다시 돌린다. 그러면 세션에
 # 남아있는 translating_now 플래그 때문에 번역이 1번 문단부터 재시작되고,
 # 화면상 진행률이 0으로 되감긴다 (긴 문서일수록 끊길 확률이 높아 영영
-# 끝나지 않는 루프가 된다). 실제 작업을 데몬 스레드로 떼어두면 rerun이
-# 몇 번 나든 이미 돌고 있는 잡에 다시 붙기만 하면 된다.
+# 끝나지 않는 루프가 된다). 실제 작업은 services/jobs.py의 데몬 스레드가
+# 들고 있고, 여기서는 진행 상황만 읽어 그린다 — rerun이 몇 번 나든
+# 이미 돌고 있는 잡에 다시 붙기만 하면 된다.
 #
-# 잡 상태는 st.session_state가 아니라 모듈 전역에 둔다 — 백그라운드
-# 스레드에는 ScriptRunContext가 없어서 session_state 접근이 보장되지
-# 않기 때문. 스레드는 아래 job dict만 건드리고 st.* 는 절대 호출하지 않는다.
+# ⚠️ 잡 레지스트리를 이 파일에 두면 안 된다. Streamlit은 메인 스크립트를
+#    매 실행마다 새 모듈 네임스페이스에 exec 하므로 app.py의 모듈 전역은
+#    rerun 한 번이면 초기화된다. 자세한 내용은 services/jobs.py 참고.
 # ─────────────────────────────────────────────
-
-_TRANSLATION_JOBS: dict = {}
-_TRANSLATION_JOBS_LOCK = threading.Lock()
-
-
-def get_translation_job(job_id: Optional[str]) -> Optional[dict]:
-    """job_id에 해당하는 진행 중/완료된 잡. 앱이 재시작됐으면 None."""
-    if not job_id:
-        return None
-    with _TRANSLATION_JOBS_LOCK:
-        return _TRANSLATION_JOBS.get(job_id)
-
-
-def start_translation_job(job_id: str, params: dict) -> dict:
-    """번역을 데몬 스레드에서 시작하고 진행률을 담을 dict을 돌려준다."""
-    job = {
-        "status": "running",  # running | finished | error
-        "done": 0,
-        "total": 0,
-        "result": None,
-        "error": None,
-        "params": params,
-    }
-    with _TRANSLATION_JOBS_LOCK:
-        _TRANSLATION_JOBS[job_id] = job
-
-    def _on_progress(done: int, total: int) -> None:
-        # 단순 대입만 — GIL 아래에서 안전하고, 읽는 쪽은 UI 한 곳뿐이라
-        # 락이 필요 없다. 여기서 st.* 를 호출하면 안 된다.
-        job["done"] = done
-        job["total"] = total
-
-    def _run() -> None:
-        try:
-            job["result"] = translate_document(
-                in_path=params["in_path"],
-                out_path=params["out_path"],
-                glossary_rows=params["glossary_rows"],
-                pattern_rows=params["pattern_rows"],
-                api_key=OPENAI_API_KEY,
-                enable_cache=params["enable_cache"],
-                enable_qa=params["enable_qa"],
-                translation_mode=params["translation_mode"],
-                progress_callback=_on_progress,
-                ui_text_overrides=params["ui_overrides"] or None,
-            )
-            job["status"] = "finished"
-        except Exception as e:  # 스레드에서 새는 예외는 UI가 볼 수 없다
-            job["error"] = str(e)
-            job["status"] = "error"
-
-    threading.Thread(target=_run, name=f"translate-{job_id}", daemon=True).start()
-    return job
-
 
 def render_translation_progress() -> None:
     """번역 중 화면 — 진행률만 그리고, 끝나면 로그를 남기고 Step 3으로."""
-    job = get_translation_job(st.session_state.get("translate_job_id"))
+    job = get_job(st.session_state.get("translate_job_id"))
 
     def _clear_job_state() -> None:
         st.session_state.translating_now = False
@@ -1549,22 +1495,18 @@ if st.session_state.step == 2:
                 st.session_state.selected_product,
                 uploaded_docx.name,
             )
-            _job_id = uuid.uuid4().hex
-            start_translation_job(
-                _job_id,
-                {
-                    "in_path": str(saved_input_path),
-                    "out_path": str(OUTPUT_DIR / _output_filename),
-                    "output_filename": _output_filename,
-                    "glossary_rows": glossary_rows,
-                    "pattern_rows": pattern_rows,
-                    "enable_cache": st.session_state.enable_cache,
-                    "enable_qa": st.session_state.enable_qa,
-                    "translation_mode": st.session_state.translation_mode,
-                    "ui_overrides": _ui_overrides_pending,
-                },
-            )
-            st.session_state.translate_job_id = _job_id
+            st.session_state.translate_job_id = start_job({
+                "in_path": str(saved_input_path),
+                "out_path": str(OUTPUT_DIR / _output_filename),
+                "output_filename": _output_filename,
+                "glossary_rows": glossary_rows,
+                "pattern_rows": pattern_rows,
+                "api_key": OPENAI_API_KEY,
+                "enable_cache": st.session_state.enable_cache,
+                "enable_qa": st.session_state.enable_qa,
+                "translation_mode": st.session_state.translation_mode,
+                "ui_overrides": _ui_overrides_pending,
+            })
             st.session_state.pending_translate = {"uploaded_name": uploaded_docx.name}
             st.session_state.translating_now = True
             st.rerun()
