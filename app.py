@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -97,6 +100,146 @@ def make_default_output_filename(product: str, source_name: str) -> str:
     source_stem = Path(source_name).stem
     safe_product = product.strip().replace(" ", "_")
     return f"{source_stem}_{safe_product}_en.docx"
+
+
+# ─────────────────────────────────────────────
+# 백그라운드 번역 잡
+#
+# 번역을 스크립트 실행에 인라인으로 두면, 웹소켓이 한 번 끊겼다 붙는
+# 것만으로 Streamlit이 스크립트를 처음부터 다시 돌린다. 그러면 세션에
+# 남아있는 translating_now 플래그 때문에 번역이 1번 문단부터 재시작되고,
+# 화면상 진행률이 0으로 되감긴다 (긴 문서일수록 끊길 확률이 높아 영영
+# 끝나지 않는 루프가 된다). 실제 작업을 데몬 스레드로 떼어두면 rerun이
+# 몇 번 나든 이미 돌고 있는 잡에 다시 붙기만 하면 된다.
+#
+# 잡 상태는 st.session_state가 아니라 모듈 전역에 둔다 — 백그라운드
+# 스레드에는 ScriptRunContext가 없어서 session_state 접근이 보장되지
+# 않기 때문. 스레드는 아래 job dict만 건드리고 st.* 는 절대 호출하지 않는다.
+# ─────────────────────────────────────────────
+
+_TRANSLATION_JOBS: dict = {}
+_TRANSLATION_JOBS_LOCK = threading.Lock()
+
+
+def get_translation_job(job_id: Optional[str]) -> Optional[dict]:
+    """job_id에 해당하는 진행 중/완료된 잡. 앱이 재시작됐으면 None."""
+    if not job_id:
+        return None
+    with _TRANSLATION_JOBS_LOCK:
+        return _TRANSLATION_JOBS.get(job_id)
+
+
+def start_translation_job(job_id: str, params: dict) -> dict:
+    """번역을 데몬 스레드에서 시작하고 진행률을 담을 dict을 돌려준다."""
+    job = {
+        "status": "running",  # running | finished | error
+        "done": 0,
+        "total": 0,
+        "result": None,
+        "error": None,
+        "params": params,
+    }
+    with _TRANSLATION_JOBS_LOCK:
+        _TRANSLATION_JOBS[job_id] = job
+
+    def _on_progress(done: int, total: int) -> None:
+        # 단순 대입만 — GIL 아래에서 안전하고, 읽는 쪽은 UI 한 곳뿐이라
+        # 락이 필요 없다. 여기서 st.* 를 호출하면 안 된다.
+        job["done"] = done
+        job["total"] = total
+
+    def _run() -> None:
+        try:
+            job["result"] = translate_document(
+                in_path=params["in_path"],
+                out_path=params["out_path"],
+                glossary_rows=params["glossary_rows"],
+                pattern_rows=params["pattern_rows"],
+                api_key=OPENAI_API_KEY,
+                enable_cache=params["enable_cache"],
+                enable_qa=params["enable_qa"],
+                translation_mode=params["translation_mode"],
+                progress_callback=_on_progress,
+                ui_text_overrides=params["ui_overrides"] or None,
+            )
+            job["status"] = "finished"
+        except Exception as e:  # 스레드에서 새는 예외는 UI가 볼 수 없다
+            job["error"] = str(e)
+            job["status"] = "error"
+
+    threading.Thread(target=_run, name=f"translate-{job_id}", daemon=True).start()
+    return job
+
+
+def render_translation_progress() -> None:
+    """번역 중 화면 — 진행률만 그리고, 끝나면 로그를 남기고 Step 3으로."""
+    job = get_translation_job(st.session_state.get("translate_job_id"))
+
+    def _clear_job_state() -> None:
+        st.session_state.translating_now = False
+        st.session_state.pop("translate_job_id", None)
+
+    if job is None:
+        # 잡이 사라졌다 = 앱 프로세스가 재시작됐다(데몬 스레드는 함께 죽는다).
+        # 단순 rerun으로는 여기 오지 않는다 — 레지스트리가 모듈 전역이므로.
+        _clear_job_state()
+        st.session_state.pop("pending_translate", None)
+        st.error("앱이 재시작되어 번역이 중단되었습니다. 파일을 다시 올리고 시도해주세요.")
+        if st.button("돌아가기", type="primary"):
+            st.rerun()
+        return
+
+    label = "번역/QA 진행 중" if st.session_state.enable_qa else "번역 중"
+    done, total = job["done"], job["total"]
+
+    st.progress(int(done / total * 100) if total else 0)
+    st.caption(f"{label}... {done}/{total}" if total else f"{label}... 문서 분석 중")
+    st.caption("⏳ 연결이 잠깐 끊겨도 번역은 서버에서 계속 진행됩니다.")
+
+    if job["status"] == "running":
+        # 폴링 — 이 rerun은 위 st.stop() 덕분에 진행률 영역만 다시 그린다.
+        time.sleep(1.0)
+        st.rerun()
+        return
+
+    # ── 종료 처리 ────────────────────────────────────────────────
+    _clear_job_state()
+    pending = st.session_state.pop("pending_translate", None) or {}
+    params = job["params"]
+
+    if job["status"] == "error":
+        st.error(f"오류: {job['error']}")
+        if st.button("돌아가기", type="primary"):
+            st.rerun()
+        return
+
+    result = job["result"]
+    st.session_state.last_result = result
+    st.session_state.last_output_path = params["out_path"]
+    st.session_state.last_output_filename = params["output_filename"]
+
+    # 번역 로그 자동 저장
+    try:
+        st.session_state.last_log_id = create_log(
+            user=st.session_state.current_user,
+            product=st.session_state.selected_product or "",
+            translation_mode=st.session_state.translation_mode or "",
+            source_file=pending.get("uploaded_name") or Path(params["in_path"]).name,
+            output_file=params["output_filename"],
+            ui_text_overrides=params["ui_overrides"] or {},
+            metrics=result,
+            note="",
+        )
+    except Exception as log_err:
+        st.warning(f"로그 저장 중 경고: {log_err}")
+
+    # 임시 상태 정리
+    st.session_state.pop("ui_text_mapping_rows", None)
+    st.session_state.pop("ui_text_source_sig", None)
+    st.session_state.pop("ui_text_input_path", None)
+
+    st.session_state.step = 3
+    st.rerun()
 
 
 # ─────────────────────────────────────────────
@@ -1183,6 +1326,14 @@ if st.session_state.step == 2:
         st.session_state.enable_qa,
     )
 
+    # ── 번역 중이면 진행률만 그리고 끝낸다 ────────────────────────────
+    # 여기서 끊어야 (1) 1초마다 도는 폴링 rerun이 아래의 DB 로드/볼드
+    # 추출을 반복하지 않고, (2) 번역 중에 살아있는 업로더·data_editor를
+    # 건드려 rerun이 나는 사고도 원천 차단된다.
+    if st.session_state.get("translating_now"):
+        render_translation_progress()
+        st.stop()
+
     # DB에서 직접 로드 — Team + 본인 Personal 합쳐서 사용 (번역 시점)
     _terms_df = load_terms(
         product=st.session_state.selected_product,
@@ -1362,28 +1513,25 @@ if st.session_state.step == 2:
     st.markdown("---")
     col_back, col_translate = st.columns(2)
 
-    # 번역 진행 중 플래그 — True면 두 버튼 모두 비활성, progress 영역만 표시.
-    _translating = bool(st.session_state.get("translating_now"))
-
     with col_back:
-        if st.button("이전", use_container_width=True, disabled=_translating):
+        if st.button("이전", use_container_width=True):
             _try_navigate({"step": 1})
 
     with col_translate:
         translate_clicked = st.button(
-            "번역 시작" if not _translating else "번역 진행 중…",
+            "번역 시작",
             type="primary",
             use_container_width=True,
-            disabled=(uploaded_docx is None) or _translating,
+            disabled=(uploaded_docx is None),
         )
 
-    # 클릭 시점: 플래그만 set하고 rerun → 다음 렌더에서 button이 disabled로 그려지고
-    # 그 직후 _translating 분기에서 실제 번역 실행.
-    if translate_clicked and not _translating:
+    # 클릭 시점에 백그라운드 잡을 띄우고 rerun → 다음 렌더부터는 위쪽
+    # translating_now 분기가 진행률만 그린다. 번역 자체는 스크립트 실행과
+    # 무관하게 스레드에서 계속 돌기 때문에 rerun이 나도 재시작되지 않는다.
+    if translate_clicked:
         if uploaded_docx is None:
             st.error("Word 파일을 업로드하세요.")
         else:
-            # 매핑 입력값을 미리 dict로 저장 (실행 분기에서 사용)
             _ui_overrides_pending = {}
             if ui_mapping_df is not None and not ui_mapping_df.empty:
                 for _, row in ui_mapping_df.iterrows():
@@ -1391,87 +1539,35 @@ if st.session_state.step == 2:
                     en = str(row.get("EN (입력)", "") or "").strip()
                     if ko and en:
                         _ui_overrides_pending[ko] = en
-            st.session_state.pending_translate = {
-                "uploaded_name": uploaded_docx.name,
-                "ui_overrides": _ui_overrides_pending,
-            }
-            st.session_state.translating_now = True
-            st.rerun()
 
-    if _translating:
-        _pending = st.session_state.get("pending_translate") or {}
-        if uploaded_docx is None:
-            st.session_state.translating_now = False
-            st.session_state.pop("pending_translate", None)
-            st.error("Word 파일을 찾을 수 없습니다. 다시 업로드해주세요.")
-        else:
+            # 업로드 파일 저장은 반드시 메인 스레드에서 — UploadedFile은
+            # 스크립트 실행에 묶인 객체라 백그라운드 스레드로 넘기지 않는다.
             if saved_input_path is None or not saved_input_path.exists():
                 saved_input_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
-            input_path = saved_input_path
-            output_filename = make_default_output_filename(
+
+            _output_filename = make_default_output_filename(
                 st.session_state.selected_product,
-                _pending.get("uploaded_name") or uploaded_docx.name,
+                uploaded_docx.name,
             )
-            output_path = OUTPUT_DIR / output_filename
-            ui_overrides = _pending.get("ui_overrides") or {}
-
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            label = "번역/QA 진행 중" if st.session_state.enable_qa else "번역 중"
-
-            def update_progress(done, total):
-                progress = int((done / total) * 100) if total else 0
-                progress_bar.progress(progress)
-                status_text.text(f"{label}... {done}/{total}")
-
-            try:
-                result = translate_document(
-                    in_path=str(input_path),
-                    out_path=str(output_path),
-                    glossary_rows=glossary_rows,
-                    pattern_rows=pattern_rows,
-                    api_key=OPENAI_API_KEY,
-                    enable_cache=st.session_state.enable_cache,
-                    enable_qa=st.session_state.enable_qa,
-                    translation_mode=st.session_state.translation_mode,
-                    progress_callback=update_progress,
-                    ui_text_overrides=ui_overrides or None,
-                )
-
-                st.session_state.last_result = result
-                st.session_state.last_output_path = str(output_path)
-                st.session_state.last_output_filename = output_filename
-
-                # 번역 로그 자동 저장
-                try:
-                    new_log_id = create_log(
-                        user=st.session_state.current_user,
-                        product=st.session_state.selected_product or "",
-                        translation_mode=st.session_state.translation_mode or "",
-                        source_file=_pending.get("uploaded_name") or uploaded_docx.name,
-                        output_file=output_filename,
-                        ui_text_overrides=ui_overrides or {},
-                        metrics=result,
-                        note="",
-                    )
-                    st.session_state.last_log_id = new_log_id
-                except Exception as log_err:
-                    st.warning(f"로그 저장 중 경고: {log_err}")
-
-                # 임시 상태 정리
-                st.session_state.pop("ui_text_mapping_rows", None)
-                st.session_state.pop("ui_text_source_sig", None)
-                st.session_state.pop("ui_text_input_path", None)
-                st.session_state.pop("pending_translate", None)
-                st.session_state.translating_now = False
-
-                st.session_state.step = 3
-                st.rerun()
-
-            except Exception as e:
-                st.session_state.translating_now = False
-                st.session_state.pop("pending_translate", None)
-                st.error(f"오류: {e}")
+            _job_id = uuid.uuid4().hex
+            start_translation_job(
+                _job_id,
+                {
+                    "in_path": str(saved_input_path),
+                    "out_path": str(OUTPUT_DIR / _output_filename),
+                    "output_filename": _output_filename,
+                    "glossary_rows": glossary_rows,
+                    "pattern_rows": pattern_rows,
+                    "enable_cache": st.session_state.enable_cache,
+                    "enable_qa": st.session_state.enable_qa,
+                    "translation_mode": st.session_state.translation_mode,
+                    "ui_overrides": _ui_overrides_pending,
+                },
+            )
+            st.session_state.translate_job_id = _job_id
+            st.session_state.pending_translate = {"uploaded_name": uploaded_docx.name}
+            st.session_state.translating_now = True
+            st.rerun()
 
 
 # ─────────────────────────────────────────────
