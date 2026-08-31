@@ -12,6 +12,8 @@ from docx import Document
 from lxml import etree
 from openai import OpenAI
 
+import markdown_format
+
 # OOXML namespace constants
 _W        = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _XML_SPACE = "http://www.w3.org/XML/1998/namespace"
@@ -45,7 +47,7 @@ H_CLOSE_RE   = re.compile(r"⟦/H(\d+)⟧")
 HL_OPEN_RE   = re.compile(r"⟦HL:([a-zA-Z]+)⟧")
 HL_CLOSE     = "⟦/HL⟧"
 BR_MARKER_RE = re.compile(re.escape(BR_MARKER))
-ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧)")
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧)")
 # ⟦LB⟧ / ⟦TB⟧ 는 run 내부에서 <w:br/> · <w:tab/> 요소로 되살려야 하므로
 # _make_run에서 텍스트를 이 마커 기준으로 쪼갠다.
 LAYOUT_MARKER_SPLIT_RE = re.compile(
@@ -57,7 +59,7 @@ MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d
 # 잡혀 "⟦Hl:yellow⟧ / ⟦/hl⟧"로 훼손되고, 이후 ALL_MARKER_RE 토크나이저가 인식하지
 # 못해 마커가 문서에 그대로 찍힌다.
 ANY_MARKER_SPLIT_RE = re.compile(
-    r"(⟦B⟧|⟦/B⟧|⟦D\d+⟧|⟦G\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧)"
+    r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦G\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧)"
 )
 
 # 안전장치용 정규식 — LLM이 ⟦LB⟧를 파괴적으로 응답해서 "⟦L⟧B⟧" 같은 잔해나
@@ -1752,9 +1754,12 @@ def translate_paragraph_with_patterns(
 Translate Korean to natural, professional English. Produce a draft, then revise it so a native English speaker would not flag awkwardness, grammar errors, or literal-translation tells.
 
 Rules:
-- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦TB⟧.
+- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦I⟧, ⟦/I⟧, ⟦C#⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦TB⟧.
 {tab_rule}- ⟦G#⟧ placeholders are FIXED glossary terms. Output them BYTE-FOR-BYTE unchanged.
   NEVER translate, paraphrase, expand, or substitute a ⟦G#⟧ placeholder with any word.
+- ⟦C#⟧ = a sealed literal (inline code, an escaped character, a URL). Output it
+  BYTE-FOR-BYTE unchanged and keep it at the same position in the sentence.
+- ⟦I⟧…⟦/I⟧ = italic span — translate the text inside, keep the pair around it.
 - ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
 - ⟦H#⟧…⟦/H#⟧ = hyperlink span — translate the text inside, keep the markers around it.
 - ⟦HL:colour⟧…⟦/HL⟧ = highlighted text — translate the inside and keep the markers
@@ -2198,6 +2203,146 @@ Pairs to review:
     return parse_qa_response(resp.output_text)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# 문서 포맷 어댑터
+#
+# 엔진 본체(글로서리 치환, 마커 복구, QA, 후처리)는 전부 순수 문자열 처리라
+# 포맷과 무관하다. 포맷에 묶이는 건 "번역 단위를 어떻게 꺼내고 어떻게 다시
+# 써넣느냐" 두 끝단뿐이므로 그것만 어댑터로 분리한다. 중간 언어는 기존
+# 마크드 텍스트(⟦B⟧ ⟦G#⟧ ⟦H#⟧ …)를 그대로 쓴다.
+# ─────────────────────────────────────────────────────────────────────────
+
+MARKDOWN_EXTENSIONS = (".md", ".markdown", ".mdx")
+SUPPORTED_EXTENSIONS = (".docx",) + MARKDOWN_EXTENSIONS
+
+
+@dataclass
+class TransUnit:
+    """번역 단위 하나. `ref`는 어댑터가 write에서 쓰는 포맷별 부속물."""
+    src: str                 # 마크드 텍스트 — LLM이 보는 유일한 것
+    is_heading: bool         # 포맷 고유 판정 (docx: 스타일, md: `#`)
+    ref: Any
+
+
+class DocxAdapter:
+    """Word — 기존 동작 그대로. 문단이 곧 번역 단위."""
+
+    def __init__(self, in_path: str):
+        self.in_path = in_path
+        self.doc = None
+
+    def load(self) -> None:
+        self.doc = Document(sanitize_docx(self.in_path))
+
+    def english_samples(self, max_chars: int = 3000) -> List[str]:
+        samples: List[str] = []
+        for p in iter_all_paragraphs(self.doc):
+            text = p.text.strip()
+            if text and not contains_korean(text) and len(text) > 15:
+                samples.append(text)
+            if sum(len(s) for s in samples) >= max_chars:
+                break
+        return samples
+
+    def units(self) -> List[TransUnit]:
+        out: List[TransUnit] = []
+        for p in iter_all_paragraphs(self.doc):
+            marked, drawing_map, hyperlink_map, trailing_lb = paragraph_to_marked_text(p)
+            out.append(TransUnit(
+                src=marked,
+                is_heading=is_heading_paragraph(p),
+                ref=(p, drawing_map, hyperlink_map, trailing_lb),
+            ))
+        return out
+
+    def write(self, unit: TransUnit, translated: str) -> None:
+        p, drawing_map, hyperlink_map, trailing_lb = unit.ref
+        _write_paragraph(p, translated, drawing_map, hyperlink_map, trailing_lb)
+
+    def save(self, out_path: str) -> None:
+        self.doc.save(out_path)
+
+
+class MarkdownAdapter:
+    """
+    Markdown / MDX.
+
+    쓰기를 모아뒀다가 save에서 한 번에 반영한다 — 원문 오프셋 구간을 치환하는
+    방식이라 뒤에서부터 적용해야 앞쪽 좌표가 밀리지 않기 때문.
+    """
+
+    def __init__(self, in_path: str, keep_heading_anchor: bool = True):
+        self.in_path = in_path
+        self.keep_heading_anchor = keep_heading_anchor
+        self.text = ""
+        self.encoding = "utf-8"
+        self.newline = "\n"
+        self.bom = False
+        self.md_units: List[markdown_format.MdUnit] = []
+        self._pending: List[Tuple[markdown_format.MdUnit, str]] = []
+
+    def load(self) -> None:
+        self.text, self.encoding, self.newline, self.bom = markdown_format.read_text(self.in_path)
+        self.md_units = markdown_format.parse_markdown(self.text)
+        self._pending = []
+
+    def english_samples(self, max_chars: int = 3000) -> List[str]:
+        samples: List[str] = []
+        for u in self.md_units:
+            text = re.sub(r"⟦[^⟧]*⟧", "", u.src).strip()
+            if text and not contains_korean(text) and len(text) > 15:
+                samples.append(text)
+            if sum(len(s) for s in samples) >= max_chars:
+                break
+        return samples
+
+    def units(self) -> List[TransUnit]:
+        return [TransUnit(src=u.src, is_heading=u.is_heading, ref=u) for u in self.md_units]
+
+    def write(self, unit: TransUnit, translated: str) -> None:
+        self._pending.append((unit.ref, translated))
+
+    def save(self, out_path: str) -> None:
+        text = markdown_format.apply_translations(
+            self.text, self._pending, keep_anchor=self.keep_heading_anchor
+        )
+        markdown_format.write_text(out_path, text, self.encoding, self.newline, self.bom)
+
+
+def make_adapter(in_path: str):
+    ext = os.path.splitext(in_path)[1].lower()
+    if ext in MARKDOWN_EXTENSIONS:
+        return MarkdownAdapter(in_path)
+    return DocxAdapter(in_path)
+
+
+def extract_bold_terms(in_path: str) -> List[Tuple[str, str]]:
+    """
+    UI 텍스트 매핑 화면용 — 굵게 표시된 한국어 조각과 그 문맥.
+
+    Word 매뉴얼과 Docusaurus 문서 모두 **굵게 = 화면 라벨** 관습을 쓰므로
+    포맷이 달라도 같은 기능이 그대로 성립한다.
+    """
+    ext = os.path.splitext(in_path)[1].lower()
+    if ext not in MARKDOWN_EXTENSIONS:
+        return extract_bold_texts_with_context(in_path)
+
+    text, _, _, _ = markdown_format.read_text(in_path)
+    seen: set = set()
+    result: List[Tuple[str, str]] = []
+    for u in markdown_format.parse_markdown(text):
+        if u.is_heading:
+            continue
+        plain = re.sub(r"⟦[^⟧]+⟧", "", u.src)
+        for match in _BOLD_SEGMENT_RE.finditer(u.src):
+            term = _INNER_MARKER_RE.sub("", match.group(1)).strip()
+            if not term or not contains_korean(term) or term in seen:
+                continue
+            seen.add(term)
+            result.append((term, _make_context_excerpt(plain, term)))
+    return result
+
+
 def translate_document(
     in_path: str,
     out_path: str,
@@ -2238,20 +2383,15 @@ def translate_document(
     glossary_pairs_for_qa = [(e.ko, e.en) for e in glossary_entries] + list(ui_overrides_clean.items())
 
     client = OpenAI(api_key=api_key)
-    doc = Document(sanitize_docx(in_path))
+    adapter = make_adapter(in_path)
+    adapter.load()
     cache: Dict[str, str] = {}
 
     # ── 문서 내 기존 영문 단락 수집 ────────────────────────────────────
     # Pre-pass(extract_doc_style_guide)에서 한 번만 사용되므로 캡을 넉넉히
     # 잡아도 호출당 비용은 고정. v2.0→v2.1처럼 영문이 풍부한 문서에서
     # 가이드 품질을 끌어올리기 위함.
-    english_samples: List[str] = []
-    for p in iter_all_paragraphs(doc):
-        text = p.text.strip()
-        if text and not contains_korean(text) and len(text) > 15:
-            english_samples.append(text)
-        if sum(len(s) for s in english_samples) >= 3000:
-            break
+    english_samples = adapter.english_samples()
 
     # ── Pre-pass: doc-specific style guide 추출 (LLM 1회 호출) ─────────
     style_guide = ""
@@ -2262,20 +2402,20 @@ def translate_document(
             # 가이드 추출 실패는 치명적이지 않음 — 가이드 없이 진행
             style_guide = ""
 
-    paras: List = []
-    marked_texts: List = []
+    # 번역 대상 유닛 — 한국어가 없는 단락/블록은 여기서 걸러진다.
+    # 마크다운에서는 인라인 봉인이 이 판정보다 먼저 끝나 있어야 한다
+    # (`![img](/img/분석실행.png)` 처럼 경로에만 한글이 있는 경우 때문).
+    units: List[TransUnit] = [u for u in adapter.units() if contains_korean(u.src)]
 
-    for p in iter_all_paragraphs(doc):
-        marked_ko, drawing_map, hyperlink_map, trailing_lb = paragraph_to_marked_text(p)
-        if not contains_korean(marked_ko):
-            continue
-        paras.append(p)
-        marked_texts.append((marked_ko, drawing_map, hyperlink_map, trailing_lb))
+    # heading 여부는 여기서 한 번만 확정한다 — 포맷 고유 판정(스타일/`#`)에
+    # 텍스트 휴리스틱을 OR로 얹은 값을 Pass 1·2가 공유한다.
+    for u in units:
+        u.is_heading = u.is_heading or looks_like_heading_text(u.src)
 
-    total_paras = len(paras)
+    total_paras = len(units)
 
     if total_paras == 0:
-        doc.save(out_path)
+        adapter.save(out_path)
         return {
             "input_tokens": TOTAL_INPUT_TOKENS,
             "cached_tokens": TOTAL_CACHED_INPUT_TOKENS,
@@ -2290,24 +2430,23 @@ def translate_document(
     qa_estimated = 0
     if enable_qa:
         seen_for_estimate = set()
-        for idx_e, (src_e, _, _, _) in enumerate(marked_texts):
-            if src_e in seen_for_estimate:
+        for u in units:
+            if u.src in seen_for_estimate:
                 continue
-            seen_for_estimate.add(src_e)
-            if is_heading_paragraph(paras[idx_e]) or looks_like_heading_text(src_e):
+            seen_for_estimate.add(u.src)
+            if u.is_heading:
                 continue
             qa_estimated += 1
     total_work = total_paras + qa_estimated
 
-    # ── Pass 1: 번역 (XML 쓰기는 미루고 메모리에 누적) ─────────────────
+    # ── Pass 1: 번역 (쓰기는 미루고 메모리에 누적) ────────────────────
     pass1_results: List[Dict] = []
 
-    for idx, p in enumerate(paras):
-        src, drawing_map, hyperlink_map, trailing_lb = marked_texts[idx]
-
-        # heading 여부를 미리 계산 — UI 매핑 적용 여부와 case-sensitive 재복원
-        # 여부를 이 값으로 갈라야 하기 때문.
-        is_heading = is_heading_paragraph(p) or looks_like_heading_text(src)
+    for idx, unit in enumerate(units):
+        src = unit.src
+        # heading 여부는 위에서 확정됨 — UI 매핑 적용 여부와 case-sensitive
+        # 재복원 여부를 이 값으로 가른다.
+        is_heading = unit.is_heading
 
         if enable_cache and src in cache:
             translated = cache[src]
@@ -2408,12 +2547,9 @@ def translate_document(
                 cache[src] = translated
 
         pass1_results.append({
-            "p": p,
+            "unit": unit,
             "src": src,
             "translated": translated,
-            "drawing_map": drawing_map,
-            "hyperlink_map": hyperlink_map,
-            "trailing_lb": trailing_lb,
         })
 
         if progress_callback:
@@ -2429,7 +2565,7 @@ def translate_document(
         qa_items: List[Dict] = []
         for src, group in src_groups.items():
             rep = group[0]
-            if is_heading_paragraph(rep["p"]) or looks_like_heading_text(src):
+            if rep["unit"].is_heading:
                 continue
             qa_items.append({
                 "src": src,
@@ -2488,14 +2624,11 @@ def translate_document(
             if progress_callback:
                 progress_callback(total_paras + qa_done, total_work)
 
-    # ── Final: 모든 결과를 한 번에 XML로 쓰기 ─────────────────────────
+    # ── Final: 모든 결과를 한 번에 쓰기 ───────────────────────────────
     for r in pass1_results:
-        _write_paragraph(
-            r["p"], r["translated"], r["drawing_map"], r["hyperlink_map"],
-            r["trailing_lb"],
-        )
+        adapter.write(r["unit"], r["translated"])
 
-    doc.save(out_path)
+    adapter.save(out_path)
 
     return {
         "input_tokens": TOTAL_INPUT_TOKENS,

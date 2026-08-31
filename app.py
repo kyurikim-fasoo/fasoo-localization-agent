@@ -33,7 +33,7 @@ from services.translation_logs import (
 )
 from services.jobs import get_job, start_job
 from services.users import add_user, list_users
-from translator_engine import extract_bold_texts_with_context
+from translator_engine import MARKDOWN_EXTENSIONS, extract_bold_terms
 
 
 load_dotenv()
@@ -96,9 +96,25 @@ def estimate_cost_usd(input_tokens: int, output_tokens: int) -> float:
 
 
 def make_default_output_filename(product: str, source_name: str) -> str:
-    source_stem = Path(source_name).stem
+    # 확장자는 원본을 따라간다 — .mdx 문서를 .docx로 내보내면 안 되므로.
+    source_path = Path(source_name)
+    suffix = source_path.suffix or ".docx"
     safe_product = product.strip().replace(" ", "_")
-    return f"{source_stem}_{safe_product}_en.docx"
+    return f"{source_path.stem}_{safe_product}_en{suffix}"
+
+
+# 다운로드 버튼의 Content-Type. 모르는 확장자는 브라우저가 알아서 처리하도록
+# 범용 바이너리로 둔다.
+_MIME_BY_SUFFIX = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".mdx": "text/markdown",
+}
+
+
+def mime_for(filename: str) -> str:
+    return _MIME_BY_SUFFIX.get(Path(filename).suffix.lower(), "application/octet-stream")
 
 
 # ─────────────────────────────────────────────
@@ -1260,7 +1276,8 @@ if st.session_state.app_mode == "로그":
 if st.session_state.step == 2:
     st.subheader("Step 2. 업로드 & UI 텍스트 매핑")
     st.caption(
-        "Word 파일을 올리면 **볼드(Bold)로 표시된 한국어**를 자동으로 뽑아 표에 보여드립니다. "
+        "Word(.docx) 또는 Markdown(.md/.mdx) 문서를 올리면 **볼드(Bold)로 표시된 한국어**를 "
+        "자동으로 뽑아 표에 보여드립니다. "
         "그대로 쓰고 싶은 영문 표기가 있으면 EN 칸에 입력하세요. "
         "비워두면 LLM이 알아서 번역하고, 입력한 항목은 그 표기 그대로 사용됩니다. "
         "이 매핑은 자동으로 **[로그] 메뉴에 기록**되어, 나중에 같은 문서를 다시 번역할 때 불러올 수 있어요."
@@ -1300,7 +1317,7 @@ if st.session_state.step == 2:
 
     uploaded_docx = st.file_uploader(
         "업로드 또는 끌어서 놓기",
-        type=["docx"],
+        type=["docx", "md", "markdown", "mdx"],
         label_visibility="collapsed",
     )
 
@@ -1316,7 +1333,7 @@ if st.session_state.step == 2:
         if st.session_state.get("ui_text_source_sig") != file_sig:
             try:
                 tmp_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
-                bold_with_ctx = extract_bold_texts_with_context(str(tmp_path))
+                bold_with_ctx = extract_bold_terms(str(tmp_path))
 
                 # 글로서리 자동 매칭 (KO 일치)
                 _glossary_lookup = {
@@ -1476,7 +1493,7 @@ if st.session_state.step == 2:
     # 무관하게 스레드에서 계속 돌기 때문에 rerun이 나도 재시작되지 않는다.
     if translate_clicked:
         if uploaded_docx is None:
-            st.error("Word 파일을 업로드하세요.")
+            st.error("문서를 업로드하세요.")
         else:
             _ui_overrides_pending = {}
             if ui_mapping_df is not None and not ui_mapping_df.empty:
@@ -1549,7 +1566,7 @@ elif st.session_state.step == 3:
             label="문서 다운로드",
             data=f,
             file_name=output_filename,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            mime=mime_for(output_filename),
             type="primary",
             use_container_width=True,
         )
