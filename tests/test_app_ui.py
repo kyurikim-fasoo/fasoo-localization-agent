@@ -145,6 +145,43 @@ check("예외 없음", not at.exception, str(at.exception))
 check("업로더 렌더", len(at.get("file_uploader")) == 1)
 check("사이드바 메뉴 버튼 존재", "Glossary 추출" in [b.label for b in at.button])
 
+print("[8] Glossary 추출 — 분석 결과 화면과 등재 버튼")
+import pandas as pd  # noqa: E402
+from services import catalog as ct  # noqa: E402
+
+_pick = ct.pick_languages([
+    ct.parse_json("ko.json", {"a.x": "취약점 점검", "a.y": "무한 재귀 호출"}),
+    ct.parse_json("en.json", {"a.x": "Vulnerability check", "a.y": "Infinite recursive call"}),
+])
+_res = ct.analyze(_pick)
+
+
+class _FakeParsed:
+    name = "ko.json"
+
+    def describe(self):
+        return "테스트"
+
+
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.session_state["catalog_result"] = _res
+at.session_state["catalog_parsed"] = [_FakeParsed()]
+at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+at.session_state["catalog_sig"] = "seeded"
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+check("업로드 없이도 결과 화면이 뜸", len(at.metric) >= 4,
+      f"metric {len(at.metric)}개")
+check("탭 3개 렌더", len(at.tabs) >= 3, f"tabs {len(at.tabs)}개")
+_texts = " ".join(str(m.value) for m in at.markdown) + " ".join(str(i.value) for i in at.info)
+check("등재 방법 안내 노출", "적용" in _texts and "체크" in _texts)
+check("선택 전에는 안내가 뜸", any("선택한 항목이 없습니다" in str(i.value) for i in at.info),
+      str([str(i.value)[:40] for i in at.info]))
+check("등재 버튼은 선택 후에만", not any("등재" in b.label for b in at.button),
+      str([b.label for b in at.button]))
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

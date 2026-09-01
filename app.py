@@ -1156,7 +1156,36 @@ if st.session_state.app_mode == "Glossary 추출":
         key="catalog_uploader",
     )
 
-    if not uploaded_catalogs:
+    if uploaded_catalogs:
+        _sig = "|".join(f"{f.name}:{f.size}" for f in uploaded_catalogs)
+        if st.session_state.get("catalog_sig") != _sig:
+            # 6MB짜리 JSON을 rerun마다 다시 파싱하지 않도록 시그니처로 캐시
+            try:
+                _parsed = []
+                for f in uploaded_catalogs:
+                    _parsed.append(catalog.parse_json(f.name, json.loads(f.getvalue())))
+                _pick = catalog.pick_languages(_parsed)
+                st.session_state.catalog_parsed = _parsed
+                st.session_state.catalog_pick_labels = (
+                    _pick.ko_label, _pick.en_label, _pick.ratios
+                )
+                st.session_state.catalog_result = catalog.analyze(
+                    _pick,
+                    catalog.existing_terms_index(
+                        load_terms(current_user=st.session_state.current_user)
+                    ),
+                )
+                st.session_state.catalog_sig = _sig
+                st.session_state.pop("catalog_error", None)
+            except Exception as e:
+                st.session_state.catalog_error = str(e)
+                st.session_state.catalog_sig = _sig
+                st.session_state.pop("catalog_result", None)
+
+    # 분석 결과는 session_state에 남겨둔다 — 다른 메뉴에 다녀와도 유지된다.
+    if st.session_state.get("catalog_error"):
+        st.error(f"파일을 읽지 못했습니다 — {st.session_state.catalog_error}")
+    elif st.session_state.get("catalog_result") is None:
         with st.container(border=True):
             st.markdown("##### 지원하는 파일 형태")
             st.markdown(
@@ -1169,33 +1198,8 @@ if st.session_state.app_mode == "Glossary 추출":
                 "파일명에 언어 표시가 없어도 됩니다."
             )
     else:
-        _sig = "|".join(f"{f.name}:{f.size}" for f in uploaded_catalogs)
-        if st.session_state.get("catalog_sig") != _sig:
-            # 6MB짜리 JSON을 rerun마다 다시 파싱하지 않도록 시그니처로 캐시
-            try:
-                _parsed = []
-                for f in uploaded_catalogs:
-                    _parsed.append(catalog.parse_json(f.name, json.loads(f.getvalue())))
-                _pick = catalog.pick_languages(_parsed)
-                _result = catalog.analyze(
-                    _pick,
-                    catalog.existing_terms_index(
-                        load_terms(current_user=st.session_state.current_user)
-                    ),
-                )
-                st.session_state.catalog_parsed = _parsed
-                st.session_state.catalog_pick_labels = (_pick.ko_label, _pick.en_label, _pick.ratios)
-                st.session_state.catalog_result = _result
-                st.session_state.catalog_sig = _sig
-                st.session_state.pop("catalog_error", None)
-            except Exception as e:
-                st.session_state.catalog_error = str(e)
-                st.session_state.catalog_sig = _sig
-                st.session_state.pop("catalog_result", None)
-
-        if st.session_state.get("catalog_error"):
-            st.error(f"파일을 읽지 못했습니다 — {st.session_state.catalog_error}")
-        elif st.session_state.get("catalog_result") is not None:
+        # 결과 블록 — 들여쓰기 유지를 위한 컨테이너
+        with st.container():
             _result = st.session_state.catalog_result
             _ko_label, _en_label, _ratios = st.session_state.catalog_pick_labels
             _stats = _result.stats
@@ -1311,12 +1315,26 @@ if st.session_state.app_mode == "Glossary 추출":
                             help="후보가 여러 개인 행은 여기서 고르세요.",
                         )
 
+                st.markdown(
+                    "**등재하려면** 표 맨 왼쪽 `적용` 칸을 체크하세요 — "
+                    "체크한 행만 아래 버튼으로 글로서리에 들어갑니다. "
+                    "여러 개를 한 번에 넣으려면 위의 `현재 목록 전체 선택`을 쓰세요."
+                )
                 edited = st.data_editor(
                     edit_df, use_container_width=True, hide_index=True, height=420,
                     column_config=col_cfg, num_rows="fixed",
                     key=f"catalog_edit_{key}_{int(select_all)}_{q.strip()}",
                 )
                 chosen = edited[edited["적용"] == True]  # noqa: E712
+
+                if chosen.empty:
+                    # 비활성 버튼만 덩그러니 두면 '기능이 없다'고 오해하기 쉽다.
+                    st.info(
+                        "아직 선택한 항목이 없습니다. 위 표의 `적용`을 체크하면 "
+                        "여기에 등재 버튼이 나타납니다.",
+                        icon="👆",
+                    )
+                    return
 
                 if "기존대조" in chosen.columns:
                     _n_conflict = int((chosen["기존대조"] == "충돌(기존)").sum())
@@ -1328,8 +1346,8 @@ if st.session_state.app_mode == "Glossary 추출":
                         )
 
                 if st.button(
-                    f"선택한 {len(chosen)}개 등재",
-                    type="primary", disabled=chosen.empty,
+                    f"선택한 {len(chosen):,}개를 [{_extract_product}] 제품 글로서리에 등재",
+                    type="primary",
                     key=f"catalog_save_{key}", use_container_width=True,
                 ):
                     try:
