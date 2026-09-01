@@ -102,10 +102,27 @@ st_map = dict(zip(r8.labels["KO"], r8.labels["기존대조"]))
 check("영어가 다르면 충돌", st_map["문서"] == "충돌(기존)", st_map.get("문서"))
 check("없던 건 신규", st_map["취약점 점검"] == "신규", st_map.get("취약점 점검"))
 
-print("[9] 용어 후보 필터")
-check("조사로 끝나면 제외", not ct._looks_like_term("보안 취약점 검출부터", "x"))
-check("두 어절 이상은 포함", ct._looks_like_term("취약점 점검", "x"))
-check("영문만이면 제외", not ct._looks_like_term("SQL", "SQL"))
+print("[9] 용어 후보 필터 — '길면 용어'가 아니라 '반복되는 복합어'")
+check("조사로 끝나면 제외", not ct._looks_like_term("보안 취약점 검출부터"))
+check("두 어절 복합어는 포함", ct._looks_like_term("취약점 점검"))
+check("영문만이면 제외", not ct._looks_like_term("SQL"))
+check("한 어절은 제외(일반어가 대부분)", not ct._looks_like_term("함수"))
+check("너무 길면 제외", not ct._looks_like_term("공격 대상이 될 수 있는 보안 취약점 검출"))
+
+# 빈도가 낮은 표현은 용어로 보지 않는다
+pick9 = ct.pick_languages([
+    ct.parse_json("ko.json", {f"k{i}": "취약점 점검 결과" for i in range(5)} | {"z": "단발 표현"}),
+    ct.parse_json("en.json", {f"k{i}": "Vulnerability check result" for i in range(5)} | {"z": "One off"}),
+])
+r9 = ct.analyze(pick9)
+check("반복되는 복합어는 뽑힘", "취약점 점검 결과" in set(r9.terms["KO"]), str(list(r9.terms["KO"])))
+check("빈도 컬럼 존재", "빈도" in r9.terms.columns, str(list(r9.terms.columns)))
+check("빈도 내림차순 정렬",
+      list(r9.terms["빈도"]) == sorted(r9.terms["빈도"], reverse=True))
+
+print("[9-b] 표기 충돌 목록")
+conf9 = ct.conflict_rows(r7.labels)
+check("충돌만 추려짐", len(conf9) == 1 and conf9.iloc[0]["KO"] == "확인", str(len(conf9)))
 
 print("[10] 엑셀 내보내기 — 마스터 업로드와 같은 시트/컬럼")
 xlsx = ct.to_excel(r8.terms, r8.patterns, product="Sparrow")

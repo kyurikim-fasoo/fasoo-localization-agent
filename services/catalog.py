@@ -229,19 +229,51 @@ def is_label(ko: str, en: str) -> bool:
     return len(ko) <= LABEL_MAX_KO_CHARS and len(en.split()) <= LABEL_MAX_EN_WORDS
 
 
-def _looks_like_term(ko: str, en: str) -> bool:
-    """
-    글로서리에 넣을 만한 '용어'인가.
+# ── 용어성(termhood) 판정 기준 ────────────────────────────────────────
+# 처음에는 '길면 용어'로 뽑았는데 정반대였다. 길수록 오히려 설명문이고,
+# 진짜 제품 용어는 **짧은 복합어가 문서 곳곳에 반복**되는 쪽이다.
+#   길이 정렬:  '공격 대상이 될 수 있는 보안 취약점 검출부터'  ← 용어 아님
+#   빈도 정렬:  'SQL 삽입', '크로스 사이트 스크립팅', '경로 조작'  ← 용어
+# 그렇다고 빈도만 쓰면 '수 / 및 / 정보' 같은 일반어가 올라오므로, 복합어
+# 조건(2어절 이상)을 함께 건다.
+TERM_MIN_WORDS = 2
+TERM_MAX_WORDS = 4
+TERM_MAX_CHARS = 18
+TERM_MIN_FREQ = 3          # 카탈로그 전체에서 이만큼은 반복돼야 용어로 본다
 
-    '확인'·'저장' 같은 짧은 동작어는 문맥마다 영어가 달라지는데, 글로서리에
-    올리면 본문 어디서나 치환돼 사고가 난다. 두 어절 이상이거나 충분히 긴
-    복합어만 후보로 올린다.
-    """
+_WORD_RE = re.compile(r"[가-힣A-Za-z0-9]+")
+
+
+def _build_word_index(texts: List[str]) -> Dict[str, set]:
+    """어절 → 등장 항목 인덱스. 후보마다 3만 건을 전수 검색하지 않기 위함."""
+    inv: Dict[str, set] = defaultdict(set)
+    for i, t in enumerate(texts):
+        for w in _WORD_RE.findall(t):
+            inv[w].add(i)
+    return inv
+
+
+def _corpus_freq(ko: str, inv: Dict[str, set], texts: List[str]) -> int:
+    """카탈로그 전체에서 이 표현이 (부분 문자열로) 몇 번 나오는가."""
+    words = _WORD_RE.findall(ko)
+    if not words:
+        return 0
+    sets = [inv.get(w, set()) for w in words]
+    if not all(sets):
+        return 0
+    hit = set.intersection(*sets)
+    return sum(1 for i in hit if ko in texts[i])
+
+
+def _looks_like_term(ko: str) -> bool:
+    """모양만으로 거르는 1차 조건 — 빈도는 별도로 본다."""
     if not _KOREAN_RE.search(ko):
         return False
     if _JOSA_TAIL_RE.search(_ko_core(ko)):
         return False
-    return len(ko.split()) >= 2 or len(ko) >= 5
+    if len(ko) > TERM_MAX_CHARS:
+        return False
+    return TERM_MIN_WORDS <= len(_WORD_RE.findall(ko)) <= TERM_MAX_WORDS
 
 
 @dataclass
@@ -299,13 +331,21 @@ def analyze(pick: LanguagePick,
         labels = labels.sort_values(
             ["후보수", "출현"], ascending=[False, False]
         ).reset_index(drop=True)
-        terms = labels[
-            (labels["후보수"] == 1)
-            & labels.apply(lambda r: _looks_like_term(r["KO"], r["EN"]), axis=1)
+
+        # 용어 후보 — 1:1로 대응되고, 복합어이고, 문서 곳곳에 반복되는 것.
+        shortlist = labels[
+            (labels["후보수"] == 1) & labels["KO"].map(_looks_like_term)
         ].copy()
-        terms = terms.sort_values(
-            "KO", key=lambda s: s.str.len(), ascending=False
-        ).reset_index(drop=True)
+        if not shortlist.empty:
+            corpus = [v.strip() for v in pick.ko.values() if v.strip()]
+            inv = _build_word_index(corpus)
+            shortlist["빈도"] = shortlist["KO"].map(
+                lambda k: _corpus_freq(k, inv, corpus)
+            )
+            terms = shortlist[shortlist["빈도"] >= TERM_MIN_FREQ].copy()
+            terms = terms.sort_values("빈도", ascending=False).reset_index(drop=True)
+        else:
+            terms = shortlist
     else:
         terms = labels.copy()
 
@@ -341,6 +381,94 @@ def existing_terms_index(terms_df: pd.DataFrame) -> Dict[str, set]:
         if ko and en:
             idx[ko].add(en)
     return dict(idx)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 표기 충돌 정리 — 여기만 LLM을 쓴다
+#
+# 같은 한국어에 영어가 여러 개인 항목은 두 종류가 섞여 있다.
+#   ① 표기 불일치  '검출 규칙' → Detecting Rule / Detecting rules / Detection rule
+#                  단복수·대소문자·활용형 차이일 뿐이라 하나로 통일하면 된다.
+#   ② 문맥 분기    '확인' → OK / Check / Confirm
+#                  버튼이냐 규칙이냐에 따라 진짜로 다른 단어다.
+# ①을 사람이 하나씩 고르는 건 낭비고, ②를 기계가 정하는 건 위험하다.
+# 그래서 LLM은 **둘을 가려내고 ①의 대표형만 제안**하며, ②는 사람에게 넘긴다.
+# ──────────────────────────────────────────────────────────────────────
+
+_RESOLVE_RE = re.compile(r"^\[(\d+)\]\s*(UNIFY|SPLIT)\s*\|([^|]*)\|(.*)$", re.MULTILINE)
+
+
+def conflict_rows(labels: pd.DataFrame) -> pd.DataFrame:
+    """표기가 갈리는 항목만."""
+    if labels.empty:
+        return labels
+    return labels[labels["후보수"] > 1].copy()
+
+
+def resolve_conflicts(client, rows: pd.DataFrame, model: str = "gpt-5.2",
+                      batch_size: int = 25) -> Dict[str, dict]:
+    """
+    충돌 항목을 LLM이 '표기 통일'과 '문맥 분기'로 가른다.
+
+    Returns {ko: {"kind": "UNIFY"|"SPLIT", "pick": str, "reason": str}}
+    실패한 배치는 결과에서 빠진다 — 없는 항목은 사람이 직접 고르면 된다.
+    """
+    out: Dict[str, dict] = {}
+    # itertuples는 'EN 후보'처럼 공백/한글이 든 컬럼명을 망가뜨리므로 dict로 뽑는다
+    items: List[dict] = rows.to_dict("records")
+    for start in range(0, len(items), batch_size):
+        batch = items[start:start + batch_size]
+        block = "\n".join(
+            f"[{i}] KO: {it['KO']}\n"
+            f"    candidates: {it.get('EN 후보') or it.get('EN', '')}\n"
+            f"    used in key namespaces: {it.get('문맥(key)', '')}"
+            for i, it in enumerate(batch)
+        )
+        prompt = f"""You are normalising a software UI string catalogue.
+
+Each item is one Korean UI label that appears with SEVERAL different English
+spellings across the product. Decide which of two situations it is:
+
+UNIFY — the candidates are the SAME term written inconsistently
+        (capitalisation, singular/plural, verb form, word order).
+        Choose the single best canonical English form.
+        Prefer: Title Case for UI labels, singular unless the label really
+        denotes a list, and the noun form over the -ing form.
+
+SPLIT  — the candidates genuinely mean DIFFERENT things depending on which
+        screen the label is on (e.g. a confirm button vs a check rule).
+        A human must decide per screen, so do NOT choose.
+
+Output EXACTLY one line per item, nothing else:
+[N] UNIFY|<chosen English>|<short reason in Korean>
+[N] SPLIT||<short reason in Korean>
+
+Items:
+{block}
+""".strip()
+
+        try:
+            resp = client.responses.create(
+                model=model,
+                input=prompt,
+                reasoning={"effort": "low"},
+                text={"verbosity": "low"},
+            )
+            text = resp.output_text
+        except Exception:
+            continue
+
+        for m in _RESOLVE_RE.finditer(text):
+            idx, kind, pick, reason = m.groups()
+            i = int(idx)
+            if i >= len(batch):
+                continue
+            out[batch[i]["KO"]] = {
+                "kind": kind,
+                "pick": pick.strip(),
+                "reason": reason.strip(),
+            }
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────

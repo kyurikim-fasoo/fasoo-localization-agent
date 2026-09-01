@@ -149,9 +149,14 @@ print("[8] Glossary 추출 — 분석 결과 화면과 등재 버튼")
 import pandas as pd  # noqa: E402
 from services import catalog as ct  # noqa: E402
 
+# 용어 후보는 '반복되는 복합어'만 남으므로 같은 표현을 여러 key에 깔아준다
+_ko_seed = {f"a.x{i}": "취약점 점검" for i in range(4)}
+_en_seed = {f"a.x{i}": "Vulnerability check" for i in range(4)}
+_ko_seed["b.y"] = "분석을 시작합니다."
+_en_seed["b.y"] = "Analysis started."
 _pick = ct.pick_languages([
-    ct.parse_json("ko.json", {"a.x": "취약점 점검", "a.y": "무한 재귀 호출"}),
-    ct.parse_json("en.json", {"a.x": "Vulnerability check", "a.y": "Infinite recursive call"}),
+    ct.parse_json("ko.json", _ko_seed),
+    ct.parse_json("en.json", _en_seed),
 ])
 _res = ct.analyze(_pick)
 
@@ -174,7 +179,7 @@ at.run()
 check("예외 없음", not at.exception, str(at.exception))
 check("업로드 없이도 결과 화면이 뜸", len(at.metric) >= 4,
       f"metric {len(at.metric)}개")
-check("탭 3개 렌더", len(at.tabs) >= 3, f"tabs {len(at.tabs)}개")
+check("탭 2개(용어·패턴) 렌더", len(at.tabs) == 2, f"tabs {len(at.tabs)}개")
 _texts = " ".join(str(m.value) for m in at.markdown) + " ".join(str(i.value) for i in at.info)
 check("등재 방법 안내 노출", "적용" in _texts and "체크" in _texts)
 check("선택 전에는 안내가 뜸", any("선택한 항목이 없습니다" in str(i.value) for i in at.info),

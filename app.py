@@ -1233,10 +1233,9 @@ if st.session_state.app_mode == "Glossary 추출":
                     icon="ℹ️",
                 )
 
-            _tab_terms, _tab_labels, _tab_patterns = st.tabs(
-                [f"용어 후보 ({_stats['용어후보']:,})",
-                 f"UI 라벨 ({_stats['라벨 고유KO']:,})",
-                 f"패턴 후보 ({_stats['패턴후보']:,})"]
+            # 탭 순서는 [Glossary 관리]와 맞춘다 — 용어, 패턴.
+            _tab_terms, _tab_patterns = st.tabs(
+                [f"용어 ({_stats['용어후보']:,})", f"패턴 ({_stats['패턴후보']:,})"]
             )
 
             # 등재 대상 설정 — 탭 공통
@@ -1394,26 +1393,77 @@ if st.session_state.app_mode == "Glossary 추출":
 
             with _tab_terms:
                 st.caption(
-                    "1:1로 대응되고 용어처럼 보이는 것만 추렸습니다. "
-                    "'확인'·'저장' 같은 짧은 동작어는 문맥마다 번역이 달라 제외했습니다."
+                    "영어 표기가 하나로 굳어 있고, 문서 곳곳에 **반복해서 나오는 복합어**만 "
+                    "추렸습니다. `빈도`는 카탈로그 전체에서 그 표현이 나온 횟수입니다 — "
+                    "높을수록 이 제품의 핵심 용어입니다."
                 )
                 _render_table(_result.terms,
-                              ["KO", "EN", "문맥(key)", "기존대조", "DNT"],
+                              ["빈도", "KO", "EN", "문맥(key)", "기존대조", "DNT"],
                               "terms", "term")
-
-            with _tab_labels:
-                st.caption(
-                    "제품 화면에 실제로 쓰이는 표기입니다. 매뉴얼의 버튼·메뉴 이름을 "
-                    "화면과 일치시키는 데 씁니다. `후보수`가 2 이상이면 표기가 갈리는 항목입니다."
-                )
-                _render_table(_result.labels,
-                              ["KO", "EN", "후보수", "EN 후보", "문맥(key)", "기존대조"],
-                              "labels", "term")
 
             with _tab_patterns:
                 st.caption("문장형 항목입니다. 용어집이 아니라 번역 예시(패턴)로 씁니다.")
                 _render_table(_result.patterns, ["KO", "EN", "문맥(key)"],
                               "patterns", "pattern")
+
+            # ── 표기가 갈리는 항목 정리 ────────────────────────────────
+            # 탭으로 두면 '검토해야 할 후보 목록'처럼 보이는데, 실제로는
+            # 성격이 다른 정리 작업이라 따로 뺐다.
+            _conf = catalog.conflict_rows(_result.labels)
+            if not _conf.empty:
+                with st.expander(
+                    f"표기가 갈리는 항목 {len(_conf):,}건 정리하기", expanded=False
+                ):
+                    st.markdown(
+                        "같은 한국어에 영어가 여러 개인 항목입니다. 두 종류가 섞여 있습니다.\n\n"
+                        "- **표기 불일치** — `검출 규칙 → Detecting Rule / Detecting rules / "
+                        "Detection rule` 처럼 대소문자·단복수·활용형 차이일 뿐. 하나로 통일하면 됩니다.\n"
+                        "- **문맥 분기** — `확인 → OK / Check / Confirm` 처럼 화면에 따라 "
+                        "진짜 다른 단어. 사람이 정해야 합니다.\n\n"
+                        "둘을 가려내는 건 LLM이 하고, 문맥 분기만 직접 고르시면 됩니다."
+                    )
+
+                    if st.button(
+                        f"LLM으로 {len(_conf):,}건 분류하기",
+                        key="catalog_resolve", type="primary",
+                    ):
+                        from openai import OpenAI  # 이 화면에서만 필요
+
+                        with st.spinner("분류하는 중…"):
+                            try:
+                                st.session_state.catalog_resolved = catalog.resolve_conflicts(
+                                    OpenAI(api_key=OPENAI_API_KEY), _conf
+                                )
+                            except Exception as e:
+                                st.error(f"분류 오류: {e}")
+
+                    _resolved = st.session_state.get("catalog_resolved")
+                    if _resolved:
+                        _view = _conf.copy()
+                        _view["판정"] = _view["KO"].map(
+                            lambda k: {"UNIFY": "표기 통일", "SPLIT": "문맥 분기"}.get(
+                                (_resolved.get(k) or {}).get("kind"), "미분류")
+                        )
+                        _view["근거"] = _view["KO"].map(
+                            lambda k: (_resolved.get(k) or {}).get("reason", "")
+                        )
+                        # 표기 통일로 판정된 행은 LLM이 고른 표기를 기본값으로 채운다
+                        _view["EN"] = _view.apply(
+                            lambda r: (_resolved.get(r["KO"]) or {}).get("pick") or r["EN"]
+                            if (_resolved.get(r["KO"]) or {}).get("kind") == "UNIFY"
+                            else r["EN"], axis=1,
+                        )
+                        _n_unify = int((_view["판정"] == "표기 통일").sum())
+                        _n_split = int((_view["판정"] == "문맥 분기").sum())
+                        st.success(
+                            f"표기 통일 **{_n_unify}건** — 제안된 표기가 `EN`에 채워졌습니다. "
+                            f"문맥 분기 **{_n_split}건** — `EN` 칸을 눌러 직접 고르세요."
+                        )
+                        _render_table(
+                            _view,
+                            ["KO", "EN", "판정", "근거", "EN 후보", "문맥(key)"],
+                            "conflicts", "term",
+                        )
 
             st.markdown("---")
             st.download_button(
