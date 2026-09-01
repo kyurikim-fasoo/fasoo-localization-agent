@@ -531,6 +531,92 @@ Items:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 등재 전 검수
+#
+# 카탈로그의 영어는 사람이 오랜 기간 나눠 쓴 것이라 표기가 고르지 않다.
+# Title Case와 sentence case가 섞이고, 오타("Managmer")나 단복수 오류도
+# 그대로 들어 있다. 그걸 검증 없이 글로서리에 넣으면 오류가 번역 결과에
+# 그대로 전파된다. 그래서 **사용자가 고른 것만** 검수해서 고칠 것을
+# 제안하고, 채택 여부는 사람이 정한다.
+# ──────────────────────────────────────────────────────────────────────
+
+_REVIEW_RE = re.compile(r"^\[(\d+)\]\s*([^|]*)\|(.*)$", re.MULTILINE)
+
+_REVIEW_RULES = {
+    "term": """These are glossary entries: a Korean term and the English used for it.
+
+Flag an entry ONLY when the English has a real problem:
+- Misspelling or a non-word (e.g. "Managmer" -> "Manager")
+- Wrong capitalisation for a glossary entry. Use lower case for ordinary nouns
+  because the term is substituted mid-sentence. Keep Title Case ONLY for product
+  names, feature names and acronyms (e.g. "Virtual Drive", "SQL Injection").
+- Singular/plural or article error
+- Obvious mistranslation of the Korean
+
+Do NOT flag an entry merely because you would have phrased it differently.""",
+    "pattern": """These are translation examples: a Korean sentence and its English.
+
+Flag an entry ONLY when the English has a real problem:
+- Misspelling, non-word, or broken grammar
+- Missing or doubled sentence-final punctuation compared with the Korean
+- Singular/plural or article error
+- Obvious mistranslation of the Korean
+
+Do NOT flag an entry merely because you would have phrased it differently.""",
+}
+
+
+def review_entries(client, items: List[Tuple[str, str]], kind: str = "term",
+                   model: str = "gpt-5.2", batch_size: int = 25) -> Dict[int, dict]:
+    """
+    등재 직전 검수. items = [(ko, en), …]
+
+    Returns {index: {"suggest": 고친 영어, "reason": 사유}}
+    — 문제가 없다고 판단한 항목은 결과에 들어가지 않는다.
+    """
+    out: Dict[int, dict] = {}
+    for start in range(0, len(items), batch_size):
+        batch = items[start:start + batch_size]
+        block = "\n".join(
+            f"[{i}] KO: {ko}\n    EN: {en}" for i, (ko, en) in enumerate(batch)
+        )
+        prompt = f"""{_REVIEW_RULES.get(kind, _REVIEW_RULES["term"])}
+
+Output one line per entry that needs a change, nothing else:
+[N] <corrected English>|<short reason in Korean>
+
+If an entry is fine, omit it entirely. If nothing needs changing, output NONE.
+
+Entries:
+{block}
+""".strip()
+
+        try:
+            resp = client.responses.create(
+                model=model,
+                input=prompt,
+                reasoning={"effort": "low"},
+                text={"verbosity": "low"},
+            )
+            text = resp.output_text
+        except Exception:
+            continue
+
+        if text.strip().upper().startswith("NONE"):
+            continue
+        for m in _REVIEW_RE.finditer(text):
+            idx, suggest, reason = m.groups()
+            i = int(idx)
+            suggest = suggest.strip()
+            if i >= len(batch) or not suggest:
+                continue
+            if suggest == batch[i][1]:
+                continue          # 제안이 원본과 같으면 무시
+            out[start + i] = {"suggest": suggest, "reason": reason.strip()}
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 내보내기
 # ──────────────────────────────────────────────────────────────────────
 

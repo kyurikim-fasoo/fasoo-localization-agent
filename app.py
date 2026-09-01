@@ -1296,7 +1296,87 @@ if st.session_state.app_mode == "Glossary 추출":
                     current_user=st.session_state.current_user,
                 )
 
+            def _start_review(sel_df, key, kind):
+                """등재 직전 검수 — 고른 항목만 LLM에 보내고 검토 단계로 넘어간다."""
+                from openai import OpenAI  # 이 화면에서만 필요
+
+                with st.spinner("검수 중"):
+                    try:
+                        _sugg = catalog.review_entries(
+                            OpenAI(api_key=OPENAI_API_KEY),
+                            list(zip(sel_df["KO"], sel_df["EN"])),
+                            kind=kind,
+                        )
+                    except Exception as e:
+                        st.error(f"검수 오류: {e}")
+                        return
+                st.session_state[f"catalog_review_{key}"] = {
+                    "rows": sel_df.to_dict("records"),
+                    "sugg": {int(i): v for i, v in _sugg.items()},
+                    "kind": kind,
+                }
+                st.rerun()
+
+            def _render_review(key):
+                """수정 제안을 하나씩 승인/반려하고 확정 등재."""
+                rv = st.session_state[f"catalog_review_{key}"]
+                rows, sugg, kind = rv["rows"], rv["sugg"], rv["kind"]
+
+                st.markdown(f"##### 등재 전 검수 · {len(rows)}건")
+                if sugg:
+                    st.caption(
+                        f"{len(sugg)}건에 수정 제안이 있습니다. "
+                        f"나머지 {len(rows) - len(sugg)}건은 그대로 등재됩니다."
+                    )
+                else:
+                    st.caption("수정할 항목이 없습니다. 그대로 등재하시면 됩니다.")
+
+                final = []
+                for i, r in enumerate(rows):
+                    s = sugg.get(i)
+                    if not s:
+                        final.append(r)
+                        continue
+                    with st.container(border=True):
+                        st.markdown(f"**{r['KO']}**")
+                        pick = st.radio(
+                            r["KO"],
+                            options=[s["suggest"], r["EN"]],
+                            captions=["제안", "원본 유지"],
+                            index=0, horizontal=True, label_visibility="collapsed",
+                            key=f"catalog_rev_{key}_{i}",
+                        )
+                        if s.get("reason"):
+                            st.caption(s["reason"])
+                    final.append({**r, "EN": pick})
+
+                _changed = sum(
+                    1 for i, r in enumerate(rows)
+                    if i in sugg and final[i]["EN"] != r["EN"]
+                )
+                b1, b2 = st.columns([1, 2])
+                if b1.button("취소", key=f"catalog_rev_cancel_{key}",
+                             use_container_width=True):
+                    st.session_state.pop(f"catalog_review_{key}", None)
+                    st.rerun()
+                if b2.button(
+                    f"확정하고 {len(final)}건 등재"
+                    + (f" (수정 {_changed}건 반영)" if _changed else ""),
+                    type="primary", key=f"catalog_rev_ok_{key}",
+                    use_container_width=True,
+                ):
+                    try:
+                        counts = _register(pd.DataFrame(final), kind)
+                        st.session_state.pop(f"catalog_review_{key}", None)
+                        st.success(f"{counts['inserted']}개를 등재했습니다.")
+                        st.session_state.pop("catalog_result_key", None)
+                    except Exception as e:
+                        st.error(f"등재 오류: {e}")
+
             def _render_table(df, cols, key, kind):
+                if st.session_state.get(f"catalog_review_{key}") is not None:
+                    _render_review(key)
+                    return
                 if df.empty:
                     st.caption("후보가 없습니다.")
                     return
@@ -1368,16 +1448,11 @@ if st.session_state.app_mode == "Glossary 추출":
                         )
 
                 if st.button(
-                    f"{len(chosen):,}개 등재",
+                    f"{len(chosen):,}개 검수 후 등재",
                     type="primary", key=f"catalog_save_{key}",
                     use_container_width=True,
                 ):
-                    try:
-                        counts = _register(chosen, kind)
-                        st.success(f"{counts['inserted']}개를 등재했습니다.")
-                        st.session_state.pop("catalog_sig", None)
-                    except Exception as e:
-                        st.error(f"등재 오류: {e}")
+                    _start_review(chosen, key, kind)
 
             # 탭 순서는 [Glossary 관리]와 맞춘다 — 용어, 패턴.
             _tab_terms, _tab_patterns = st.tabs(
@@ -1406,7 +1481,9 @@ if st.session_state.app_mode == "Glossary 추출":
                 )
 
                 _resolved = st.session_state.get("catalog_resolved")
-                if not _resolved:
+                if st.session_state.get("catalog_review_conflicts") is not None:
+                    _render_review("conflicts")
+                elif not _resolved:
                     if st.button(f"{len(_conf):,}건 분류", key="catalog_resolve"):
                         from openai import OpenAI  # 이 화면에서만 필요
 
@@ -1514,23 +1591,21 @@ if st.session_state.app_mode == "Glossary 추출":
                             st.rerun()
 
                     if st.button(
-                        f"선택한 {len(_picked)}건 등재", type="primary",
+                        f"선택한 {len(_picked)}건 검수 후 등재", type="primary",
                         key="catalog_save_conf", use_container_width=True,
                         disabled=not _picked,
                     ):
-                        try:
-                            _sel = pd.DataFrame({
+                        _start_review(
+                            pd.DataFrame({
                                 "KO": list(_picked),
                                 "EN": [_picked[k] for k in _picked],
                                 "문맥(key)": [
                                     next((r["문맥(key)"] for r in _slice if r["KO"] == k), "")
                                     for k in _picked
                                 ],
-                            })
-                            counts = _register(_sel, "term")
-                            st.success(f"{counts['inserted']}개를 등재했습니다.")
-                        except Exception as e:
-                            st.error(f"등재 오류: {e}")
+                            }),
+                            "conflicts", "term",
+                        )
                     if not _picked:
                         st.caption("각 항목에서 쓸 표기를 클릭하면 등재 대상이 됩니다.")
 

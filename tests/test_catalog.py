@@ -212,6 +212,54 @@ check("같은 문형은 하나로", len(r14.patterns) < 40, str(len(r14.patterns
 check("기본 상한값", (ct.DEFAULT_TERM_LIMIT, ct.DEFAULT_PATTERN_LIMIT) == (100, 30),
       f"{ct.DEFAULT_TERM_LIMIT}/{ct.DEFAULT_PATTERN_LIMIT}")
 
+class _FakeBoom:
+    class responses:
+        @staticmethod
+        def create(**kw):
+            raise RuntimeError("network")
+
+
+print("[15] 등재 전 검수 — 응답 파싱")
+
+
+class _FakeResp:
+    def __init__(self, text):
+        self.output_text = text
+
+
+class _FakeClient:
+    """responses.create를 흉내내는 스텁."""
+
+    def __init__(self, text):
+        self._text = text
+        self.calls = 0
+        outer = self
+
+        class _R:
+            def create(self, **kw):
+                outer.calls += 1
+                outer.prompt = kw.get("input", "")
+                return _FakeResp(outer._text)
+
+        self.responses = _R()
+
+
+_items = [("취약점 점검", "Vulnerability Check"), ("무한 재귀 호출", "Infinite recursive call")]
+_cli = _FakeClient("[0] vulnerability check|일반 명사는 소문자")
+_rev = ct.review_entries(_cli, _items)
+check("제안된 항목만 반환", set(_rev) == {0}, str(_rev))
+check("제안 내용", _rev[0]["suggest"] == "vulnerability check", str(_rev[0]))
+check("사유 포함", "소문자" in _rev[0]["reason"], str(_rev[0]))
+
+check("NONE이면 빈 결과", ct.review_entries(_FakeClient("NONE"), _items) == {})
+check("원본과 같은 제안은 무시",
+      ct.review_entries(_FakeClient("[1] Infinite recursive call|동일"), _items) == {})
+check("호출 실패해도 죽지 않음", ct.review_entries(_FakeBoom(), _items) == {})
+
+_cli2 = _FakeClient("NONE")
+ct.review_entries(_cli2, _items, kind="pattern")
+check("패턴은 다른 기준 사용", "translation examples" in _cli2.prompt, _cli2.prompt[:60])
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

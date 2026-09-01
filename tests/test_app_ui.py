@@ -282,6 +282,52 @@ check("추천값 일괄 선택 제공",
 at2 = [c for c in at.checkbox if "추천값" in str(c.label)][0].check().run()
 check("일괄 선택 시 추천값 적용", at2.radio[0].value == "OK", str(at2.radio[0].value))
 
+print("[12] 등재 전 검수 — 제안 승인/반려")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.session_state["catalog_result"] = _res
+at.session_state["catalog_parsed"] = [_FakeParsed()]
+at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+at.session_state["catalog_sig"] = "seeded"
+at.session_state["catalog_review_terms"] = {
+    "kind": "term",
+    "rows": [
+        {"KO": "취약점 점검", "EN": "Vulnerability Check", "문맥(key)": "rule"},
+        {"KO": "무한 재귀 호출", "EN": "Infinite recursive call", "문맥(key)": "rule"},
+    ],
+    "sugg": {0: {"suggest": "vulnerability check", "reason": "일반 명사는 소문자"}},
+}
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+_txt = " ".join(str(m.value) for m in at.markdown)
+check("검수 화면으로 전환", "등재 전 검수" in _txt, _txt[:80])
+check("제안 있는 항목만 라디오", len(at.radio) == 1, f"radio {len(at.radio)}개")
+check("제안이 기본 선택", at.radio[0].value == "vulnerability check",
+      str(at.radio[0].value))
+check("원본 유지도 선택 가능", "Vulnerability Check" in at.radio[0].options,
+      str(at.radio[0].options))
+check("사유 노출", any("소문자" in str(c.value) for c in at.caption))
+_btns = [b.label for b in at.button]
+check("확정 버튼", any("확정하고" in b for b in _btns), str(_btns))
+check("취소 버튼", "취소" in _btns, str(_btns))
+
+# 반려하면 원본이 유지된다
+at2 = at.radio[0].set_value("Vulnerability Check").run()
+check("반려 시 원본 유지", at2.radio[0].value == "Vulnerability Check",
+      str(at2.radio[0].value))
+_btns2 = [b.label for b in at2.button]
+check("수정 반영 표시 사라짐", not any("수정 1건" in b for b in _btns2), str(_btns2))
+
+# 취소하면 목록으로 돌아간다
+at3 = [b for b in at2.button if b.label == "취소"][0].click().run()
+try:
+    _left = at3.session_state["catalog_review_terms"]
+except Exception:
+    _left = None
+check("취소 시 검수 상태 해제", _left is None, str(_left)[:60])
+check("취소 후 표로 복귀", len(at3.get("data_editor") or []) >= 0 and not at3.exception)
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")
