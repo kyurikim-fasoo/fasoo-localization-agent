@@ -366,12 +366,16 @@ def analyze(pick: LanguagePick,
     for ko, cands in agg.items():
         rep = cands.most_common(1)[0][0]        # 최빈 표기를 대표로
         distinct = {c.lower() for c in cands}   # 대소문자만 다른 건 같은 표기로 본다
-        status = "신규"
-        if ko in existing_terms:
-            status = "동일" if rep.lower() in existing_terms[ko] else "충돌(기존)"
+        prevs = existing_terms.get(ko) or set()
+        status, prev_en = "신규", ""
+        if prevs:
+            prev_en = " / ".join(sorted(prevs))
+            status = ("동일" if rep.lower() in {str(p).lower() for p in prevs}
+                      else "충돌(기존)")
         label_rows.append({
             "KO": ko,
             "EN": rep,
+            "기존 EN": prev_en,
             "후보수": len(distinct),
             "EN 후보": " / ".join(sorted(cands)) if len(distinct) > 1 else "",
             "문맥(key)": " ".join(sorted(ns[ko])[:3]),
@@ -432,11 +436,17 @@ def analyze(pick: LanguagePick,
 
 
 def existing_terms_index(terms_df: pd.DataFrame) -> Dict[str, set]:
-    """load_terms() 결과를 {ko: {en_lower}} 인덱스로."""
+    """
+    load_terms() 결과를 {ko: {원본 EN, …}} 인덱스로.
+
+    소문자로 뭉개지 않고 원본 표기를 그대로 담는다 — 충돌을 알릴 때
+    "기존에는 무엇으로 등록돼 있는지"를 사람에게 보여줘야 하기 때문.
+    비교는 읽는 쪽에서 대소문자 무시로 한다.
+    """
     idx: Dict[str, set] = defaultdict(set)
     for _, r in terms_df.iterrows():
         ko = str(r.get("KO", "")).strip()
-        en = str(r.get("EN", "")).strip().lower()
+        en = str(r.get("EN", "")).strip()
         if ko and en:
             idx[ko].add(en)
     return dict(idx)
@@ -496,11 +506,12 @@ UNIFY — the candidates are the SAME term written inconsistently
 
 SPLIT  — the candidates genuinely mean DIFFERENT things depending on which
         screen the label is on (e.g. a confirm button vs a check rule).
-        A human must decide per screen, so do NOT choose.
+        A human must decide per screen. Still name the single most likely
+        candidate as a fallback, but mark the item SPLIT so a person reviews it.
 
-Output EXACTLY one line per item, nothing else:
+Output EXACTLY one line per item, nothing else. ALWAYS fill the middle field:
 [N] UNIFY|<chosen English>|<short reason in Korean>
-[N] SPLIT||<short reason in Korean>
+[N] SPLIT|<most likely English>|<short reason in Korean>
 
 Items:
 {block}

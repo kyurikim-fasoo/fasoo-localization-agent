@@ -328,6 +328,35 @@ except Exception:
 check("취소 시 검수 상태 해제", _left is None, str(_left)[:60])
 check("취소 후 표로 복귀", len(at3.get("data_editor") or []) >= 0 and not at3.exception)
 
+print("[13] 기존 글로서리 충돌 — 검수에서 양자택일")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.session_state["catalog_result"] = _res
+at.session_state["catalog_parsed"] = [_FakeParsed()]
+at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+at.session_state["catalog_sig"] = "seeded"
+at.session_state["catalog_review_terms"] = {
+    "kind": "term",
+    "rows": [{"KO": "문서", "EN": "Document", "문맥(key)": "label",
+              "기존대조": "충돌(기존)", "기존 EN": "file"}],
+    "sugg": {0: {"suggest": "file",
+                 "reason": "기존 글로서리에는 `file`로 등록돼 있습니다.",
+                 "labels": ["기존 글로서리", "카탈로그 표기"]}},
+}
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+check("양쪽 표기가 선택지로", set(at.radio[0].options) == {"file", "Document"},
+      str(at.radio[0].options))
+check("기존 표기가 기본값", at.radio[0].value == "file", str(at.radio[0].value))
+check("무엇과 다른지 안내", any("기존 글로서리에는" in str(c.value) for c in at.caption),
+      str([str(c.value)[:40] for c in at.caption]))
+check("헤더에 충돌 건수", any("기존 글로서리와 충돌" in str(c.value) for c in at.caption),
+      str([str(c.value)[:40] for c in at.caption]))
+at2 = at.radio[0].set_value("Document").run()
+check("카탈로그 표기로 바꿀 수 있음", at2.radio[0].value == "Document",
+      str(at2.radio[0].value))
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

@@ -1310,9 +1310,24 @@ if st.session_state.app_mode == "Glossary 추출":
                     except Exception as e:
                         st.error(f"검수 오류: {e}")
                         return
+                # 기존 글로서리와 표기가 다른 항목은 검수 단계에서 함께 고르게 한다.
+                # "1건이 다릅니다"라고만 알리면 무엇이 어떻게 다른지 알 수 없다.
+                _merged = {int(i): v for i, v in _sugg.items()}
+                if "기존대조" in sel_df.columns:
+                    for _i, (_, _r) in enumerate(sel_df.iterrows()):
+                        if _r.get("기존대조") != "충돌(기존)":
+                            continue
+                        _prev = str(_r.get("기존 EN") or "").split(" / ")[0].strip()
+                        if not _prev or _prev == _r["EN"]:
+                            continue
+                        _merged[_i] = {
+                            "suggest": _prev,
+                            "reason": f"기존 글로서리에는 `{_prev}`로 등록돼 있습니다.",
+                            "labels": ["기존 글로서리", "카탈로그 표기"],
+                        }
                 st.session_state[f"catalog_review_{key}"] = {
                     "rows": sel_df.to_dict("records"),
-                    "sugg": {int(i): v for i, v in _sugg.items()},
+                    "sugg": _merged,
                     "kind": kind,
                 }
                 st.rerun()
@@ -1324,9 +1339,15 @@ if st.session_state.app_mode == "Glossary 추출":
 
                 st.markdown(f"##### 등재 전 검수 · {len(rows)}건")
                 if sugg:
+                    _n_prior = sum(1 for v in sugg.values() if v.get("labels"))
+                    _bits = []
+                    if len(sugg) - _n_prior:
+                        _bits.append(f"수정 제안 {len(sugg) - _n_prior}건")
+                    if _n_prior:
+                        _bits.append(f"기존 글로서리와 충돌 {_n_prior}건")
                     st.caption(
-                        f"{len(sugg)}건에 수정 제안이 있습니다. "
-                        f"나머지 {len(rows) - len(sugg)}건은 그대로 등재됩니다."
+                        " · ".join(_bits)
+                        + f" · 나머지 {len(rows) - len(sugg)}건은 그대로 등재됩니다."
                     )
                 else:
                     st.caption("수정할 항목이 없습니다. 그대로 등재하시면 됩니다.")
@@ -1342,7 +1363,7 @@ if st.session_state.app_mode == "Glossary 추출":
                         pick = st.radio(
                             r["KO"],
                             options=[s["suggest"], r["EN"]],
-                            captions=["제안", "원본 유지"],
+                            captions=s.get("labels", ["제안", "원본 유지"]),
                             index=0, horizontal=True, label_visibility="collapsed",
                             key=f"catalog_rev_{key}_{i}",
                         )
@@ -1381,19 +1402,20 @@ if st.session_state.app_mode == "Glossary 추출":
                     st.caption("후보가 없습니다.")
                     return
 
-                f1, f2, f3 = st.columns([3, 1.4, 1.4])
+                f1, f2, f3 = st.columns([1.2, 3, 1.6])
                 with f1:
+                    select_all = st.checkbox(
+                        "전체 선택", value=False, key=f"catalog_all_{key}",
+                        help="아래 목록에 보이는 항목을 모두 체크합니다.",
+                    )
+                with f2:
                     q = st.text_input(
                         "검색", key=f"catalog_q_{key}", placeholder="한국어 또는 영어 검색",
                         label_visibility="collapsed",
                     )
-                with f2:
+                with f3:
                     skip_dup = st.checkbox(
                         "등록된 항목 숨기기", value=True, key=f"catalog_skip_{key}",
-                    )
-                with f3:
-                    select_all = st.checkbox(
-                        "전체 선택", value=False, key=f"catalog_all_{key}",
                     )
 
                 view = df
@@ -1440,11 +1462,18 @@ if st.session_state.app_mode == "Glossary 추출":
                     return
 
                 if "기존대조" in chosen.columns:
-                    _n_conflict = int((chosen["기존대조"] == "충돌(기존)").sum())
-                    if _n_conflict:
+                    _dup = chosen[chosen["기존대조"] == "충돌(기존)"]
+                    if not _dup.empty:
                         st.warning(
-                            f"기존 글로서리와 영어가 다른 항목 {_n_conflict}건이 포함돼 있습니다.",
+                            f"기존 글로서리와 영어가 다른 항목 {len(_dup)}건 — "
+                            "다음 검수 단계에서 어느 쪽을 쓸지 고르게 됩니다.",
                             icon="⚠️",
+                        )
+                        st.dataframe(
+                            _dup[["KO", "EN", "기존 EN"]].rename(
+                                columns={"EN": "카탈로그", "기존 EN": "기존 글로서리"}
+                            ),
+                            use_container_width=True, hide_index=True,
                         )
 
                 if st.button(
@@ -1544,12 +1573,16 @@ if st.session_state.app_mode == "Glossary 추출":
                         _cands = [c for c in str(_r.get("EN 후보") or "").split(" / ") if c]
                         if not _cands:
                             _cands = [_r["EN"]]
-                        _reco = _info.get("pick") if _info.get("kind") == "UNIFY" else ""
+                        # SPLIT이라도 LLM이 최선의 후보를 함께 돌려준다.
+                        # 없으면 최빈 표기(_r["EN"])로 채워, 일괄 선택이 항상 동작하게.
+                        _reco = (_info.get("pick") or "").strip() or _r["EN"]
                         _options = [_SKIP] + _cands
                         _idx = (
                             _options.index(_reco)
                             if _use_reco and _reco in _options else 0
                         )
+                        if _use_reco and _reco not in _options:
+                            _idx = 1 if len(_options) > 1 else 0
                         _badge = "직접 선택" if _info.get("kind") == "SPLIT" else "자동 정리"
 
                         with st.container(border=True):

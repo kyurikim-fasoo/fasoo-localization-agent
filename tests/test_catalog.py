@@ -92,6 +92,28 @@ check("후보수 2로 집계", int(row["후보수"]) == 2, str(row["후보수"])
 check("최빈 표기를 대표로", row["EN"] == "OK", row["EN"])
 check("문맥 네임스페이스 수집", set(row["문맥(key)"].split()) == {"l", "r"}, row["문맥(key)"])
 
+class _FakeResp:
+    def __init__(self, text):
+        self.output_text = text
+
+
+class _FakeClient:
+    """responses.create를 흉내내는 스텁."""
+
+    def __init__(self, text):
+        self._text = text
+        self.calls = 0
+        outer = self
+
+        class _R:
+            def create(self, **kw):
+                outer.calls += 1
+                outer.prompt = kw.get("input", "")
+                return _FakeResp(outer._text)
+
+        self.responses = _R()
+
+
 print("[8] 기존 글로서리 대조")
 pick8 = ct.pick_languages([
     ct.parse_json("ko.json", {"a": "문서", "b": "취약점 점검"}),
@@ -101,6 +123,20 @@ r8 = ct.analyze(pick8, existing_terms={"문서": {"file"}})
 st_map = dict(zip(r8.labels["KO"], r8.labels["기존대조"]))
 check("영어가 다르면 충돌", st_map["문서"] == "충돌(기존)", st_map.get("문서"))
 check("없던 건 신규", st_map["취약점 점검"] == "신규", st_map.get("취약점 점검"))
+_prev = dict(zip(r8.labels["KO"], r8.labels["기존 EN"]))
+check("기존 표기를 원본 그대로 보관", _prev["문서"] == "file", str(_prev))
+check("신규는 기존 표기 없음", _prev["취약점 점검"] == "", str(_prev))
+
+print("[8-b] 충돌 판정은 대소문자를 무시")
+r8b = ct.analyze(pick8, existing_terms={"문서": {"DOCUMENT"}})
+check("대소문자만 다르면 동일",
+      dict(zip(r8b.labels["KO"], r8b.labels["기존대조"]))["문서"] == "동일")
+
+print("[8-c] SPLIT도 대체 표기를 받는다")
+_split_cli = _FakeClient("[0] SPLIT|OK|화면마다 다름")
+_r8c = ct.resolve_conflicts(_split_cli, ct.conflict_rows(r7.labels))
+check("SPLIT에도 pick이 채워짐", _r8c["확인"]["pick"] == "OK", str(_r8c))
+check("kind는 SPLIT 유지", _r8c["확인"]["kind"] == "SPLIT", str(_r8c))
 
 print("[9] 용어 후보 필터 — '길면 용어'가 아니라 '반복되는 복합어'")
 check("조사로 끝나면 제외", not ct._looks_like_term("보안 취약점 검출부터"))
@@ -220,28 +256,6 @@ class _FakeBoom:
 
 
 print("[15] 등재 전 검수 — 응답 파싱")
-
-
-class _FakeResp:
-    def __init__(self, text):
-        self.output_text = text
-
-
-class _FakeClient:
-    """responses.create를 흉내내는 스텁."""
-
-    def __init__(self, text):
-        self._text = text
-        self.calls = 0
-        outer = self
-
-        class _R:
-            def create(self, **kw):
-                outer.calls += 1
-                outer.prompt = kw.get("input", "")
-                return _FakeResp(outer._text)
-
-        self.responses = _R()
 
 
 _items = [("취약점 점검", "Vulnerability Check"), ("무한 재귀 호출", "Infinite recursive call")]
