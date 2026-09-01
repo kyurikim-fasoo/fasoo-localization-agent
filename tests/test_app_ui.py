@@ -180,12 +180,35 @@ check("예외 없음", not at.exception, str(at.exception))
 check("업로드 없이도 결과 화면이 뜸", len(at.metric) >= 4,
       f"metric {len(at.metric)}개")
 check("탭 2개(용어·패턴) 렌더", len(at.tabs) == 2, f"tabs {len(at.tabs)}개")
-_texts = " ".join(str(m.value) for m in at.markdown) + " ".join(str(i.value) for i in at.info)
-check("등재 방법 안내 노출", "적용" in _texts and "체크" in _texts)
-check("선택 전에는 안내가 뜸", any("선택한 항목이 없습니다" in str(i.value) for i in at.info),
-      str([str(i.value)[:40] for i in at.info]))
+_caps = " ".join(str(c.value) for c in at.caption)
+check("선택 안내 노출", "체크박스" in _caps, _caps[:120])
 check("등재 버튼은 선택 후에만", not any("등재" in b.label for b in at.button),
       str([b.label for b in at.button]))
+
+print("[9] 표기 충돌 — 후보를 클릭으로 고르는 카드 UI")
+_conf_pick = ct.pick_languages([
+    ct.parse_json("ko.json", {"l.a": "확인", "l.b": "확인", "r.c": "확인"}),
+    ct.parse_json("en.json", {"l.a": "OK", "l.b": "OK", "r.c": "Check"}),
+])
+_conf_res = ct.analyze(_conf_pick)
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.session_state["catalog_result"] = _conf_res
+at.session_state["catalog_parsed"] = [_FakeParsed()]
+at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+at.session_state["catalog_sig"] = "seeded"
+at.session_state["catalog_resolved"] = {
+    "확인": {"kind": "SPLIT", "pick": "", "reason": "화면마다 뜻이 다름"}
+}
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+check("후보가 라디오로 렌더", len(at.radio) >= 1, f"radio {len(at.radio)}개")
+if at.radio:
+    check("행의 후보만 옵션으로", set(at.radio[0].options) == {"OK", "Check"},
+          str(at.radio[0].options))
+check("판정 근거 노출", any("화면마다" in str(c.value) for c in at.caption),
+      str([str(c.value)[:30] for c in at.caption]))
 
 print()
 if failures:

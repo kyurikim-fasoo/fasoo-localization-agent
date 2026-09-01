@@ -1134,26 +1134,22 @@ if st.session_state.app_mode == "Glossary 관리":
 
 
 # ─────────────────────────────────────────────
-# Glossary 추출 — 고객사 i18n 카탈로그에서 용어/UI 라벨 뽑기
+# Glossary 추출 — 고객사 i18n 카탈로그에서 용어/패턴 뽑기
 #
-# 제품의 다국어 메시지 파일은 key로 정렬돼 있어서, 번역문끼리 짝을 맞추는
-# 어려운 단계가 없다. 그래서 이 화면은 LLM을 쓰지 않는다 — 업로드 즉시
-# 결정론적으로 후보가 나온다.
+# 제품의 다국어 메시지 파일은 key로 정렬돼 있어서 번역문끼리 짝을 맞추는
+# 어려운 단계가 없다. 그래서 후보 추출에는 LLM을 쓰지 않는다. LLM은 표기가
+# 갈리는 항목을 '표기 불일치'와 '문맥 분기'로 가르는 데만 쓴다.
 # ─────────────────────────────────────────────
 
 if st.session_state.app_mode == "Glossary 추출":
     st.subheader("Glossary 추출")
-    st.caption(
-        "제품의 다국어 메시지 파일(i18n JSON)을 올리면 **용어집 후보**와 "
-        "**UI 라벨 표기**를 자동으로 뽑아냅니다. 한국어/영어 파일을 각각 올리거나, "
-        "두 언어가 함께 든 파일 하나를 올리세요."
-    )
 
     uploaded_catalogs = st.file_uploader(
-        "JSON 업로드 (최대 2개)",
+        "제품의 다국어 메시지 파일(JSON)",
         type=["json"],
         accept_multiple_files=True,
         key="catalog_uploader",
+        help="한국어/영어 파일을 각각 올리거나, 두 언어가 함께 든 파일 하나를 올리세요.",
     )
 
     if uploaded_catalogs:
@@ -1176,6 +1172,7 @@ if st.session_state.app_mode == "Glossary 추출":
                     ),
                 )
                 st.session_state.catalog_sig = _sig
+                st.session_state.pop("catalog_resolved", None)
                 st.session_state.pop("catalog_error", None)
             except Exception as e:
                 st.session_state.catalog_error = str(e)
@@ -1184,18 +1181,20 @@ if st.session_state.app_mode == "Glossary 추출":
 
     # 분석 결과는 session_state에 남겨둔다 — 다른 메뉴에 다녀와도 유지된다.
     if st.session_state.get("catalog_error"):
-        st.error(f"파일을 읽지 못했습니다 — {st.session_state.catalog_error}")
+        st.error(st.session_state.catalog_error)
     elif st.session_state.get("catalog_result") is None:
-        with st.container(border=True):
-            st.markdown("##### 지원하는 파일 형태")
+        with st.expander("지원하는 파일 형식"):
             st.markdown(
-                "- `[{\"key\": \"a.b\", \"en\": \"Save\"}]` — 배열 + 언어 필드\n"
-                "- `[{\"key\": \"a.b\", \"en\": \"Save\", \"ko\": \"저장\"}]` — 한 파일에 양쪽 언어\n"
-                "- `{\"a.b\": \"저장\"}` — 평탄 객체 (i18next · vue-i18n)\n"
-                "- `{\"a\": {\"b\": \"저장\"}}` — 중첩 객체\n\n"
-                "필드 이름이 `key`/`en`/`ko`가 아니어도 자동으로 찾습니다. "
-                "어느 쪽이 한국어인지는 파일명이 아니라 **내용의 한글 비율**로 판단하므로, "
-                "파일명에 언어 표시가 없어도 됩니다."
+                "```json\n"
+                '[{"key": "a.b", "en": "Save"}]              // 배열 + 언어 필드\n'
+                '[{"key": "a.b", "en": "Save", "ko": "저장"}] // 한 파일에 양쪽 언어\n'
+                '{"a.b": "저장"}                              // 평탄 객체\n'
+                '{"a": {"b": "저장"}}                         // 중첩 객체\n'
+                "```"
+            )
+            st.caption(
+                "필드명이 `key`/`en`/`ko`가 아니어도 자동으로 찾습니다. "
+                "언어는 파일명이 아니라 내용으로 판별합니다."
             )
     else:
         # 결과 블록 — 들여쓰기 유지를 위한 컨테이너
@@ -1203,49 +1202,24 @@ if st.session_state.app_mode == "Glossary 추출":
             _result = st.session_state.catalog_result
             _ko_label, _en_label, _ratios = st.session_state.catalog_pick_labels
             _stats = _result.stats
+            _conf = catalog.conflict_rows(_result.labels)
 
-            with st.container(border=True):
-                st.markdown("##### 인식 결과")
-                for pf in st.session_state.catalog_parsed:
-                    st.caption(f"📄 **{pf.name}** — {pf.describe()}")
-                st.caption(
-                    f"🈚 한국어 = `{_ko_label}` · 🔤 영어 = `{_en_label}` "
-                    "(한글 비율로 자동 판정)"
-                )
+            st.caption(
+                " · ".join(pf.describe() for pf in st.session_state.catalog_parsed)
+                + f"  ·  KO `{_ko_label}` / EN `{_en_label}`"
+            )
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("대응 쌍", f"{_stats['공통키']:,}")
-            c2.metric("용어 후보", f"{_stats['용어후보']:,}")
-            c3.metric("UI 라벨", f"{_stats['라벨 고유KO']:,}")
-            c4.metric("패턴 후보", f"{_stats['패턴후보']:,}")
+            c2.metric("용어", f"{_stats['용어후보']:,}")
+            c3.metric("패턴", f"{_stats['패턴후보']:,}")
+            c4.metric("표기 충돌", f"{len(_conf):,}")
 
-            if _stats["충돌"]:
-                st.warning(
-                    f"같은 한국어에 영어 표기가 여러 개인 항목이 **{_stats['충돌']}건** 있습니다. "
-                    "제품 화면마다 표기가 다르다는 뜻이라, 어느 것을 쓸지 골라야 합니다. "
-                    "[UI 라벨] 탭 위쪽에 모아뒀습니다.",
-                    icon="⚠️",
-                )
-            if _stats["기존충돌"]:
-                st.info(
-                    f"기존 글로서리와 영어가 다른 항목이 **{_stats['기존충돌']}건** 있습니다. "
-                    "기존 항목이 우선이므로 표의 `기존대조` 열을 확인하세요.",
-                    icon="ℹ️",
-                )
-
-            # 탭 순서는 [Glossary 관리]와 맞춘다 — 용어, 패턴.
-            _tab_terms, _tab_patterns = st.tabs(
-                [f"용어 ({_stats['용어후보']:,})", f"패턴 ({_stats['패턴후보']:,})"]
-            )
-
-            # 등재 대상 설정 — 탭 공통
             _rc1, _rc2 = st.columns(2)
             with _rc1:
                 _extract_product = st.selectbox(
-                    "등록할 제품",
-                    options=["ALL"] + products,
-                    help="기존 용어와 섞이지 않도록 제품을 분리해두면 좋습니다.",
-                    key="catalog_product",
+                    "제품", options=["ALL"] + products, key="catalog_product",
+                    help="기존 용어와 섞이지 않도록 분리해두면 좋습니다.",
                 )
             with _rc2:
                 _extract_scope = st.selectbox(
@@ -1258,226 +1232,228 @@ if st.session_state.app_mode == "Glossary 추출":
             # 브라우저가 버티지 못하므로, 검색으로 좁힌 결과에만 편집기를 준다.
             _EDIT_CAP = 500
 
+            def _register(chosen, kind):
+                """선택한 행을 글로서리/패턴에 삽입."""
+                if kind == "pattern":
+                    rows = pd.DataFrame({
+                        "id": None, "Scope": _extract_scope,
+                        "KO": chosen["KO"].values, "EN": chosen["EN"].values,
+                        "Note": chosen.get("문맥(key)", ""),
+                        "Status": "approved", "File": _source_name,
+                    })
+                    # view_ids=set() — 삽입만 한다. 기존 행 삭제 경로를 차단.
+                    return save_patterns_from_dataframe(
+                        rows, view_ids=set(),
+                        current_user=st.session_state.current_user,
+                    )
+                rows = pd.DataFrame({
+                    "id": None, "Scope": _extract_scope,
+                    "KO": chosen["KO"].values, "EN": chosen["EN"].values,
+                    "Product": _extract_product,
+                    "DNT": chosen.get("DNT", False), "Case-sensitive": False,
+                    "Note": chosen.get("문맥(key)", ""),
+                    "Status": "approved", "File": _source_name,
+                })
+                return save_terms_from_dataframe(
+                    rows, view_ids=set(),
+                    current_user=st.session_state.current_user,
+                )
+
             def _render_table(df, cols, key, kind):
                 if df.empty:
-                    st.info("후보가 없습니다.")
+                    st.caption("후보가 없습니다.")
                     return
 
-                q = st.text_input(
-                    "검색 (한국어 또는 영어)", key=f"catalog_q_{key}",
-                    placeholder="예: 분석", label_visibility="collapsed",
-                )
+                f1, f2, f3 = st.columns([3, 1.4, 1.4])
+                with f1:
+                    q = st.text_input(
+                        "검색", key=f"catalog_q_{key}", placeholder="한국어 또는 영어 검색",
+                        label_visibility="collapsed",
+                    )
+                with f2:
+                    skip_dup = st.checkbox(
+                        "등록된 항목 숨기기", value=True, key=f"catalog_skip_{key}",
+                    )
+                with f3:
+                    select_all = st.checkbox(
+                        "전체 선택", value=False, key=f"catalog_all_{key}",
+                    )
+
                 view = df
                 if q.strip():
-                    m = df["KO"].str.contains(q, case=False, na=False, regex=False) | \
-                        df["EN"].str.contains(q, case=False, na=False, regex=False)
-                    view = df[m]
-
-                if "기존대조" in view.columns:
-                    if st.checkbox("이미 등록된 항목 제외", value=True,
-                                   key=f"catalog_skip_{key}"):
-                        view = view[view["기존대조"] != "동일"]
-
-                select_all = st.checkbox(
-                    "현재 목록 전체 선택", value=False, key=f"catalog_all_{key}",
-                    help="실수로 대량 등재되지 않도록 기본은 해제입니다.",
-                )
+                    view = df[
+                        df["KO"].str.contains(q, case=False, na=False, regex=False)
+                        | df["EN"].str.contains(q, case=False, na=False, regex=False)
+                    ]
+                if skip_dup and "기존대조" in view.columns:
+                    view = view[view["기존대조"] != "동일"]
 
                 capped = view.head(_EDIT_CAP)
-                if len(view) > _EDIT_CAP:
-                    st.caption(
-                        f"{len(view):,}개 중 앞 {_EDIT_CAP}개만 편집할 수 있습니다. "
-                        "검색으로 좁혀서 나눠 등재하세요."
-                    )
-                else:
-                    st.caption(f"{len(capped):,}개")
+                st.caption(
+                    f"{len(capped):,} / {len(view):,}개 표시"
+                    + ("  ·  검색으로 좁혀서 나눠 등재하세요" if len(view) > _EDIT_CAP else "")
+                )
 
                 edit_df = capped[cols].copy()
                 edit_df.insert(0, "적용", select_all)
 
                 col_cfg = {c: st.column_config.TextColumn(c, disabled=True) for c in cols}
-                col_cfg["적용"] = st.column_config.CheckboxColumn("적용", width="small")
+                col_cfg["적용"] = st.column_config.CheckboxColumn("", width="small")
                 if "DNT" in cols:
                     col_cfg["DNT"] = st.column_config.CheckboxColumn("DNT", disabled=True)
-                if "후보수" in cols:
-                    col_cfg["후보수"] = st.column_config.NumberColumn("후보수", disabled=True)
-                if "EN 후보" in cols:
-                    # 충돌 행은 후보 중에서 고르게 한다 — 어느 화면의 표기인지는
-                    # 사람만 알 수 있으므로 자동 선택하지 않는다.
-                    _opts = sorted({
-                        o for s in capped.get("EN 후보", pd.Series(dtype=str))
-                        if s for o in str(s).split(" / ")
-                    })
-                    if _opts:
-                        col_cfg["EN"] = st.column_config.SelectboxColumn(
-                            "EN", options=sorted(set(_opts) | set(capped["EN"])),
-                            help="후보가 여러 개인 행은 여기서 고르세요.",
+                for _num in ("빈도", "후보수"):
+                    if _num in cols:
+                        col_cfg[_num] = st.column_config.NumberColumn(
+                            _num, disabled=True, width="small"
                         )
 
-                st.markdown(
-                    "**등재하려면** 표 맨 왼쪽 `적용` 칸을 체크하세요 — "
-                    "체크한 행만 아래 버튼으로 글로서리에 들어갑니다. "
-                    "여러 개를 한 번에 넣으려면 위의 `현재 목록 전체 선택`을 쓰세요."
-                )
                 edited = st.data_editor(
-                    edit_df, use_container_width=True, hide_index=True, height=420,
+                    edit_df, use_container_width=True, hide_index=True, height=380,
                     column_config=col_cfg, num_rows="fixed",
                     key=f"catalog_edit_{key}_{int(select_all)}_{q.strip()}",
                 )
                 chosen = edited[edited["적용"] == True]  # noqa: E712
 
                 if chosen.empty:
-                    # 비활성 버튼만 덩그러니 두면 '기능이 없다'고 오해하기 쉽다.
-                    st.info(
-                        "아직 선택한 항목이 없습니다. 위 표의 `적용`을 체크하면 "
-                        "여기에 등재 버튼이 나타납니다.",
-                        icon="👆",
-                    )
+                    st.caption("왼쪽 체크박스로 등재할 항목을 고르세요.")
                     return
 
                 if "기존대조" in chosen.columns:
                     _n_conflict = int((chosen["기존대조"] == "충돌(기존)").sum())
                     if _n_conflict:
                         st.warning(
-                            f"선택한 항목 중 **{_n_conflict}건**은 기존 글로서리와 영어가 "
-                            "다릅니다. 그대로 넣으면 같은 한국어에 두 표기가 공존합니다.",
+                            f"기존 글로서리와 영어가 다른 항목 {_n_conflict}건이 포함돼 있습니다.",
                             icon="⚠️",
                         )
 
                 if st.button(
-                    f"선택한 {len(chosen):,}개를 [{_extract_product}] 제품 글로서리에 등재",
-                    type="primary",
-                    key=f"catalog_save_{key}", use_container_width=True,
+                    f"{len(chosen):,}개 등재",
+                    type="primary", key=f"catalog_save_{key}",
+                    use_container_width=True,
                 ):
                     try:
-                        if kind == "pattern":
-                            rows = pd.DataFrame({
-                                "id": None,
-                                "Scope": _extract_scope,
-                                "KO": chosen["KO"].values,
-                                "EN": chosen["EN"].values,
-                                "Note": chosen.get("문맥(key)", ""),
-                                "Status": "approved",
-                                "File": _source_name,
-                            })
-                            # view_ids=set() — 삽입만 한다. 기존 행이 삭제될 경로를 차단.
-                            counts = save_patterns_from_dataframe(
-                                rows, view_ids=set(),
-                                current_user=st.session_state.current_user,
-                            )
-                        else:
-                            rows = pd.DataFrame({
-                                "id": None,
-                                "Scope": _extract_scope,
-                                "KO": chosen["KO"].values,
-                                "EN": chosen["EN"].values,
-                                "Product": _extract_product,
-                                "DNT": chosen.get("DNT", False),
-                                "Case-sensitive": False,
-                                "Note": chosen.get("문맥(key)", ""),
-                                "Status": "approved",
-                                "File": _source_name,
-                            })
-                            counts = save_terms_from_dataframe(
-                                rows, view_ids=set(),
-                                current_user=st.session_state.current_user,
-                            )
-                        st.success(
-                            f"{counts['inserted']}개 등재했습니다. "
-                            "[Glossary 관리]에서 확인하세요."
-                        )
-                        # 방금 넣은 것이 '동일'로 잡히도록 대조표를 다시 만든다
+                        counts = _register(chosen, kind)
+                        st.success(f"{counts['inserted']}개를 등재했습니다.")
                         st.session_state.pop("catalog_sig", None)
                     except Exception as e:
                         st.error(f"등재 오류: {e}")
 
+            # 탭 순서는 [Glossary 관리]와 맞춘다 — 용어, 패턴.
+            _tab_terms, _tab_patterns = st.tabs(
+                [f"용어 {_stats['용어후보']:,}", f"패턴 {_stats['패턴후보']:,}"]
+            )
             with _tab_terms:
-                st.caption(
-                    "영어 표기가 하나로 굳어 있고, 문서 곳곳에 **반복해서 나오는 복합어**만 "
-                    "추렸습니다. `빈도`는 카탈로그 전체에서 그 표현이 나온 횟수입니다 — "
-                    "높을수록 이 제품의 핵심 용어입니다."
-                )
                 _render_table(_result.terms,
                               ["빈도", "KO", "EN", "문맥(key)", "기존대조", "DNT"],
                               "terms", "term")
-
             with _tab_patterns:
-                st.caption("문장형 항목입니다. 용어집이 아니라 번역 예시(패턴)로 씁니다.")
                 _render_table(_result.patterns, ["KO", "EN", "문맥(key)"],
                               "patterns", "pattern")
 
-            # ── 표기가 갈리는 항목 정리 ────────────────────────────────
-            # 탭으로 두면 '검토해야 할 후보 목록'처럼 보이는데, 실제로는
-            # 성격이 다른 정리 작업이라 따로 뺐다.
-            _conf = catalog.conflict_rows(_result.labels)
+            # ── 표기가 갈리는 항목 ────────────────────────────────────
+            # 표로 두면 안 된다. Streamlit의 SelectboxColumn은 컬럼 전체에
+            # 옵션 목록 하나만 줄 수 있어서, 226행의 후보가 전부 뒤섞인
+            # 드롭다운이 되기 때문. 행마다 자기 후보만 보여주려면 카드 형태로
+            # 라디오를 그려야 한다.
             if not _conf.empty:
-                with st.expander(
-                    f"표기가 갈리는 항목 {len(_conf):,}건 정리하기", expanded=False
-                ):
-                    st.markdown(
-                        "같은 한국어에 영어가 여러 개인 항목입니다. 두 종류가 섞여 있습니다.\n\n"
-                        "- **표기 불일치** — `검출 규칙 → Detecting Rule / Detecting rules / "
-                        "Detection rule` 처럼 대소문자·단복수·활용형 차이일 뿐. 하나로 통일하면 됩니다.\n"
-                        "- **문맥 분기** — `확인 → OK / Check / Confirm` 처럼 화면에 따라 "
-                        "진짜 다른 단어. 사람이 정해야 합니다.\n\n"
-                        "둘을 가려내는 건 LLM이 하고, 문맥 분기만 직접 고르시면 됩니다."
-                    )
+                st.markdown("---")
+                st.markdown(f"##### 표기 충돌 {len(_conf):,}건")
+                st.caption(
+                    "같은 한국어에 영어가 여러 개인 항목입니다. "
+                    "단복수·대소문자 차이는 LLM이 정리하고, 화면마다 뜻이 다른 것만 직접 고르시면 됩니다."
+                )
 
-                    if st.button(
-                        f"LLM으로 {len(_conf):,}건 분류하기",
-                        key="catalog_resolve", type="primary",
-                    ):
+                _resolved = st.session_state.get("catalog_resolved")
+                if not _resolved:
+                    if st.button(f"{len(_conf):,}건 분류", key="catalog_resolve"):
                         from openai import OpenAI  # 이 화면에서만 필요
 
-                        with st.spinner("분류하는 중…"):
+                        with st.spinner("분류 중"):
                             try:
                                 st.session_state.catalog_resolved = catalog.resolve_conflicts(
                                     OpenAI(api_key=OPENAI_API_KEY), _conf
                                 )
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"분류 오류: {e}")
+                else:
+                    _rows = _conf.to_dict("records")
+                    _n_split = sum(
+                        1 for r in _rows
+                        if (_resolved.get(r["KO"]) or {}).get("kind") == "SPLIT"
+                    )
+                    st.caption(
+                        f"표기 불일치 {len(_rows) - _n_split:,}건은 대표 표기를 미리 골라뒀습니다. "
+                        f"문맥 분기 {_n_split:,}건은 직접 선택하세요."
+                    )
 
-                    _resolved = st.session_state.get("catalog_resolved")
-                    if _resolved:
-                        _view = _conf.copy()
-                        _view["판정"] = _view["KO"].map(
-                            lambda k: {"UNIFY": "표기 통일", "SPLIT": "문맥 분기"}.get(
-                                (_resolved.get(k) or {}).get("kind"), "미분류")
-                        )
-                        _view["근거"] = _view["KO"].map(
-                            lambda k: (_resolved.get(k) or {}).get("reason", "")
-                        )
-                        # 표기 통일로 판정된 행은 LLM이 고른 표기를 기본값으로 채운다
-                        _view["EN"] = _view.apply(
-                            lambda r: (_resolved.get(r["KO"]) or {}).get("pick") or r["EN"]
-                            if (_resolved.get(r["KO"]) or {}).get("kind") == "UNIFY"
-                            else r["EN"], axis=1,
-                        )
-                        _n_unify = int((_view["판정"] == "표기 통일").sum())
-                        _n_split = int((_view["판정"] == "문맥 분기").sum())
-                        st.success(
-                            f"표기 통일 **{_n_unify}건** — 제안된 표기가 `EN`에 채워졌습니다. "
-                            f"문맥 분기 **{_n_split}건** — `EN` 칸을 눌러 직접 고르세요."
-                        )
-                        _render_table(
-                            _view,
-                            ["KO", "EN", "판정", "근거", "EN 후보", "문맥(key)"],
-                            "conflicts", "term",
-                        )
+                    _only_split = st.checkbox(
+                        "직접 골라야 하는 것만 보기", value=True, key="catalog_only_split"
+                    )
+                    _shown = [
+                        r for r in _rows
+                        if not _only_split
+                        or (_resolved.get(r["KO"]) or {}).get("kind") == "SPLIT"
+                    ]
+
+                    _PAGE = 12
+                    _pages = max(1, (len(_shown) + _PAGE - 1) // _PAGE)
+                    _page = st.number_input(
+                        f"페이지 (총 {_pages})", min_value=1, max_value=_pages, value=1,
+                        step=1, key="catalog_conf_page",
+                    )
+                    _slice = _shown[(_page - 1) * _PAGE: _page * _PAGE]
+
+                    _picked = {}
+                    for _r in _slice:
+                        _ko = _r["KO"]
+                        _info = _resolved.get(_ko) or {}
+                        _cands = [c for c in str(_r.get("EN 후보") or "").split(" / ") if c]
+                        if not _cands:
+                            _cands = [_r["EN"]]
+                        _default = _info.get("pick") or _r["EN"]
+                        _idx = _cands.index(_default) if _default in _cands else 0
+                        _badge = "직접 선택" if _info.get("kind") == "SPLIT" else "자동 정리"
+
+                        with st.container(border=True):
+                            st.markdown(f"**{_ko}**  ·  :gray[{_badge}]")
+                            _picked[_ko] = st.radio(
+                                _ko, options=_cands, index=_idx, horizontal=True,
+                                label_visibility="collapsed",
+                                key=f"catalog_pick_{_ko}",
+                            )
+                            if _info.get("reason"):
+                                st.caption(_info["reason"])
+
+                    if st.button(
+                        f"이 페이지 {len(_slice)}건 등재", type="primary",
+                        key="catalog_save_conf", use_container_width=True,
+                        disabled=not _slice,
+                    ):
+                        try:
+                            _sel = pd.DataFrame({
+                                "KO": list(_picked),
+                                "EN": [_picked[k] for k in _picked],
+                                "문맥(key)": [
+                                    next((r["문맥(key)"] for r in _slice if r["KO"] == k), "")
+                                    for k in _picked
+                                ],
+                            })
+                            counts = _register(_sel, "term")
+                            st.success(f"{counts['inserted']}개를 등재했습니다.")
+                        except Exception as e:
+                            st.error(f"등재 오류: {e}")
 
             st.markdown("---")
             st.download_button(
-                "전체 후보를 엑셀로 내려받기",
+                "엑셀로 내려받기",
                 data=catalog.to_excel(
                     _result.terms, _result.patterns, product=_extract_product
                 ),
                 file_name=f"glossary_extracted_{_extract_product}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
-            )
-            st.caption(
-                "내려받은 파일은 **[Glossary 관리]의 마스터 엑셀 업로드**에 그대로 넣을 수 있는 "
-                "형식(`glossary` · `pattern` 시트)입니다."
+                help="[Glossary 관리]의 마스터 엑셀 업로드에 그대로 넣을 수 있는 형식입니다.",
             )
 
     st.stop()
