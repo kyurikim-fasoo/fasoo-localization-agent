@@ -31,6 +31,7 @@ from services.translation_logs import (
     list_logs,
     update_note,
 )
+from services import catalog
 from services.jobs import get_job, start_job
 from services.users import add_user, list_users
 from translator_engine import MARKDOWN_EXTENSIONS, extract_bold_terms
@@ -656,6 +657,14 @@ with st.sidebar:
         _try_navigate({"app_mode": "Glossary 관리"})
 
     if st.button(
+        "Glossary 추출",
+        use_container_width=True,
+        type="primary" if st.session_state.app_mode == "Glossary 추출" else "secondary",
+        key="nav_extract",
+    ):
+        _try_navigate({"app_mode": "Glossary 추출"})
+
+    if st.button(
         "로그",
         use_container_width=True,
         type="primary" if st.session_state.app_mode == "로그" else "secondary",
@@ -1121,6 +1130,288 @@ if st.session_state.app_mode == "Glossary 관리":
                 st.error(f"저장 오류: {e}")
 
     # Glossary 관리 페이지는 워크플로가 아니므로 여기서 페이지 렌더링 끝.
+    st.stop()
+
+
+# ─────────────────────────────────────────────
+# Glossary 추출 — 고객사 i18n 카탈로그에서 용어/UI 라벨 뽑기
+#
+# 제품의 다국어 메시지 파일은 key로 정렬돼 있어서, 번역문끼리 짝을 맞추는
+# 어려운 단계가 없다. 그래서 이 화면은 LLM을 쓰지 않는다 — 업로드 즉시
+# 결정론적으로 후보가 나온다.
+# ─────────────────────────────────────────────
+
+if st.session_state.app_mode == "Glossary 추출":
+    st.subheader("Glossary 추출")
+    st.caption(
+        "제품의 다국어 메시지 파일(i18n JSON)을 올리면 **용어집 후보**와 "
+        "**UI 라벨 표기**를 자동으로 뽑아냅니다. 한국어/영어 파일을 각각 올리거나, "
+        "두 언어가 함께 든 파일 하나를 올리세요."
+    )
+
+    uploaded_catalogs = st.file_uploader(
+        "JSON 업로드 (최대 2개)",
+        type=["json"],
+        accept_multiple_files=True,
+        key="catalog_uploader",
+    )
+
+    if not uploaded_catalogs:
+        with st.container(border=True):
+            st.markdown("##### 지원하는 파일 형태")
+            st.markdown(
+                "- `[{\"key\": \"a.b\", \"en\": \"Save\"}]` — 배열 + 언어 필드\n"
+                "- `[{\"key\": \"a.b\", \"en\": \"Save\", \"ko\": \"저장\"}]` — 한 파일에 양쪽 언어\n"
+                "- `{\"a.b\": \"저장\"}` — 평탄 객체 (i18next · vue-i18n)\n"
+                "- `{\"a\": {\"b\": \"저장\"}}` — 중첩 객체\n\n"
+                "필드 이름이 `key`/`en`/`ko`가 아니어도 자동으로 찾습니다. "
+                "어느 쪽이 한국어인지는 파일명이 아니라 **내용의 한글 비율**로 판단하므로, "
+                "파일명에 언어 표시가 없어도 됩니다."
+            )
+    else:
+        _sig = "|".join(f"{f.name}:{f.size}" for f in uploaded_catalogs)
+        if st.session_state.get("catalog_sig") != _sig:
+            # 6MB짜리 JSON을 rerun마다 다시 파싱하지 않도록 시그니처로 캐시
+            try:
+                _parsed = []
+                for f in uploaded_catalogs:
+                    _parsed.append(catalog.parse_json(f.name, json.loads(f.getvalue())))
+                _pick = catalog.pick_languages(_parsed)
+                _result = catalog.analyze(
+                    _pick,
+                    catalog.existing_terms_index(
+                        load_terms(current_user=st.session_state.current_user)
+                    ),
+                )
+                st.session_state.catalog_parsed = _parsed
+                st.session_state.catalog_pick_labels = (_pick.ko_label, _pick.en_label, _pick.ratios)
+                st.session_state.catalog_result = _result
+                st.session_state.catalog_sig = _sig
+                st.session_state.pop("catalog_error", None)
+            except Exception as e:
+                st.session_state.catalog_error = str(e)
+                st.session_state.catalog_sig = _sig
+                st.session_state.pop("catalog_result", None)
+
+        if st.session_state.get("catalog_error"):
+            st.error(f"파일을 읽지 못했습니다 — {st.session_state.catalog_error}")
+        elif st.session_state.get("catalog_result") is not None:
+            _result = st.session_state.catalog_result
+            _ko_label, _en_label, _ratios = st.session_state.catalog_pick_labels
+            _stats = _result.stats
+
+            with st.container(border=True):
+                st.markdown("##### 인식 결과")
+                for pf in st.session_state.catalog_parsed:
+                    st.caption(f"📄 **{pf.name}** — {pf.describe()}")
+                st.caption(
+                    f"🈚 한국어 = `{_ko_label}` · 🔤 영어 = `{_en_label}` "
+                    "(한글 비율로 자동 판정)"
+                )
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("대응 쌍", f"{_stats['공통키']:,}")
+            c2.metric("용어 후보", f"{_stats['용어후보']:,}")
+            c3.metric("UI 라벨", f"{_stats['라벨 고유KO']:,}")
+            c4.metric("패턴 후보", f"{_stats['패턴후보']:,}")
+
+            if _stats["충돌"]:
+                st.warning(
+                    f"같은 한국어에 영어 표기가 여러 개인 항목이 **{_stats['충돌']}건** 있습니다. "
+                    "제품 화면마다 표기가 다르다는 뜻이라, 어느 것을 쓸지 골라야 합니다. "
+                    "[UI 라벨] 탭 위쪽에 모아뒀습니다.",
+                    icon="⚠️",
+                )
+            if _stats["기존충돌"]:
+                st.info(
+                    f"기존 글로서리와 영어가 다른 항목이 **{_stats['기존충돌']}건** 있습니다. "
+                    "기존 항목이 우선이므로 표의 `기존대조` 열을 확인하세요.",
+                    icon="ℹ️",
+                )
+
+            _tab_terms, _tab_labels, _tab_patterns = st.tabs(
+                [f"용어 후보 ({_stats['용어후보']:,})",
+                 f"UI 라벨 ({_stats['라벨 고유KO']:,})",
+                 f"패턴 후보 ({_stats['패턴후보']:,})"]
+            )
+
+            # 등재 대상 설정 — 탭 공통
+            _rc1, _rc2 = st.columns(2)
+            with _rc1:
+                _extract_product = st.selectbox(
+                    "등록할 제품",
+                    options=["ALL"] + products,
+                    help="기존 용어와 섞이지 않도록 제품을 분리해두면 좋습니다.",
+                    key="catalog_product",
+                )
+            with _rc2:
+                _extract_scope = st.selectbox(
+                    "공개 범위", options=["Team", "Personal"], key="catalog_scope",
+                    help="Team = 모두가 사용 · Personal = 본인만",
+                )
+            _source_name = " + ".join(pf.name for pf in st.session_state.catalog_parsed)
+
+            # 편집기에 한 번에 올릴 최대 행 수. 수천 행을 체크박스로 뿌리면
+            # 브라우저가 버티지 못하므로, 검색으로 좁힌 결과에만 편집기를 준다.
+            _EDIT_CAP = 500
+
+            def _render_table(df, cols, key, kind):
+                if df.empty:
+                    st.info("후보가 없습니다.")
+                    return
+
+                q = st.text_input(
+                    "검색 (한국어 또는 영어)", key=f"catalog_q_{key}",
+                    placeholder="예: 분석", label_visibility="collapsed",
+                )
+                view = df
+                if q.strip():
+                    m = df["KO"].str.contains(q, case=False, na=False, regex=False) | \
+                        df["EN"].str.contains(q, case=False, na=False, regex=False)
+                    view = df[m]
+
+                if "기존대조" in view.columns:
+                    if st.checkbox("이미 등록된 항목 제외", value=True,
+                                   key=f"catalog_skip_{key}"):
+                        view = view[view["기존대조"] != "동일"]
+
+                select_all = st.checkbox(
+                    "현재 목록 전체 선택", value=False, key=f"catalog_all_{key}",
+                    help="실수로 대량 등재되지 않도록 기본은 해제입니다.",
+                )
+
+                capped = view.head(_EDIT_CAP)
+                if len(view) > _EDIT_CAP:
+                    st.caption(
+                        f"{len(view):,}개 중 앞 {_EDIT_CAP}개만 편집할 수 있습니다. "
+                        "검색으로 좁혀서 나눠 등재하세요."
+                    )
+                else:
+                    st.caption(f"{len(capped):,}개")
+
+                edit_df = capped[cols].copy()
+                edit_df.insert(0, "적용", select_all)
+
+                col_cfg = {c: st.column_config.TextColumn(c, disabled=True) for c in cols}
+                col_cfg["적용"] = st.column_config.CheckboxColumn("적용", width="small")
+                if "DNT" in cols:
+                    col_cfg["DNT"] = st.column_config.CheckboxColumn("DNT", disabled=True)
+                if "후보수" in cols:
+                    col_cfg["후보수"] = st.column_config.NumberColumn("후보수", disabled=True)
+                if "EN 후보" in cols:
+                    # 충돌 행은 후보 중에서 고르게 한다 — 어느 화면의 표기인지는
+                    # 사람만 알 수 있으므로 자동 선택하지 않는다.
+                    _opts = sorted({
+                        o for s in capped.get("EN 후보", pd.Series(dtype=str))
+                        if s for o in str(s).split(" / ")
+                    })
+                    if _opts:
+                        col_cfg["EN"] = st.column_config.SelectboxColumn(
+                            "EN", options=sorted(set(_opts) | set(capped["EN"])),
+                            help="후보가 여러 개인 행은 여기서 고르세요.",
+                        )
+
+                edited = st.data_editor(
+                    edit_df, use_container_width=True, hide_index=True, height=420,
+                    column_config=col_cfg, num_rows="fixed",
+                    key=f"catalog_edit_{key}_{int(select_all)}_{q.strip()}",
+                )
+                chosen = edited[edited["적용"] == True]  # noqa: E712
+
+                if "기존대조" in chosen.columns:
+                    _n_conflict = int((chosen["기존대조"] == "충돌(기존)").sum())
+                    if _n_conflict:
+                        st.warning(
+                            f"선택한 항목 중 **{_n_conflict}건**은 기존 글로서리와 영어가 "
+                            "다릅니다. 그대로 넣으면 같은 한국어에 두 표기가 공존합니다.",
+                            icon="⚠️",
+                        )
+
+                if st.button(
+                    f"선택한 {len(chosen)}개 등재",
+                    type="primary", disabled=chosen.empty,
+                    key=f"catalog_save_{key}", use_container_width=True,
+                ):
+                    try:
+                        if kind == "pattern":
+                            rows = pd.DataFrame({
+                                "id": None,
+                                "Scope": _extract_scope,
+                                "KO": chosen["KO"].values,
+                                "EN": chosen["EN"].values,
+                                "Note": chosen.get("문맥(key)", ""),
+                                "Status": "approved",
+                                "File": _source_name,
+                            })
+                            # view_ids=set() — 삽입만 한다. 기존 행이 삭제될 경로를 차단.
+                            counts = save_patterns_from_dataframe(
+                                rows, view_ids=set(),
+                                current_user=st.session_state.current_user,
+                            )
+                        else:
+                            rows = pd.DataFrame({
+                                "id": None,
+                                "Scope": _extract_scope,
+                                "KO": chosen["KO"].values,
+                                "EN": chosen["EN"].values,
+                                "Product": _extract_product,
+                                "DNT": chosen.get("DNT", False),
+                                "Case-sensitive": False,
+                                "Note": chosen.get("문맥(key)", ""),
+                                "Status": "approved",
+                                "File": _source_name,
+                            })
+                            counts = save_terms_from_dataframe(
+                                rows, view_ids=set(),
+                                current_user=st.session_state.current_user,
+                            )
+                        st.success(
+                            f"{counts['inserted']}개 등재했습니다. "
+                            "[Glossary 관리]에서 확인하세요."
+                        )
+                        # 방금 넣은 것이 '동일'로 잡히도록 대조표를 다시 만든다
+                        st.session_state.pop("catalog_sig", None)
+                    except Exception as e:
+                        st.error(f"등재 오류: {e}")
+
+            with _tab_terms:
+                st.caption(
+                    "1:1로 대응되고 용어처럼 보이는 것만 추렸습니다. "
+                    "'확인'·'저장' 같은 짧은 동작어는 문맥마다 번역이 달라 제외했습니다."
+                )
+                _render_table(_result.terms,
+                              ["KO", "EN", "문맥(key)", "기존대조", "DNT"],
+                              "terms", "term")
+
+            with _tab_labels:
+                st.caption(
+                    "제품 화면에 실제로 쓰이는 표기입니다. 매뉴얼의 버튼·메뉴 이름을 "
+                    "화면과 일치시키는 데 씁니다. `후보수`가 2 이상이면 표기가 갈리는 항목입니다."
+                )
+                _render_table(_result.labels,
+                              ["KO", "EN", "후보수", "EN 후보", "문맥(key)", "기존대조"],
+                              "labels", "term")
+
+            with _tab_patterns:
+                st.caption("문장형 항목입니다. 용어집이 아니라 번역 예시(패턴)로 씁니다.")
+                _render_table(_result.patterns, ["KO", "EN", "문맥(key)"],
+                              "patterns", "pattern")
+
+            st.markdown("---")
+            st.download_button(
+                "전체 후보를 엑셀로 내려받기",
+                data=catalog.to_excel(
+                    _result.terms, _result.patterns, product=_extract_product
+                ),
+                file_name=f"glossary_extracted_{_extract_product}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+            st.caption(
+                "내려받은 파일은 **[Glossary 관리]의 마스터 엑셀 업로드**에 그대로 넣을 수 있는 "
+                "형식(`glossary` · `pattern` 시트)입니다."
+            )
+
     st.stop()
 
 

@@ -145,6 +145,26 @@ def reset_token_counters():
     TOTAL_TOKENS = 0
 
 
+# 폭 없는(zero-width) 문자들. 모델 응답에 이따금 섞여 들어오는데, 렌더링에
+# 보이지 않아 사람 리뷰로는 절대 걸러지지 않고 검색·복사·diff에서만 문제가
+# 된다. 한국어→영어 번역에서는 이 문자들이 의미를 갖는 경우가 없으므로 제거해도
+# 안전하다. (U+00A0 non-breaking space는 원문 의도일 수 있어 건드리지 않는다.)
+_ZERO_WIDTH_RE = re.compile(
+    "["
+    "﻿"   # ZERO WIDTH NO-BREAK SPACE (BOM) — 실제로 관측된 케이스
+    "​"   # ZERO WIDTH SPACE
+    "‌"   # ZERO WIDTH NON-JOINER
+    "‍"   # ZERO WIDTH JOINER
+    "⁠"   # WORD JOINER
+    "­"   # SOFT HYPHEN
+    "]"
+)
+
+
+def strip_zero_width(text: str) -> str:
+    return _ZERO_WIDTH_RE.sub("", text)
+
+
 def contains_korean(text: str) -> bool:
     # Strip drawing placeholders before checking — they are not translatable text
     clean = DRAWING_PH_RE.sub("", text) if text else text
@@ -2475,7 +2495,11 @@ def translate_document(
                 style_reference=style_guide,
             )
 
-            translated = translated.strip()
+            # 0-a) 폭 없는 문자 제거 — **모든 후처리보다 먼저** 해야 한다.
+            #      모델이 문장 끝에 U+FEFF를 붙여 보내면 restore_sentence_period가
+            #      "마침표가 없다"고 오판해 마침표를 하나 더 붙이는 식으로,
+            #      보이지도 않는 문자가 텍스트 판정을 줄줄이 어긋나게 만든다.
+            translated = strip_zero_width(translated).strip()
 
             # 0) 줄 구조 정리 — 모델이 ⟦LB⟧ 대신 개행으로 답했거나 여분을
             #    붙였을 때 원문 기준으로 맞춘다. 이후 후처리들이 ⟦LB⟧를 "줄"로
@@ -2502,6 +2526,7 @@ def translate_document(
             # 4) 남은 한국어 fallback 번역
             if contains_korean(translated):
                 translated = translate_remaining_korean(client, translated, model=model)
+                translated = strip_zero_width(translated)
                 translated = enforce_line_breaks(translated, gl_pre)
                 translated = repair_bold_markers(translated)
                 translated = repair_hl_markers(translated)
@@ -2537,11 +2562,11 @@ def translate_document(
             translated = repair_hl_markers(translated)
 
             # 7) case-sensitive/DNT glossary 용어의 정확한 대소문자 복원.
-            #    Heading에서는 절대 호출하지 않는다 — heading은 항상 sentence
-            #    case가 원칙이므로 "Wrapsody eCo" 같은 case-sensitive 용어도
-            #    heading에서는 "Wrapsody eco"로 자연스럽게 두는 게 맞다.
-            if not is_heading:
-                translated = enforce_case_sensitive_glossary(translated, glossary_entries)
+            #    Heading에도 적용한다. 원칙은 여전히 "heading은 sentence case"
+            #    지만, 사용자가 글로서리에 **명시적으로 case-sensitive로 등록한**
+            #    용어는 그 표기가 곧 의도다. URL·API 같은 약어를 엔진이 알아서
+            #    대문자화하지는 않고(그건 사용자 몫), 등록된 것만 존중한다.
+            translated = enforce_case_sensitive_glossary(translated, glossary_entries)
 
             if enable_cache:
                 cache[src] = translated
@@ -2596,7 +2621,8 @@ def translate_document(
             for i, item in enumerate(batch):
                 if i not in revisions:
                     continue
-                revised = revisions[i].strip()
+                # Pass 1과 같은 이유로 후처리 전에 폭 없는 문자를 먼저 제거한다.
+                revised = strip_zero_width(revisions[i]).strip()
                 if not revised:
                     continue  # 안전장치: 빈 응답으로 덮어쓰지 않음
                 # Pass 2 응답에도 동일한 marker 후처리를 적용

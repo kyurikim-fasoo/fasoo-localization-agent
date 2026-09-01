@@ -35,7 +35,11 @@ stub_llm.install()
 OUT.parent.mkdir(exist_ok=True)
 te.translate_document(
     in_path=str(TARGET), out_path=str(OUT),
-    glossary_rows=[], pattern_rows=[], api_key="sk-stub",
+    glossary_rows=[
+        # 사용자가 명시적으로 case-sensitive로 등록한 제품명
+        {"KO": "Virtual Drive", "EN": "Virtual Drive", "Case-sensitive": True},
+    ],
+    pattern_rows=[], api_key="sk-stub",
     enable_cache=True, enable_qa=True, translation_mode="매뉴얼",
 )
 src = TARGET.read_text(encoding="utf-8")
@@ -51,7 +55,8 @@ check("코드펜스 주석 미번역", "# 이 블록은 번역하면 안 됩니�
 check("이스케이프 \\& 보존", "\\&" in out)
 check("이스케이프 \\* 보존", "\\*" in out)
 check("기존 {#custom-anchor} 유지", "{#custom-anchor}" in out)
-check("id가 이미 있으면 중복 부착 안 함", out.count("{#") == out.count("{#custom-anchor}") + 1,
+check("id가 이미 있으면 중복 부착 안 함",
+      all(l.count("{#") <= 1 for l in out.splitlines()) and out.count("{#custom-anchor}") == 1,
       f"{{# 개수 {out.count('{#')}")
 check("중첩 목록 들여쓰기 유지", re.search(r"^  - ", out, re.M) is not None)
 check("줄 수 보존(하드랩 제외)", abs(out.count("\n") - src.count("\n")) <= 1,
@@ -62,6 +67,13 @@ check("JSX 여는 태그 원형", "<Tabs" in out and "]}>" in out)
 check("표 구분행 원형", "| --- | --- |" in out)
 check("기울임 * 쌍 보존", re.search(r"(?<!\*)\*[^*\n]+\*(?!\*)", out) is not None)
 check("기울임 안쪽은 번역됨", "*기울임*" not in out)
+
+print("\n[헤딩 대소문자] 등록된 case-sensitive 용어만 존중, 나머지는 sentence case")
+heading = next(l for l in out.splitlines() if l.startswith("## ") and "Drive" in l.title())
+check("헤딩에서 등록 표기 유지", "Virtual Drive" in heading, heading)
+check("본문에서도 유지", any("Virtual Drive" in l and not l.startswith("#")
+                            for l in out.splitlines()))
+check("폭 없는 문자 없음", "﻿" not in out and "​" not in out)
 
 print("\n[의도된 동작] JSX 태그 사이 본문은 번역한다")
 check("Admonition 본문 번역됨", "JSX 블록 안쪽 본문입니다." not in out)

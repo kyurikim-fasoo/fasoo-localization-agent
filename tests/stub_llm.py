@@ -39,7 +39,10 @@ def _fake_translate(text: str) -> str:
             out.append(part)          # 마커는 손대지 않는다
         else:
             out.append(_KO_RUN_RE.sub(_pseudo, part))
-    return "".join(out)
+    # 실제 모델이 이따금 섞어 뱉는 폭 없는 문자를 일부러 주입한다.
+    # strip_zero_width가 제대로 걷어내면 기준선과 결과가 같아야 하므로,
+    # 이 한 줄이 곧 "보이지 않는 문자 제거" 회귀 테스트가 된다.
+    return "".join(out) + "﻿"
 
 
 def install() -> None:

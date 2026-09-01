@@ -19,6 +19,7 @@ SUITES = [
     ("마크다운 엣지 케이스 / 지원 범위 명세", "test_markdown_edges.py"),
     ("마크다운 엔드투엔드", "regression_markdown.py"),
     ("docx 회귀(어댑터 리팩터링 안전망)", "regression_docx.py"),
+    ("카탈로그 추출", "test_catalog.py"),
     ("앱 UI", "test_app_ui.py"),
 ]
 

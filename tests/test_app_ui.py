@@ -136,6 +136,15 @@ check("예외 없음", not at.exception, str(at.exception))
 check("다운로드 버튼 렌더", len(at.get("download_button")) == 1)
 tmp_out.unlink(missing_ok=True)
 
+print("[7] Glossary 추출 메뉴")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+check("업로더 렌더", len(at.get("file_uploader")) == 1)
+check("사이드바 메뉴 버튼 존재", "Glossary 추출" in [b.label for b in at.button])
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

@@ -40,4 +40,8 @@ JSX 블록 안쪽 본문입니다.
 
 ## 이미 id가 있는 헤딩 {#custom-anchor}
 
+## Virtual Drive 설정하기
+
+본문에서도 Virtual Drive 를 씁니다.
+
 끝.
