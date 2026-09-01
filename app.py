@@ -411,6 +411,15 @@ st.markdown(
         min-width: 170px !important;
     }
 
+    /* ── Glossary 추출: 페이지 이동 버튼 — 아이콘을 크게 ────────── */
+    /* Streamlit은 key가 있는 위젯 래퍼에 .st-key-<key> 클래스를 붙인다. */
+    .st-key-catalog_prev button, .st-key-catalog_next button {
+        font-size: 20px !important;
+        line-height: 1.1 !important;
+        padding: 2px 0 !important;
+        font-weight: 600 !important;
+    }
+
     /* ── 사이드바 메뉴 버튼: Wrapsody 스타일 ──────────────────── */
     /* 비활성: 테두리 없음, 투명 배경, 회색 글자 */
     section[data-testid="stSidebar"] [data-testid="stButton"] button {
@@ -1442,6 +1451,15 @@ if st.session_state.app_mode == "Glossary 추출":
                     st.session_state.catalog_conf_page = _page
                     _slice = _shown[(_page - 1) * _PAGE: _page * _PAGE]
 
+                    # 용어·패턴 탭과 같은 원칙 — 기본은 아무것도 등재하지 않는다.
+                    # 각 카드의 첫 선택지가 '선택 안 함'이고, 후보를 한 번
+                    # 클릭해야 등재 대상이 된다.
+                    _SKIP = "선택 안 함"
+                    _use_reco = st.checkbox(
+                        "추천값 일괄 선택", value=False, key="catalog_use_reco",
+                        help="LLM이 고른 표기를 이 페이지 전체에 미리 적용합니다.",
+                    )
+
                     _picked = {}
                     for _r in _slice:
                         _ko = _r["KO"]
@@ -1449,43 +1467,56 @@ if st.session_state.app_mode == "Glossary 추출":
                         _cands = [c for c in str(_r.get("EN 후보") or "").split(" / ") if c]
                         if not _cands:
                             _cands = [_r["EN"]]
-                        _default = _info.get("pick") or _r["EN"]
-                        _idx = _cands.index(_default) if _default in _cands else 0
+                        _reco = _info.get("pick") if _info.get("kind") == "UNIFY" else ""
+                        _options = [_SKIP] + _cands
+                        _idx = (
+                            _options.index(_reco)
+                            if _use_reco and _reco in _options else 0
+                        )
                         _badge = "직접 선택" if _info.get("kind") == "SPLIT" else "자동 정리"
 
                         with st.container(border=True):
                             st.markdown(f"**{_ko}**  ·  :gray[{_badge}]")
                             _picked[_ko] = st.radio(
-                                _ko, options=_cands, index=_idx, horizontal=True,
+                                _ko, options=_options, index=_idx, horizontal=True,
                                 label_visibility="collapsed",
-                                key=f"catalog_pick_{_ko}",
+                                # 일괄 선택을 토글하면 기본값이 다시 적용되도록 키를 바꾼다
+                                key=f"catalog_pick_{int(_use_reco)}_{_ko}",
                             )
-                            if _info.get("reason"):
-                                st.caption(_info["reason"])
+                            _hint = " · ".join(
+                                x for x in (
+                                    f"추천 **{_reco}**" if _reco else "",
+                                    _info.get("reason", ""),
+                                ) if x
+                            )
+                            if _hint:
+                                st.caption(_hint)
+
+                    _picked = {k: v for k, v in _picked.items() if v != _SKIP}
 
                     # 목록 하단 페이지 이동
                     _nav_l, _nav_c, _nav_r = st.columns([1, 3, 1])
                     with _nav_l:
-                        if st.button("‹", key="catalog_prev", disabled=_page <= 1,
+                        if st.button("◀", key="catalog_prev", disabled=_page <= 1,
                                      use_container_width=True, help="이전 페이지"):
                             st.session_state.catalog_conf_page = _page - 1
                             st.rerun()
                     with _nav_c:
                         st.markdown(
-                            f"<div style='text-align:center;padding-top:6px;color:#666;'>"
-                            f"{_page} / {_pages}</div>",
+                            f"<div style='text-align:center;padding-top:10px;"
+                            f"font-size:15px;color:#555;'>{_page} / {_pages}</div>",
                             unsafe_allow_html=True,
                         )
                     with _nav_r:
-                        if st.button("›", key="catalog_next", disabled=_page >= _pages,
+                        if st.button("▶", key="catalog_next", disabled=_page >= _pages,
                                      use_container_width=True, help="다음 페이지"):
                             st.session_state.catalog_conf_page = _page + 1
                             st.rerun()
 
                     if st.button(
-                        f"이 페이지 {len(_slice)}건 등재", type="primary",
+                        f"선택한 {len(_picked)}건 등재", type="primary",
                         key="catalog_save_conf", use_container_width=True,
-                        disabled=not _slice,
+                        disabled=not _picked,
                     ):
                         try:
                             _sel = pd.DataFrame({
@@ -1500,6 +1531,8 @@ if st.session_state.app_mode == "Glossary 추출":
                             st.success(f"{counts['inserted']}개를 등재했습니다.")
                         except Exception as e:
                             st.error(f"등재 오류: {e}")
+                    if not _picked:
+                        st.caption("각 항목에서 쓸 표기를 클릭하면 등재 대상이 됩니다.")
 
             st.markdown("---")
             st.download_button(

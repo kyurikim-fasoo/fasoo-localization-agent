@@ -205,15 +205,15 @@ at.run()
 check("예외 없음", not at.exception, str(at.exception))
 check("후보가 라디오로 렌더", len(at.radio) >= 1, f"radio {len(at.radio)}개")
 if at.radio:
-    check("행의 후보만 옵션으로", set(at.radio[0].options) == {"OK", "Check"},
+    check("행의 후보 + 제외 선택지", set(at.radio[0].options) == {"선택 안 함", "OK", "Check"},
           str(at.radio[0].options))
 check("판정 근거 노출", any("화면마다" in str(c.value) for c in at.caption),
       str([str(c.value)[:30] for c in at.caption]))
 _labels = [b.label for b in at.button]
-check("페이지 이동은 < > 버튼", "‹" in _labels and "›" in _labels, str(_labels))
+check("페이지 이동은 ◀ ▶ 버튼", "◀" in _labels and "▶" in _labels, str(_labels))
 check("한 페이지뿐이면 양쪽 비활성",
-      all(b.disabled for b in at.button if b.label in ("‹", "›")),
-      str([(b.label, b.disabled) for b in at.button if b.label in ("‹", "›")]))
+      all(b.disabled for b in at.button if b.label in ("◀", "▶")),
+      str([(b.label, b.disabled) for b in at.button if b.label in ("◀", "▶")]))
 check("페이지는 스테퍼가 아님",
       not any("conf_page" in str(n.key) for n in at.number_input),
       str([str(n.key) for n in at.number_input]))
@@ -246,7 +246,7 @@ check("1페이지에 12건", len(at.radio) == 12, f"radio {len(at.radio)}개")
 check("1/2 표시", any("1 / 2" in str(m.value) for m in at.markdown),
       str([str(m.value)[:20] for m in at.markdown if "/" in str(m.value)]))
 _p1 = {r.label for r in at.radio}   # 클릭 전에 잡아둔다 — at는 run()으로 갱신된다
-_next = [b for b in at.button if b.label == "›"][0]
+_next = [b for b in at.button if b.label == "▶"][0]
 check("다음 버튼 활성", not _next.disabled)
 at2 = _next.click().run()
 check("2페이지로 이동", at2.session_state["catalog_conf_page"] == 2,
@@ -254,7 +254,33 @@ check("2페이지로 이동", at2.session_state["catalog_conf_page"] == 2,
 _p2 = {r.label for r in at2.radio}
 # AppTest는 st.rerun() 전후 요소를 함께 담을 때가 있어 개수 대신 목록 변화를 본다
 check("2페이지에 새 항목이 나옴", bool(_p2 - _p1), f"p1={len(_p1)} p2={len(_p2)}")
-check("이전 버튼 활성", not [b for b in at2.button if b.label == "‹"][0].disabled)
+check("이전 버튼 활성", not [b for b in at2.button if b.label == "◀"][0].disabled)
+
+print("[11] 표기 충돌 — 기본은 아무것도 선택되지 않는다")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.session_state["catalog_result"] = _conf_res
+at.session_state["catalog_parsed"] = [_FakeParsed()]
+at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+at.session_state["catalog_sig"] = "seeded"
+at.session_state["catalog_resolved"] = {
+    "확인": {"kind": "UNIFY", "pick": "OK", "reason": "대소문자 차이"}
+}
+at.session_state["catalog_only_split"] = False   # UNIFY 행도 보이게
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+check("'선택 안 함'이 기본값", at.radio[0].value == "선택 안 함", str(at.radio[0].value))
+check("후보 앞에 제외 선택지", at.radio[0].options[0] == "선택 안 함",
+      str(at.radio[0].options))
+check("등재 버튼 비활성", all(b.disabled for b in at.button if "등재" in b.label),
+      str([(b.label, b.disabled) for b in at.button if "등재" in b.label]))
+check("추천값 일괄 선택 제공",
+      any("추천값" in str(c.label) for c in at.checkbox),
+      str([str(c.label) for c in at.checkbox]))
+
+at2 = [c for c in at.checkbox if "추천값" in str(c.label)][0].check().run()
+check("일괄 선택 시 추천값 적용", at2.radio[0].value == "OK", str(at2.radio[0].value))
 
 print()
 if failures:
