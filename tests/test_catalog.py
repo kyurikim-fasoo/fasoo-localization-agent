@@ -194,6 +194,24 @@ prows = pd.DataFrame({
 cp = save_patterns_from_dataframe(prows, view_ids=set(), current_user="tester")
 check("패턴 1개 삽입", cp["inserted"] == 1, str(cp))
 
+print("[14] 개수 상한 — 후보를 쏟아내지 않는다")
+_lim_ko = {f"k{i}": f"취약점 점검 결과{i % 7}" for i in range(60)}
+_lim_en = {f"k{i}": f"Vulnerability check result{i % 7}" for i in range(60)}
+_lim_ko.update({f"s{i}": f"항목{i}을(를) 찾을 수 없습니다." for i in range(40)})
+_lim_en.update({f"s{i}": f"Item{i} not found." for i in range(40)})
+_lp = ct.pick_languages([ct.parse_json("ko.json", _lim_ko), ct.parse_json("en.json", _lim_en)])
+r14 = ct.analyze(_lp, term_limit=3, pattern_limit=2)
+check("용어 상한 적용", len(r14.terms) <= 3, str(len(r14.terms)))
+check("패턴 상한 적용", len(r14.patterns) <= 2, str(len(r14.patterns)))
+check("상한 전 개수도 보고", r14.stats["패턴풀"] > r14.stats["패턴후보"],
+      f"{r14.stats['패턴풀']} vs {r14.stats['패턴후보']}")
+check("문형 빈도 컬럼", "문형 빈도" in r14.patterns.columns, str(list(r14.patterns.columns)))
+
+# 같은 어미의 문장은 한 덩어리로 묶여 대표만 남는다
+check("같은 문형은 하나로", len(r14.patterns) < 40, str(len(r14.patterns)))
+check("기본 상한값", (ct.DEFAULT_TERM_LIMIT, ct.DEFAULT_PATTERN_LIMIT) == (100, 30),
+      f"{ct.DEFAULT_TERM_LIMIT}/{ct.DEFAULT_PATTERN_LIMIT}")
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

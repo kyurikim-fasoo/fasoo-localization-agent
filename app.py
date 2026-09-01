@@ -1162,22 +1162,35 @@ if st.session_state.app_mode == "Glossary 추출":
                     _parsed.append(catalog.parse_json(f.name, json.loads(f.getvalue())))
                 _pick = catalog.pick_languages(_parsed)
                 st.session_state.catalog_parsed = _parsed
+                st.session_state.catalog_pick = _pick
                 st.session_state.catalog_pick_labels = (
                     _pick.ko_label, _pick.en_label, _pick.ratios
                 )
-                st.session_state.catalog_result = catalog.analyze(
-                    _pick,
-                    catalog.existing_terms_index(
-                        load_terms(current_user=st.session_state.current_user)
-                    ),
-                )
                 st.session_state.catalog_sig = _sig
+                st.session_state.pop("catalog_result", None)
+                st.session_state.pop("catalog_result_key", None)
                 st.session_state.pop("catalog_resolved", None)
                 st.session_state.pop("catalog_error", None)
             except Exception as e:
                 st.session_state.catalog_error = str(e)
                 st.session_state.catalog_sig = _sig
                 st.session_state.pop("catalog_result", None)
+
+    # 상한이 바뀌면 파싱은 그대로 두고 집계만 다시 한다 (0.5초).
+    _t_limit = st.session_state.get("catalog_term_limit", catalog.DEFAULT_TERM_LIMIT)
+    _p_limit = st.session_state.get("catalog_pattern_limit", catalog.DEFAULT_PATTERN_LIMIT)
+    _key = (st.session_state.get("catalog_sig"), _t_limit, _p_limit)
+    if st.session_state.get("catalog_pick") is not None and \
+            st.session_state.get("catalog_result_key") != _key:
+        st.session_state.catalog_result = catalog.analyze(
+            st.session_state.catalog_pick,
+            catalog.existing_terms_index(
+                load_terms(current_user=st.session_state.current_user)
+            ),
+            term_limit=_t_limit,
+            pattern_limit=_p_limit,
+        )
+        st.session_state.catalog_result_key = _key
 
     # 분석 결과는 session_state에 남겨둔다 — 다른 메뉴에 다녀와도 유지된다.
     if st.session_state.get("catalog_error"):
@@ -1211,9 +1224,24 @@ if st.session_state.app_mode == "Glossary 추출":
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("대응 쌍", f"{_stats['공통키']:,}")
-            c2.metric("용어", f"{_stats['용어후보']:,}")
-            c3.metric("패턴", f"{_stats['패턴후보']:,}")
+            c2.metric("용어", f"{_stats['용어후보']:,}",
+                      help=f"빈도 상위 {_stats['용어후보']:,}개 (조건 통과 {_stats['용어풀']:,}개)")
+            c3.metric("패턴", f"{_stats['패턴후보']:,}",
+                      help=f"문형별 대표 {_stats['패턴후보']:,}개 (문장 {_stats['패턴풀']:,}개)")
             c4.metric("표기 충돌", f"{len(_conf):,}")
+
+            with st.expander("추출 개수 조정"):
+                a1, a2 = st.columns(2)
+                a1.number_input(
+                    "용어", min_value=10, max_value=1000, step=10,
+                    key="catalog_term_limit", value=_t_limit,
+                    help="빈도가 높은 순으로 이만큼만 가져옵니다.",
+                )
+                a2.number_input(
+                    "패턴", min_value=5, max_value=200, step=5,
+                    key="catalog_pattern_limit", value=_p_limit,
+                    help="같은 말투의 문장은 하나로 묶고, 흔한 문형 순으로 가져옵니다.",
+                )
 
             _rc1, _rc2 = st.columns(2)
             with _rc1:
@@ -1299,6 +1327,10 @@ if st.session_state.app_mode == "Glossary 추출":
 
                 col_cfg = {c: st.column_config.TextColumn(c, disabled=True) for c in cols}
                 col_cfg["적용"] = st.column_config.CheckboxColumn("", width="small")
+                if "문형 빈도" in cols:
+                    col_cfg["문형 빈도"] = st.column_config.NumberColumn(
+                        "문형", disabled=True, width="small"
+                    )
                 if "DNT" in cols:
                     col_cfg["DNT"] = st.column_config.CheckboxColumn("DNT", disabled=True)
                 for _num in ("빈도", "후보수"):
@@ -1347,7 +1379,8 @@ if st.session_state.app_mode == "Glossary 추출":
                               ["빈도", "KO", "EN", "문맥(key)", "기존대조", "DNT"],
                               "terms", "term")
             with _tab_patterns:
-                _render_table(_result.patterns, ["KO", "EN", "문맥(key)"],
+                _render_table(_result.patterns,
+                              ["문형 빈도", "KO", "EN", "문맥(key)"],
                               "patterns", "pattern")
 
             # ── 표기가 갈리는 항목 ────────────────────────────────────
@@ -1390,18 +1423,23 @@ if st.session_state.app_mode == "Glossary 추출":
                     _only_split = st.checkbox(
                         "직접 골라야 하는 것만 보기", value=True, key="catalog_only_split"
                     )
+                    if st.session_state.get("catalog_prev_filter") != _only_split:
+                        # 목록이 통째로 바뀌므로 첫 페이지로 되돌린다
+                        st.session_state.catalog_conf_page = 1
+                        st.session_state.catalog_prev_filter = _only_split
                     _shown = [
                         r for r in _rows
                         if not _only_split
                         or (_resolved.get(r["KO"]) or {}).get("kind") == "SPLIT"
                     ]
 
+                    # 페이지 번호는 위젯이 아니라 순수 상태로 들고 간다 —
+                    # 이동 버튼을 목록 **아래**에 두려면 카드를 그리기 전에
+                    # 현재 페이지를 알아야 하기 때문.
                     _PAGE = 12
                     _pages = max(1, (len(_shown) + _PAGE - 1) // _PAGE)
-                    _page = st.number_input(
-                        f"페이지 (총 {_pages})", min_value=1, max_value=_pages, value=1,
-                        step=1, key="catalog_conf_page",
-                    )
+                    _page = min(st.session_state.get("catalog_conf_page", 1), _pages)
+                    st.session_state.catalog_conf_page = _page
                     _slice = _shown[(_page - 1) * _PAGE: _page * _PAGE]
 
                     _picked = {}
@@ -1424,6 +1462,25 @@ if st.session_state.app_mode == "Glossary 추출":
                             )
                             if _info.get("reason"):
                                 st.caption(_info["reason"])
+
+                    # 목록 하단 페이지 이동
+                    _nav_l, _nav_c, _nav_r = st.columns([1, 3, 1])
+                    with _nav_l:
+                        if st.button("‹", key="catalog_prev", disabled=_page <= 1,
+                                     use_container_width=True, help="이전 페이지"):
+                            st.session_state.catalog_conf_page = _page - 1
+                            st.rerun()
+                    with _nav_c:
+                        st.markdown(
+                            f"<div style='text-align:center;padding-top:6px;color:#666;'>"
+                            f"{_page} / {_pages}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with _nav_r:
+                        if st.button("›", key="catalog_next", disabled=_page >= _pages,
+                                     use_container_width=True, help="다음 페이지"):
+                            st.session_state.catalog_conf_page = _page + 1
+                            st.rerun()
 
                     if st.button(
                         f"이 페이지 {len(_slice)}건 등재", type="primary",

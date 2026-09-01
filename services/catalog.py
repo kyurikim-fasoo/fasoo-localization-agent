@@ -276,6 +276,58 @@ def _looks_like_term(ko: str) -> bool:
     return TERM_MIN_WORDS <= len(_WORD_RE.findall(ko)) <= TERM_MAX_WORDS
 
 
+# 뽑아낼 최대 개수. 후보를 수천 개 쏟아내면 검토가 불가능하고, 글로서리는
+# 모든 문단에 전수 치환되므로 커질수록 오탐도 늘어난다. '많이'가 아니라
+# '핵심만'이 목표다.
+DEFAULT_TERM_LIMIT = 100
+DEFAULT_PATTERN_LIMIT = 30
+
+# 문형 대표를 고를 때 이 길이를 넘는 문장은 예시로 부적합
+PATTERN_MAX_CHARS = 60
+
+_SENT_SHAPE_TAIL = re.compile(
+    r"(습니다|합니다|입니다|하세요|하십시오|십시오|됩니다|있습니다|없습니다|"
+    r"했습니다|합니까|입니까|하시겠습니까)[.?!]?$"
+)
+
+
+def _pattern_shape(ko: str) -> str:
+    """
+    문형 시그니처. 같은 말투의 문장을 한 덩어리로 묶기 위한 키다.
+
+    패턴은 '이런 한국어 문형은 이렇게 영어로 쓴다'는 예시라서, 같은 어미의
+    문장을 수백 개 넣어봐야 프롬프트만 길어지고 배우는 건 똑같다. 끝 어절
+    두 개를 시그니처로 묶고 그룹마다 대표 하나만 남긴다.
+    """
+    words = _WORD_RE.findall(ko)
+    if not words:
+        return ko[-6:]
+    tail = " ".join(words[-2:]) if len(words) >= 2 else words[-1]
+    m = _SENT_SHAPE_TAIL.search(ko.strip())
+    return f"{m.group(1)}|{tail}" if m else tail
+
+
+def _pick_patterns(rows: List[dict], limit: int) -> pd.DataFrame:
+    """문형별로 묶어 대표 문장만 남기고, 흔한 문형 순으로 자른다."""
+    groups: Dict[str, List[dict]] = defaultdict(list)
+    for r in rows:
+        if len(r["KO"]) > PATTERN_MAX_CHARS:
+            continue
+        groups[_pattern_shape(r["KO"])].append(r)
+    if not groups:
+        return pd.DataFrame(rows[:limit])
+
+    ranked = sorted(groups.items(), key=lambda kv: len(kv[1]), reverse=True)
+    picked = []
+    for shape, members in ranked[:limit]:
+        # 그룹 대표 = 가장 짧은 문장 (예시로 읽기 쉬운 쪽)
+        rep = min(members, key=lambda r: len(r["KO"]))
+        rep = dict(rep)
+        rep["문형 빈도"] = len(members)
+        picked.append(rep)
+    return pd.DataFrame(picked)
+
+
 @dataclass
 class ExtractResult:
     labels: pd.DataFrame
@@ -285,7 +337,9 @@ class ExtractResult:
 
 
 def analyze(pick: LanguagePick,
-            existing_terms: Optional[Dict[str, set]] = None) -> ExtractResult:
+            existing_terms: Optional[Dict[str, set]] = None,
+            term_limit: int = DEFAULT_TERM_LIMIT,
+            pattern_limit: int = DEFAULT_PATTERN_LIMIT) -> ExtractResult:
     """
     KO/EN 맵을 라벨·용어·패턴 후보로 가른다.
 
@@ -344,10 +398,12 @@ def analyze(pick: LanguagePick,
             )
             terms = shortlist[shortlist["빈도"] >= TERM_MIN_FREQ].copy()
             terms = terms.sort_values("빈도", ascending=False).reset_index(drop=True)
+            term_pool = len(terms)
+            terms = terms.head(term_limit).reset_index(drop=True)
         else:
-            terms = shortlist
+            terms, term_pool = shortlist, 0
     else:
-        terms = labels.copy()
+        terms, term_pool = labels.copy(), 0
 
     # 문장형은 같은 KO가 반복되면 한 번만
     seen_sent: set = set()
@@ -357,14 +413,17 @@ def analyze(pick: LanguagePick,
             continue
         seen_sent.add(ko)
         pat_rows.append({"KO": ko, "EN": en, "문맥(key)": k.split(".")[0]})
-    patterns = pd.DataFrame(pat_rows)
+    pattern_pool = len(pat_rows)
+    patterns = _pick_patterns(pat_rows, pattern_limit)
 
     stats = {
         "공통키": len(keys),
         "라벨 고유KO": len(agg),
         "충돌": int((labels["후보수"] > 1).sum()) if not labels.empty else 0,
         "용어후보": len(terms),
+        "용어풀": term_pool,          # 상한을 걸기 전 개수
         "패턴후보": len(patterns),
+        "패턴풀": pattern_pool,
         "DNT후보": int(labels["DNT"].sum()) if not labels.empty else 0,
         "신규": int((labels["기존대조"] == "신규").sum()) if not labels.empty else 0,
         "기존충돌": int((labels["기존대조"] == "충돌(기존)").sum()) if not labels.empty else 0,
