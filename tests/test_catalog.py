@@ -7,6 +7,7 @@ i18n 카탈로그 추출 테스트.
 """
 from __future__ import annotations
 
+import io
 import json
 import sys
 from pathlib import Path
@@ -273,6 +274,98 @@ check("호출 실패해도 죽지 않음", ct.review_entries(_FakeBoom(), _items
 _cli2 = _FakeClient("NONE")
 ct.review_entries(_cli2, _items, kind="pattern")
 check("패턴은 다른 기준 사용", "translation examples" in _cli2.prompt, _cli2.prompt[:60])
+
+print("[10] Word 매뉴얼 쌍 — 제목 앵커로 정렬")
+
+
+def _manual(rows):
+    """(스타일, 텍스트, [볼드조각]) 목록으로 임시 docx를 만들어 bytes로."""
+    from docx import Document
+    doc = Document()
+    for style, text, bolds in rows:
+        p = doc.add_paragraph(style=style)
+        rest = text
+        for b in bolds:                       # 볼드 조각을 별도 run으로 쪼갠다
+            head, _, rest = rest.partition(b)
+            if head:
+                p.add_run(head)
+            p.add_run(b).bold = True
+        if rest:
+            p.add_run(rest)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+_KO = _manual([
+    ("Normal", "표지 — 번역물이 아님", []),
+    ("Heading 1", "시작하기", []),
+    ("Normal", "저장을 클릭합니다.", ["저장"]),
+    ("Heading 2", "로그인", []),
+    ("Normal", "사용자 ID와 비밀번호를 입력합니다.", ["사용자 ID"]),
+    ("Normal", "푸시 알림에서 비활성화를 선택합니다.", ["푸시 알림", "비활성화"]),
+    ("Heading 2", "로그아웃", []),
+    ("Normal", "프로필을 클릭합니다.", ["프로필"]),
+])
+_EN = _manual([
+    ("Normal", "Cover - not a translation", []),
+    ("Heading 1", "Get started", []),
+    ("Normal", "Click Save.", ["Save"]),
+    ("Heading 2", "Log in", []),
+    ("Normal", "Enter your User ID and password.", ["User ID"]),
+    ("Normal", "Select Disable for Push notifications.", ["Disable", "Push notifications"]),
+    ("Heading 2", "Log out", []),
+    ("Normal", "Click Profile.", ["Profile"]),
+])
+
+_pa, _pb, _al = ct.parse_docx_pair("m-ko.docx", _KO, "m-en.docx", _EN)
+check("제목 3개 전부 정렬", _al.heading_matched == 3, _al.describe())
+check("구간도 전부 정렬", _al.section_rate == 1.0, _al.describe())
+check("정렬 신뢰 판정", _al.ok is True)
+check("표지 제외 (양쪽 1블록씩)", _al.front_dropped == 2, str(_al.front_dropped))
+check("shape=docx", _pa.shape == "docx" and "Word 매뉴얼" in _pa.describe(), _pa.describe())
+check("key 집합 동일", set(_pa.columns["m-ko.docx"]) == set(_pb.columns["m-en.docx"]))
+
+_pick = ct.pick_languages([_pa, _pb])
+check("한글 비율로 KO 판정", _pick.ko_label == "m-ko.docx", _pick.ko_label)
+
+_map = {_pick.ko[k]: _pick.en[k] for k in set(_pick.ko) & set(_pick.en)}
+check("제목이 쌍으로", _map.get("시작하기") == "Get started", str(_map.get("시작하기")))
+check("볼드 1:1 확정", _map.get("저장") == "Save", str(_map.get("저장")))
+# 어순이 뒤집힌 문장 — 위치로 zip하면 '푸시 알림 ↔ Disable'이 된다.
+# 근거(반복 등장)가 없으면 찍지 말고 버려야 한다.
+check("근거 없으면 틀린 쌍을 만들지 않음",
+      _map.get("푸시 알림") in (None, "Push notifications"), str(_map.get("푸시 알림")))
+check("반대쪽도 오염 없음",
+      _map.get("비활성화") in (None, "Disable"), str(_map.get("비활성화")))
+
+print("[11] Word 매뉴얼 — 구성이 어긋난 구간은 제외하고 보고")
+_EN2 = _manual([
+    ("Normal", "Cover", []),
+    ("Heading 1", "Get started", []),
+    ("Normal", "Click Save.", ["Save"]),
+    ("Heading 2", "Log in", []),
+    ("Normal", "Enter your User ID and password.", ["User ID"]),
+    ("Heading 2", "Log out", []),          # 국문에 있는 한 단락이 빠졌다
+    ("Normal", "Click Profile.", ["Profile"]),
+])
+_, _, _al2 = ct.parse_docx_pair("m-ko.docx", _KO, "m-en2.docx", _EN2)
+check("제목은 그대로 정렬", _al2.heading_matched == 3, _al2.describe())
+check("어긋난 구간 1건 보고", len(_al2.mismatched) == 1, str(_al2.mismatched))
+check("어긋난 구간 제목 표시",
+      _al2.mismatched[0][0] == "로그인" and _al2.mismatched[0][2] == "Log in",
+      str(_al2.mismatched[0]))
+check("단락 수 차이 표기",
+      (_al2.mismatched[0][1], _al2.mismatched[0][3]) == (2, 1), str(_al2.mismatched[0]))
+
+print("[12] Word 매뉴얼 — 제목이 없으면 거절")
+_flat = _manual([("Normal", "제목 없는 문서", [])])
+try:
+    ct.parse_docx_pair("a.docx", _flat, "b.docx", _flat)
+    check("Heading 없으면 예외", False, "예외가 안 났다")
+except ValueError as e:
+    check("Heading 없으면 예외", "제목" in str(e), str(e))
+
 
 print()
 if failures:

@@ -1154,22 +1154,47 @@ if st.session_state.app_mode == "Glossary 추출":
     st.subheader("Glossary 추출")
 
     uploaded_catalogs = st.file_uploader(
-        "제품의 다국어 메시지 파일(JSON)",
-        type=["json"],
+        "다국어 메시지 파일(JSON) 또는 국문·영문 Word 매뉴얼 2개",
+        type=["json", "docx"],
         accept_multiple_files=True,
         key="catalog_uploader",
-        help="한국어/영어 파일을 각각 올리거나, 두 언어가 함께 든 파일 하나를 올리세요.",
+        help=(
+            "**JSON** — 한국어/영어 파일을 각각, 또는 두 언어가 함께 든 파일 하나.\n\n"
+            "**Word(.docx)** — 같은 버전의 국문본과 영문본을 함께 2개."
+        ),
     )
 
     if uploaded_catalogs:
         _sig = "|".join(f"{f.name}:{f.size}" for f in uploaded_catalogs)
         if st.session_state.get("catalog_sig") != _sig:
-            # 6MB짜리 JSON을 rerun마다 다시 파싱하지 않도록 시그니처로 캐시
+            # 큰 파일을 rerun마다 다시 파싱하지 않도록 시그니처로 캐시
             try:
-                _parsed = []
-                for f in uploaded_catalogs:
-                    _parsed.append(catalog.parse_json(f.name, json.loads(f.getvalue())))
+                _docx = [f for f in uploaded_catalogs
+                         if f.name.lower().endswith(".docx")]
+                _json = [f for f in uploaded_catalogs
+                         if f.name.lower().endswith(".json")]
+                _align = None
+                if _docx and _json:
+                    raise ValueError(
+                        "JSON과 Word를 섞어 올릴 수 없습니다. "
+                        "둘 중 한 종류만 올려주세요."
+                    )
+                if _docx:
+                    if len(_docx) != 2:
+                        raise ValueError(
+                            f"Word 매뉴얼은 국문본·영문본 **2개**를 올려주세요 "
+                            f"(지금 {len(_docx)}개). 같은 버전이어야 합니다."
+                        )
+                    _a, _b = _docx
+                    _pf_a, _pf_b, _align = catalog.parse_docx_pair(
+                        _a.name, _a.getvalue(), _b.name, _b.getvalue()
+                    )
+                    _parsed = [_pf_a, _pf_b]
+                else:
+                    _parsed = [catalog.parse_json(f.name, json.loads(f.getvalue()))
+                               for f in _json]
                 _pick = catalog.pick_languages(_parsed)
+                st.session_state.catalog_align = _align
                 st.session_state.catalog_parsed = _parsed
                 st.session_state.catalog_pick = _pick
                 st.session_state.catalog_pick_labels = (
@@ -1184,6 +1209,8 @@ if st.session_state.app_mode == "Glossary 추출":
                 st.session_state.catalog_error = str(e)
                 st.session_state.catalog_sig = _sig
                 st.session_state.pop("catalog_result", None)
+                st.session_state.pop("catalog_align", None)
+                st.session_state.pop("catalog_pick", None)
 
     # 상한이 바뀌면 파싱은 그대로 두고 집계만 다시 한다 (0.5초).
     _t_limit = st.session_state.get("catalog_term_limit", catalog.DEFAULT_TERM_LIMIT)
@@ -1205,7 +1232,9 @@ if st.session_state.app_mode == "Glossary 추출":
     if st.session_state.get("catalog_error"):
         st.error(st.session_state.catalog_error)
     elif st.session_state.get("catalog_result") is None:
-        with st.expander("지원하는 파일 형식"):
+        st.markdown("##### 무엇을 올릴 수 있나요")
+        _t_json, _t_docx = st.tabs(["JSON 카탈로그", "Word 매뉴얼 쌍"])
+        with _t_json:
             st.markdown(
                 "```json\n"
                 '[{"key": "a.b", "en": "Save"}]              // 배열 + 언어 필드\n'
@@ -1217,6 +1246,25 @@ if st.session_state.app_mode == "Glossary 추출":
             st.caption(
                 "필드명이 `key`/`en`/`ko`가 아니어도 자동으로 찾습니다. "
                 "언어는 파일명이 아니라 내용으로 판별합니다."
+            )
+        with _t_docx:
+            st.markdown(
+                "**같은 버전의 국문본·영문본 `.docx` 2개**를 함께 올리세요. "
+                "제목(Heading) 순서를 기준으로 두 문서를 맞춘 뒤, "
+                "**굵게 표시된 화면 라벨**과 제목·표를 짝지어 후보를 뽑습니다."
+            )
+            st.markdown(
+                "- 문장을 마침표로 쪼개지 않고 **단락째** 맞추므로, "
+                "국문 한 문장이 영문 두 문장이 돼도 괜찮습니다.\n"
+                "- 앞표지·법적 고지·연락처는 번역물이 아니라 지역별 원고라 "
+                "**자동으로 제외**합니다.\n"
+                "- 두 문서의 구성이 어긋난 구간은 후보에서 빼고 목록으로 알려줍니다 "
+                "— 대개 한쪽 문서의 **누락**입니다."
+            )
+            st.info(
+                "제목에 Word의 **제목 1~4** 스타일이 적용돼 있어야 합니다. "
+                "글자 크기만 키운 가짜 제목은 인식되지 않습니다.",
+                icon="💡",
             )
     else:
         # 결과 블록 — 들여쓰기 유지를 위한 컨테이너
@@ -1230,6 +1278,68 @@ if st.session_state.app_mode == "Glossary 추출":
                 " · ".join(pf.describe() for pf in st.session_state.catalog_parsed)
                 + f"  ·  KO `{_ko_label}` / EN `{_en_label}`"
             )
+
+            # Word 매뉴얼은 '얼마나 잘 맞췄는가'를 먼저 보여준다. 정렬이 무너진
+            # 채로 나온 후보를 그대로 등재하면 글로서리가 오염되기 때문이다.
+            _align = st.session_state.get("catalog_align")
+            if _align is not None:
+                with st.container(border=True):
+                    if _align.ok:
+                        st.markdown("##### ✅ 두 매뉴얼이 잘 맞춰졌습니다")
+                    else:
+                        st.markdown("##### ⚠️ 정렬이 불안정합니다")
+                        st.warning(
+                            "두 문서의 버전이 다르거나 구성이 많이 바뀐 것 같습니다. "
+                            "아래 후보를 그대로 등재하지 말고 하나씩 확인하세요.",
+                            icon="⚠️",
+                        )
+                    _m1, _m2, _m3 = st.columns(3)
+                    _m1.metric(
+                        "제목 정렬",
+                        f"{_align.heading_matched}/{_align.heading_total}",
+                        f"{_align.heading_rate * 100:.0f}%",
+                        delta_color="normal" if _align.heading_rate >= 0.8 else "inverse",
+                        help="두 문서의 제목이 같은 순서로 대응되는 개수입니다.",
+                    )
+                    _m2.metric(
+                        "구간 정렬",
+                        f"{_align.sections_matched}/{_align.sections}",
+                        f"{_align.section_rate * 100:.0f}%",
+                        delta_color="normal" if _align.section_rate >= 0.7 else "inverse",
+                        help="제목 아래 단락 수까지 일치하는 구간입니다.",
+                    )
+                    _m3.metric(
+                        "화면 라벨 쌍",
+                        f"{_align.n_label:,}",
+                        help=f"굵게 표시된 라벨 {_align.n_label}쌍 "
+                             f"(확실 {_align.n_bold_direct} · 추정 {_align.n_bold_cooc}). "
+                             "제목·본문까지 합치면 "
+                             f"{_align.n_heading + _align.n_block + _align.n_label:,}쌍입니다.",
+                    )
+                    if _align.front_dropped:
+                        st.caption(
+                            f"앞표지·법적 고지 등 {_align.front_dropped}블록은 "
+                            "번역물이 아니므로 제외했습니다."
+                        )
+                    if _align.mismatched:
+                        with st.expander(
+                            f"🔍 구성이 어긋난 구간 {len(_align.mismatched)}건 "
+                            "— 한쪽 문서의 누락일 수 있습니다"
+                        ):
+                            st.dataframe(
+                                pd.DataFrame(
+                                    _align.mismatched,
+                                    columns=["국문 제목", "국문 단락",
+                                             "영문 제목", "영문 단락"],
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                            st.caption(
+                                "이 구간은 짝이 어긋날 수 있어 후보에서 제외했습니다. "
+                                "단락 수가 1~2개 차이면 대개 한쪽에 설명이 빠진 것이니 "
+                                "원본 문서를 확인해 보세요."
+                            )
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("대응 쌍", f"{_stats['공통키']:,}")
@@ -1983,6 +2093,11 @@ if st.session_state.step == 2:
                 st.caption(f"💡 {' / '.join(bits)} 자동 매칭됨")
 
             st.markdown(f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)")
+            st.caption(
+                "⌨️ EN 칸에 입력하고 **Enter**를 누르면 값이 확정되면서 "
+                "**바로 아래 행의 EN 칸**으로 내려갑니다. 연속 입력에 쓰세요. "
+                "(Tab은 오른쪽 칸으로 이동합니다.)"
+            )
             ui_mapping_df = st.data_editor(
                 ui_mapping_df,
                 use_container_width=True,

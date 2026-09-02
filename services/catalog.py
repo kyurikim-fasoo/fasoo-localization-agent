@@ -15,6 +15,10 @@ i18n 카탈로그 → 글로서리 / UI 라벨 후보 추출.
       D. 중첩 객체          {"a": {"b": "저장"}}     → 경로를 key로 평탄화
       E. 파일 1개 / 2개     위 어느 것이든
 
+    F. Word 매뉴얼 쌍   같은 버전의 국문본/영문본 .docx 두 개
+                       → 제목(Heading) 순서를 앵커로 블록을 맞춰 key를 만든다.
+                         parse_docx_pair() 참고.
+
     어느 컬럼이 한국어인지는 파일명이 아니라 **한글 비율**로 판정한다.
     파일명에 ko/en 표시가 없어도 동작하게 하기 위함.
 """
@@ -24,6 +28,7 @@ import io
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -71,7 +76,8 @@ class ParsedFile:
 
     def describe(self) -> str:
         cols = ", ".join(self.columns)
-        shape_ko = {"array": "배열형", "flat": "평탄 객체", "nested": "중첩 객체"}[self.shape]
+        shape_ko = {"array": "배열형", "flat": "평탄 객체",
+                    "nested": "중첩 객체", "docx": "Word 매뉴얼"}[self.shape]
         dup = f" · 중복키 {self.duplicate_keys:,}" if self.duplicate_keys else ""
         return f"{shape_ko} · key={self.key_field} · 컬럼[{cols}] · {self.n_keys:,}개{dup}"
 
@@ -155,6 +161,319 @@ def parse_json(name: str, data: Any) -> ParsedFile:
         )
 
     raise ValueError("최상위가 배열도 객체도 아닙니다.")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Word 매뉴얼 쌍 (국문본 + 영문본)
+#
+# JSON 카탈로그와 달리 매뉴얼에는 key가 없다. 그래서 **구조**로 key를 만든다.
+# 같은 버전의 국/영문 매뉴얼은 같은 템플릿에서 나오므로 제목(Heading) 순서가
+# 그대로 보존된다 — 이걸 앵커로 삼아 구간을 자르고, 구간 안에서는 블록을
+# 순서대로 맞춘다. 문장 단위로 끊지 않으므로 "국문 1문장 = 영문 2문장"은
+# 문제가 되지 않는다. 단락 경계는 번역돼도 거의 안 바뀌기 때문이다.
+#
+# 볼드 런은 화면 라벨이라 가장 값진 후보지만, **위치로 짝지으면 안 된다**.
+# 한 단락에 볼드가 여럿이면 한/영 어순이 뒤집히기 때문이다.
+#     KO  「푸시 알림」에서 「비활성화」를 선택할 경우
+#     EN  If you select 「Disable」 for 「Push notifications」
+# 그대로 zip하면 정반대 쌍이 나온다. 그래서 양쪽 1개씩인 단락만 직접
+# 확정하고, 나머지는 문서 전체의 공기(co-occurrence) 빈도로 매칭한다.
+# ──────────────────────────────────────────────────────────────────────
+
+# Word는 한 단어도 여러 run으로 쪼갠다 ("Fireside Admin" + "istrator").
+# 그래서 인접한 굵은 런은 반드시 먼저 합쳐야 한다.
+_LABEL_TRIM = " :\u00b7-.,\u201c\u201d\u2018\u2019\"\'"
+# 공기 매칭 신뢰 임계값 (Dice 계수). 낮추면 수확은 늘지만 오매칭이 섞인다.
+DOCX_COOC_MIN = 0.5
+# 1등이 2등보다 이만큼은 앞서야 채택한다. 다중 볼드 단락이 문서에 한 번만
+# 나오면 후보들이 동점이 되는데, 그때 찍으면 정반대 쌍이 등재된다.
+# 글로서리를 오염시키느니 버린다.
+DOCX_COOC_MARGIN = 1.2
+
+
+@dataclass
+class DocxAlignment:
+    """두 매뉴얼을 맞춘 결과. 화면에 "얼마나 믿을 만한가"를 보여주기 위한 통계."""
+    name_a: str
+    name_b: str
+    headings_a: int = 0
+    headings_b: int = 0
+    heading_matched: int = 0
+    sections: int = 0
+    sections_matched: int = 0
+    mismatched: List[Tuple[str, int, str, int]] = field(default_factory=list)
+    front_dropped: int = 0
+    n_heading: int = 0
+    n_block: int = 0
+    n_bold_direct: int = 0
+    n_bold_cooc: int = 0
+
+    @property
+    def heading_total(self) -> int:
+        return max(self.headings_a, self.headings_b)
+
+    @property
+    def heading_rate(self) -> float:
+        return self.heading_matched / self.heading_total if self.heading_total else 0.0
+
+    @property
+    def section_rate(self) -> float:
+        return self.sections_matched / self.sections if self.sections else 0.0
+
+    @property
+    def n_label(self) -> int:
+        return self.n_bold_direct + self.n_bold_cooc
+
+    @property
+    def ok(self) -> bool:
+        """이 정렬을 믿고 후보를 뽑아도 되는가."""
+        return self.heading_rate >= 0.8 and self.section_rate >= 0.7
+
+    def describe(self) -> str:
+        return (f"제목 {self.heading_matched}/{self.heading_total} · "
+                f"구간 {self.sections_matched}/{self.sections} · "
+                f"라벨 {self.n_label}쌍")
+
+
+def _docx_label(t: str) -> str:
+    return re.sub(r"\s+", " ", t).strip(_LABEL_TRIM).strip()
+
+
+def _para_lines(p) -> List[Tuple[str, List[str]]]:
+    """
+    단락 하나를 논리 줄들로. 각 줄은 (본문, 볼드조각들).
+
+    `<w:br/>`로 줄을 나눈다 — 한쪽 언어만 세 단락을 줄바꿈으로 한 단락에
+    몰아넣은 경우가 실제로 있어서, 이걸 풀지 않으면 그 구간이 통째로 버려진다.
+    """
+    lines: List[List[Tuple[str, bool]]] = [[]]
+    for r in p.runs:
+        if not r.text:
+            continue
+        for i, part in enumerate(r.text.split("\n")):
+            if i:
+                lines.append([])
+            if part:
+                lines[-1].append((part, bool(r.bold)))
+
+    out: List[Tuple[str, List[str]]] = []
+    for frags in lines:
+        text = re.sub(r"\s+", " ", "".join(t for t, _ in frags)).strip()
+        if not text:
+            continue
+        bolds, cur = [], []
+        for t, is_bold in frags:
+            if is_bold:
+                cur.append(t)
+            elif cur:
+                bolds.append("".join(cur))
+                cur = []
+        if cur:
+            bolds.append("".join(cur))
+        out.append((text, [b for b in map(_docx_label, bolds) if b]))
+    return out
+
+
+@dataclass
+class _Block:
+    kind: str                 # h(제목) | p(본문) | tc(표 셀)
+    level: int                # 제목 레벨, 그 외 0
+    text: str
+    bolds: List[str]
+    cell: Optional[str] = None
+
+
+def _docx_blocks(data: bytes) -> List[_Block]:
+    """문서 순서대로 블록 추출 — 단락과 표 셀을 원래 순서 그대로."""
+    from docx import Document                    # 무거워서 여기서만 import
+    from docx.oxml.ns import qn
+
+    doc = Document(io.BytesIO(data))
+    pmap = {p._p: p for p in doc.paragraphs}
+    tmap = {t._tbl: t for t in doc.tables}
+    out: List[_Block] = []
+    ti = 0
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            p = pmap.get(child)
+            if p is None:
+                continue
+            m = re.match(r"Heading (\d)", p.style.name or "")
+            for text, bolds in _para_lines(p):
+                out.append(_Block("h" if m else "p",
+                                  int(m.group(1)) if m else 0, text, bolds))
+        elif child.tag == qn("w:tbl"):
+            tbl = tmap.get(child)
+            if tbl is None:
+                continue
+            for ri, row in enumerate(tbl.rows):
+                for ci, cell in enumerate(row.cells):
+                    text = re.sub(r"\s+", " ", cell.text).strip()
+                    if not text:
+                        continue
+                    bolds = [b for pp in cell.paragraphs
+                             for _, bs in _para_lines(pp) for b in bs]
+                    out.append(_Block("tc", 0, text, bolds, f"t{ti}r{ri}c{ci}"))
+            ti += 1
+    return out
+
+
+def _cut_front(blocks: List[_Block]) -> Tuple[List[_Block], int]:
+    """
+    첫 Heading 1 이전을 버린다.
+
+    앞표지·법적 고지·연락처는 **번역물이 아니라 지역별 별도 원고**다. 실제
+    문서에서 국문은 "기술 지원/원격 지원/제품 문의", 영문은 "Sales
+    information/Help desk/North America HQ"로 항목도 전화번호도 다르다.
+    여기를 정렬하면 "기술 지원 ↔ Sales information" 같은 오염된 쌍이 들어간다.
+    """
+    for i, b in enumerate(blocks):
+        if b.kind == "h" and b.level == 1:
+            return blocks[i:], i
+    return blocks, 0
+
+
+def _sections(blocks: List[_Block]) -> List[Tuple[_Block, List[_Block]]]:
+    secs: List[Tuple[_Block, List[_Block]]] = []
+    for b in blocks:
+        if b.kind == "h":
+            secs.append((b, []))
+        elif secs:
+            secs[-1][1].append(b)
+    return secs
+
+
+def _match_bolds(pairs: List[Tuple[_Block, _Block]]) -> List[Tuple[str, str, bool]]:
+    """
+    정렬된 블록 쌍들에서 볼드 라벨 쌍을 뽑는다. (a, b, 직접확정여부)
+
+    양쪽 1개씩인 블록은 그대로 확정. 여러 개인 블록은 어순이 뒤집힐 수 있으니
+    문서 전체에서 함께 등장한 횟수를 세어 Dice 계수로 상호 최적 매칭한다.
+    라벨은 매뉴얼에서 수십 번 반복되므로 이 통계가 잘 먹는다.
+    """
+    direct: List[Tuple[str, str]] = []
+    cooc: Dict[str, Counter] = defaultdict(Counter)
+    fa: Counter = Counter()
+    fb: Counter = Counter()
+
+    for x, y in pairs:
+        ba, bb = x.bolds, y.bolds
+        if not ba or not bb:
+            continue
+        if len(ba) == 1 and len(bb) == 1:
+            direct.append((ba[0], bb[0]))
+        else:
+            for a in ba:
+                for b in bb:
+                    cooc[a][b] += 1
+        for a in ba:
+            fa[a] += 1
+        for b in bb:
+            fb[b] += 1
+
+    # 1:1 단락에서 이미 확정된 쌍은 고정한다. 같은 라벨이 문서 어딘가에서
+    # 단독으로 등장했다면 그게 가장 확실한 근거이므로, 애매한 단락에서
+    # 다시 후보로 놓고 흔들 이유가 없다.
+    locked_a: Dict[str, str] = {}
+    for a, b in direct:
+        locked_a.setdefault(a, b)
+    locked_b = set(locked_a.values())
+
+    best: Dict[str, Tuple[float, str]] = {}
+    for a, cands in cooc.items():
+        if a in locked_a:
+            continue
+        ranked = sorted(
+            ((2 * n / (fa[a] + fb[b]), b) for b, n in cands.items() if b not in locked_b),
+            reverse=True,
+        )
+        if not ranked:
+            continue
+        top, runner = ranked[0], (ranked[1] if len(ranked) > 1 else (0.0, ""))
+        # 동점(=근거 없음)이면 채택하지 않는다
+        if top[0] < DOCX_COOC_MIN or top[0] < runner[0] * DOCX_COOC_MARGIN:
+            continue
+        best[a] = top
+
+    # 상호 최적일 때만 채택 — 여러 KO가 한 EN에 몰리는 걸 막는다
+    rev: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
+    for a, (score, b) in best.items():
+        rev[b].append((score, a))
+    matched = [(a, b) for a, (score, b) in best.items() if max(rev[b])[1] == a]
+
+    return ([(a, b, True) for a, b in direct]
+            + [(a, b, False) for a, b in matched])
+
+
+def parse_docx_pair(name_a: str, data_a: bytes,
+                    name_b: str, data_b: bytes
+                    ) -> Tuple[ParsedFile, ParsedFile, DocxAlignment]:
+    """
+    같은 버전의 Word 매뉴얼 두 개(국문본/영문본)를 key를 공유하는 ParsedFile
+    쌍으로. 어느 쪽이 한국어인지는 여기서 정하지 않는다 — pick_languages()가
+    한글 비율로 판정하므로 이 함수는 언어에 대해 대칭이다.
+    """
+    ba, front_a = _cut_front(_docx_blocks(data_a))
+    bb, front_b = _cut_front(_docx_blocks(data_b))
+    sa, sb = _sections(ba), _sections(bb)
+    if not sa or not sb:
+        empty = name_a if not sa else name_b
+        raise ValueError(
+            f"`{empty}` 에서 제목을 찾지 못했습니다. 두 매뉴얼 모두 Word의 "
+            "**제목 1~4** 스타일이 적용된 제목이 있어야 구간을 맞출 수 있습니다. "
+            "글자 크기만 키운 제목은 인식되지 않습니다."
+        )
+    align = DocxAlignment(
+        name_a=name_a, name_b=name_b,
+        headings_a=len(sa), headings_b=len(sb),
+        front_dropped=front_a + front_b,
+    )
+
+    # 제목 시퀀스는 레벨 패턴으로 맞춘다 — 언어가 달라 본문 비교가 안 되기 때문.
+    # 한쪽에만 있는 절이 있어도 SequenceMatcher가 그 구간만 건너뛴다.
+    sm = SequenceMatcher(None, [h.level for h, _ in sa], [h.level for h, _ in sb])
+    sec_pairs = []
+    for i, j, n in sm.get_matching_blocks():
+        for k in range(n):
+            sec_pairs.append((sa[i + k], sb[j + k]))
+    align.heading_matched = len(sec_pairs)
+    align.sections = max(len(sa), len(sb))
+
+    col_a: Dict[str, str] = {}
+    col_b: Dict[str, str] = {}
+    block_pairs: List[Tuple[_Block, _Block]] = []
+
+    for si, ((ha, body_a), (hb, body_b)) in enumerate(sec_pairs):
+        col_a[f"h{si}"] = ha.text
+        col_b[f"h{si}"] = hb.text
+        align.n_heading += 1
+        if len(body_a) != len(body_b):
+            align.mismatched.append((ha.text, len(body_a), hb.text, len(body_b)))
+            continue
+        align.sections_matched += 1
+        for bi, (x, y) in enumerate(zip(body_a, body_b)):
+            # 표 셀은 좌표까지 같을 때만 — 표 모양이 다르면 짝이 어긋난다
+            if (x.kind == "tc") != (y.kind == "tc"):
+                continue
+            if x.kind == "tc" and x.cell != y.cell:
+                continue
+            key = f"s{si}b{bi}"
+            col_a[key] = x.text
+            col_b[key] = y.text
+            align.n_block += 1
+            block_pairs.append((x, y))
+
+    for n, (a, b, is_direct) in enumerate(_match_bolds(block_pairs)):
+        col_a[f"b{n}"] = a
+        col_b[f"b{n}"] = b
+        if is_direct:
+            align.n_bold_direct += 1
+        else:
+            align.n_bold_cooc += 1
+
+    pf_a = ParsedFile(name_a, "docx", "(블록)", {name_a: col_a}, len(col_a))
+    pf_b = ParsedFile(name_b, "docx", "(블록)", {name_b: col_b}, len(col_b))
+    return pf_a, pf_b, align
 
 
 # ──────────────────────────────────────────────────────────────────────
