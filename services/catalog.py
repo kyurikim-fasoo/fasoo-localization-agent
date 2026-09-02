@@ -202,6 +202,9 @@ class DocxAlignment:
     sections: int = 0
     sections_matched: int = 0
     mismatched: List[Tuple[str, int, str, int]] = field(default_factory=list)
+    # 'sN' -> (A문서 절 제목, B문서 절 제목). 후보가 어느 절에서 나왔는지
+    # 화면에 보여주기 위한 것 — key 자체는 사람이 읽을 수 없기 때문이다.
+    section_titles: Dict[str, Tuple[str, str]] = field(default_factory=dict)
     front_dropped: int = 0
     n_heading: int = 0
     n_block: int = 0
@@ -343,29 +346,32 @@ def _sections(blocks: List[_Block]) -> List[Tuple[_Block, List[_Block]]]:
     return secs
 
 
-def _match_bolds(pairs: List[Tuple[_Block, _Block]]) -> List[Tuple[str, str, bool]]:
+def _match_bolds(pairs: List[Tuple[_Block, _Block, int]]
+                 ) -> List[Tuple[str, str, bool, int]]:
     """
-    정렬된 블록 쌍들에서 볼드 라벨 쌍을 뽑는다. (a, b, 직접확정여부)
+    정렬된 블록 쌍들에서 볼드 라벨 쌍을 뽑는다. (a, b, 직접확정여부, 절번호)
 
     양쪽 1개씩인 블록은 그대로 확정. 여러 개인 블록은 어순이 뒤집힐 수 있으니
     문서 전체에서 함께 등장한 횟수를 세어 Dice 계수로 상호 최적 매칭한다.
     라벨은 매뉴얼에서 수십 번 반복되므로 이 통계가 잘 먹는다.
     """
-    direct: List[Tuple[str, str]] = []
+    direct: List[Tuple[str, str, int]] = []
     cooc: Dict[str, Counter] = defaultdict(Counter)
     fa: Counter = Counter()
     fb: Counter = Counter()
+    where: Dict[Tuple[str, str], int] = {}     # 쌍 -> 처음 나온 절
 
-    for x, y in pairs:
+    for x, y, si in pairs:
         ba, bb = x.bolds, y.bolds
         if not ba or not bb:
             continue
         if len(ba) == 1 and len(bb) == 1:
-            direct.append((ba[0], bb[0]))
+            direct.append((ba[0], bb[0], si))
         else:
             for a in ba:
                 for b in bb:
                     cooc[a][b] += 1
+                    where.setdefault((a, b), si)
         for a in ba:
             fa[a] += 1
         for b in bb:
@@ -375,7 +381,7 @@ def _match_bolds(pairs: List[Tuple[_Block, _Block]]) -> List[Tuple[str, str, boo
     # 단독으로 등장했다면 그게 가장 확실한 근거이므로, 애매한 단락에서
     # 다시 후보로 놓고 흔들 이유가 없다.
     locked_a: Dict[str, str] = {}
-    for a, b in direct:
+    for a, b, _si in direct:
         locked_a.setdefault(a, b)
     locked_b = set(locked_a.values())
 
@@ -401,8 +407,8 @@ def _match_bolds(pairs: List[Tuple[_Block, _Block]]) -> List[Tuple[str, str, boo
         rev[b].append((score, a))
     matched = [(a, b) for a, (score, b) in best.items() if max(rev[b])[1] == a]
 
-    return ([(a, b, True) for a, b in direct]
-            + [(a, b, False) for a, b in matched])
+    return ([(a, b, True, si) for a, b, si in direct]
+            + [(a, b, False, where.get((a, b), 0)) for a, b in matched])
 
 
 def parse_docx_pair(name_a: str, data_a: bytes,
@@ -441,11 +447,15 @@ def parse_docx_pair(name_a: str, data_a: bytes,
 
     col_a: Dict[str, str] = {}
     col_b: Dict[str, str] = {}
-    block_pairs: List[Tuple[_Block, _Block]] = []
+    block_pairs: List[Tuple[_Block, _Block, int]] = []
 
+    # key의 첫 마디를 절 번호로 잡는다. analyze()가 key를 '.'으로 잘라
+    # 문맥으로 쓰기 때문에, 여기가 절이어야 화면에 '어느 절에서 나온
+    # 후보인가'를 보여줄 수 있다.
     for si, ((ha, body_a), (hb, body_b)) in enumerate(sec_pairs):
-        col_a[f"h{si}"] = ha.text
-        col_b[f"h{si}"] = hb.text
+        align.section_titles[f"s{si}"] = (ha.text, hb.text)
+        col_a[f"s{si}.h"] = ha.text
+        col_b[f"s{si}.h"] = hb.text
         align.n_heading += 1
         if len(body_a) != len(body_b):
             align.mismatched.append((ha.text, len(body_a), hb.text, len(body_b)))
@@ -457,15 +467,15 @@ def parse_docx_pair(name_a: str, data_a: bytes,
                 continue
             if x.kind == "tc" and x.cell != y.cell:
                 continue
-            key = f"s{si}b{bi}"
+            key = f"s{si}.b{bi}"
             col_a[key] = x.text
             col_b[key] = y.text
             align.n_block += 1
-            block_pairs.append((x, y))
+            block_pairs.append((x, y, si))
 
-    for n, (a, b, is_direct) in enumerate(_match_bolds(block_pairs)):
-        col_a[f"b{n}"] = a
-        col_b[f"b{n}"] = b
+    for n, (a, b, is_direct, si) in enumerate(_match_bolds(block_pairs)):
+        col_a[f"s{si}.l{n}"] = a
+        col_b[f"s{si}.l{n}"] = b
         if is_direct:
             align.n_bold_direct += 1
         else:

@@ -1212,13 +1212,42 @@ if st.session_state.app_mode == "Glossary 추출":
                 st.session_state.pop("catalog_align", None)
                 st.session_state.pop("catalog_pick", None)
 
+    def _relabel_sections(result, align, pick):
+        """
+        docx 경로의 문맥(key)를 사람이 읽는 절 제목으로 바꾼다.
+
+        JSON 카탈로그의 key는 'settings.push.enable'처럼 첫 마디가 곧 의미
+        있는 네임스페이스지만, 매뉴얼에는 그런 게 없어 's38' 같은 내부
+        번호가 그대로 노출된다. 절 제목으로 바꿔야 '어느 절에서 나온
+        후보인가'라는 원래 의도가 살아난다. 이 값은 등재 시 Note로도
+        저장되므로 나중에 출처를 되짚을 때도 쓰인다.
+        """
+        if align is None or not align.section_titles:
+            return
+        _a_is_ko = pick.ko_label == align.name_a
+        _titles = {sid: (ta if _a_is_ko else tb)
+                   for sid, (ta, tb) in align.section_titles.items()}
+
+        def _fix(v):
+            parts = [_titles.get(t, t) for t in str(v or "").split() if t]
+            return " · ".join(dict.fromkeys(parts))   # 순서 유지 중복 제거
+
+        for _df in (result.labels, result.terms, result.patterns):
+            if _df is not None and not _df.empty and "문맥(key)" in _df.columns:
+                _df["문맥(key)"] = _df["문맥(key)"].map(_fix)
+
     # 상한이 바뀌면 파싱은 그대로 두고 집계만 다시 한다 (0.5초).
-    _t_limit = st.session_state.get("catalog_term_limit", catalog.DEFAULT_TERM_LIMIT)
-    _p_limit = st.session_state.get("catalog_pattern_limit", catalog.DEFAULT_PATTERN_LIMIT)
+    # '전체 보기'는 상한을 사실상 없앤다 — head()/슬라이스에 큰 수를 주면 된다.
+    _NO_LIMIT = 10 ** 9
+    _show_all = st.session_state.get("catalog_show_all", False)
+    _t_raw = st.session_state.get("catalog_term_limit", catalog.DEFAULT_TERM_LIMIT)
+    _p_raw = st.session_state.get("catalog_pattern_limit", catalog.DEFAULT_PATTERN_LIMIT)
+    _t_limit = _NO_LIMIT if _show_all else _t_raw
+    _p_limit = _NO_LIMIT if _show_all else _p_raw
     _key = (st.session_state.get("catalog_sig"), _t_limit, _p_limit)
     if st.session_state.get("catalog_pick") is not None and \
             st.session_state.get("catalog_result_key") != _key:
-        st.session_state.catalog_result = catalog.analyze(
+        _res = catalog.analyze(
             st.session_state.catalog_pick,
             catalog.existing_terms_index(
                 load_terms(current_user=st.session_state.current_user)
@@ -1226,6 +1255,9 @@ if st.session_state.app_mode == "Glossary 추출":
             term_limit=_t_limit,
             pattern_limit=_p_limit,
         )
+        _relabel_sections(_res, st.session_state.get("catalog_align"),
+                          st.session_state.catalog_pick)
+        st.session_state.catalog_result = _res
         st.session_state.catalog_result_key = _key
 
     # 분석 결과는 session_state에 남겨둔다 — 다른 메뉴에 다녀와도 유지된다.
@@ -1282,6 +1314,7 @@ if st.session_state.app_mode == "Glossary 추출":
             # Word 매뉴얼은 '얼마나 잘 맞췄는가'를 먼저 보여준다. 정렬이 무너진
             # 채로 나온 후보를 그대로 등재하면 글로서리가 오염되기 때문이다.
             _align = st.session_state.get("catalog_align")
+            _align_on = _align is not None
             if _align is not None:
                 with st.container(border=True):
                     if _align.ok:
@@ -1344,23 +1377,46 @@ if st.session_state.app_mode == "Glossary 추출":
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("대응 쌍", f"{_stats['공통키']:,}")
             c2.metric("용어", f"{_stats['용어후보']:,}",
-                      help=f"빈도 상위 {_stats['용어후보']:,}개 (조건 통과 {_stats['용어풀']:,}개)")
+                      help=("조건을 통과한 "
+                            f"**전체 {_stats['용어풀']:,}개**를 모두 보고 있습니다."
+                            if _show_all else
+                            f"빈도 상위 {_stats['용어후보']:,}개 "
+                            f"(조건 통과 {_stats['용어풀']:,}개)"))
             c3.metric("패턴", f"{_stats['패턴후보']:,}",
-                      help=f"문형별 대표 {_stats['패턴후보']:,}개 (문장 {_stats['패턴풀']:,}개)")
+                      help=("문형별 대표를 "
+                            f"**전부 {_stats['패턴후보']:,}개** 보고 있습니다 "
+                            f"(원본 문장 {_stats['패턴풀']:,}개)."
+                            if _show_all else
+                            f"문형별 대표 {_stats['패턴후보']:,}개 "
+                            f"(문장 {_stats['패턴풀']:,}개)"))
             c4.metric("표기 충돌", f"{len(_conf):,}")
 
-            with st.expander("추출 개수 조정"):
+            with st.expander(
+                "추출 개수 조정" + ("  ·  전체 보기 켜짐" if _show_all else "")
+            ):
+                st.checkbox(
+                    "조건을 통과한 후보 전체 보기",
+                    key="catalog_show_all",
+                    help="상한을 걸지 않고 다 봅니다. 아래 표는 검색으로 좁혀 "
+                         "나눠 등재하세요.",
+                )
                 a1, a2 = st.columns(2)
                 a1.number_input(
                     "용어", min_value=10, max_value=1000, step=10,
-                    key="catalog_term_limit", value=_t_limit,
+                    key="catalog_term_limit", value=_t_raw, disabled=_show_all,
                     help="빈도가 높은 순으로 이만큼만 가져옵니다.",
                 )
                 a2.number_input(
                     "패턴", min_value=5, max_value=200, step=5,
-                    key="catalog_pattern_limit", value=_p_limit,
+                    key="catalog_pattern_limit", value=_p_raw, disabled=_show_all,
                     help="같은 말투의 문장은 하나로 묶고, 흔한 문형 순으로 가져옵니다.",
                 )
+                if _show_all:
+                    st.caption(
+                        f"상한 없이 용어 {_stats['용어후보']:,}개 · "
+                        f"패턴 {_stats['패턴후보']:,}개를 보고 있습니다. "
+                        "빈도가 낮은 쪽에는 용어가 아닌 것도 섞입니다."
+                    )
 
             _rc1, _rc2 = st.columns(2)
             with _rc1:
@@ -1504,7 +1560,8 @@ if st.session_state.app_mode == "Glossary 추출":
                     except Exception as e:
                         st.error(f"등재 오류: {e}")
 
-            def _render_table(df, cols, key, kind):
+            def _render_table(df, cols, key, kind, hidden=()):
+                """cols = 화면에 보일 컬럼, hidden = 뒤 단계에서만 쓰는 컬럼."""
                 if st.session_state.get(f"catalog_review_{key}") is not None:
                     _render_review(key)
                     return
@@ -1543,11 +1600,21 @@ if st.session_state.app_mode == "Glossary 추출":
                     + ("  ·  검색으로 좁혀서 나눠 등재하세요" if len(view) > _EDIT_CAP else "")
                 )
 
-                edit_df = capped[cols].copy()
+                # 숨김 컬럼도 실어 보낸다 — 화면에는 안 나오지만 등재 직전
+                # 충돌 안내와 검수 단계가 이 값을 읽는다.
+                _keep = [c for c in list(cols) + list(hidden) if c in capped.columns]
+                edit_df = capped[_keep].copy()
                 edit_df.insert(0, "적용", select_all)
 
                 col_cfg = {c: st.column_config.TextColumn(c, disabled=True) for c in cols}
                 col_cfg["적용"] = st.column_config.CheckboxColumn("", width="small")
+                if "문맥(key)" in cols:
+                    # 매뉴얼은 key가 없으니 절 제목을, 카탈로그는 네임스페이스를 보여준다
+                    col_cfg["문맥(key)"] = st.column_config.TextColumn(
+                        "출처 (절)" if _align_on else "문맥 (key)", disabled=True,
+                        help="이 후보가 문서의 어느 절에서 나왔는지."
+                             if _align_on else "메시지 key의 첫 마디.",
+                    )
                 if "문형 빈도" in cols:
                     col_cfg["문형 빈도"] = st.column_config.NumberColumn(
                         "문형", disabled=True, width="small"
@@ -1563,6 +1630,7 @@ if st.session_state.app_mode == "Glossary 추출":
                 edited = st.data_editor(
                     edit_df, use_container_width=True, hide_index=True, height=380,
                     column_config=col_cfg, num_rows="fixed",
+                    column_order=["적용"] + [c for c in cols if c in _keep],
                     key=f"catalog_edit_{key}_{int(select_all)}_{q.strip()}",
                 )
                 chosen = edited[edited["적용"] == True]  # noqa: E712
@@ -1598,9 +1666,13 @@ if st.session_state.app_mode == "Glossary 추출":
                 [f"용어 {_stats['용어후보']:,}", f"패턴 {_stats['패턴후보']:,}"]
             )
             with _tab_terms:
+                # '기존대조'는 표에서 뺐다. 보이는 행은 거의 전부 '신규'라
+                # 정보량이 없기 때문 — '동일'은 위 '등록된 항목 숨기기'가
+                # 걸러내고, '충돌(기존)'은 표 아래 경고에서 따로 다룬다.
                 _render_table(_result.terms,
-                              ["빈도", "KO", "EN", "문맥(key)", "기존대조", "DNT"],
-                              "terms", "term")
+                              ["빈도", "KO", "EN", "문맥(key)", "DNT"],
+                              "terms", "term",
+                              hidden=("기존대조", "기존 EN"))
             with _tab_patterns:
                 _render_table(_result.patterns,
                               ["문형 빈도", "KO", "EN", "문맥(key)"],
