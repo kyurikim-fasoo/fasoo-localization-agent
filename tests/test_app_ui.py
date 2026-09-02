@@ -181,7 +181,8 @@ check("업로드 없이도 결과 화면이 뜸", len(at.metric) >= 4,
       f"metric {len(at.metric)}개")
 check("탭 2개(용어·패턴) 렌더", len(at.tabs) == 2, f"tabs {len(at.tabs)}개")
 _caps = " ".join(str(c.value) for c in at.caption)
-check("선택 안내 노출", "체크박스" in _caps, _caps[:120])
+check("선택 안내 노출", "등재할 항목을 고르세요" in _caps, _caps[:120])
+check("용어·패턴 통합 등재 안내", "함께 골라" in _caps, _caps[:160])
 check("등재 버튼은 선택 후에만", not any("등재" in b.label for b in at.button),
       str([b.label for b in at.button]))
 
@@ -290,13 +291,14 @@ at.session_state["catalog_result"] = _res
 at.session_state["catalog_parsed"] = [_FakeParsed()]
 at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
 at.session_state["catalog_sig"] = "seeded"
-at.session_state["catalog_review_terms"] = {
-    "kind": "term",
-    "rows": [
-        {"KO": "취약점 점검", "EN": "Vulnerability Check", "문맥(key)": "rule"},
-        {"KO": "무한 재귀 호출", "EN": "Infinite recursive call", "문맥(key)": "rule"},
-    ],
-    "sugg": {0: {"suggest": "vulnerability check", "reason": "일반 명사는 소문자"}},
+at.session_state["catalog_review"] = {
+    "term": {
+        "rows": [
+            {"KO": "취약점 점검", "EN": "Vulnerability Check", "문맥(key)": "rule"},
+            {"KO": "무한 재귀 호출", "EN": "Infinite recursive call", "문맥(key)": "rule"},
+        ],
+        "sugg": {0: {"suggest": "vulnerability check", "reason": "일반 명사는 소문자"}},
+    },
 }
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
@@ -306,6 +308,8 @@ check("제안 있는 항목만 라디오", len(at.radio) == 1, f"radio {len(at.r
 check("제안이 기본 선택", at.radio[0].value == "vulnerability check",
       str(at.radio[0].value))
 check("원본 유지도 선택 가능", "Vulnerability Check" in at.radio[0].options,
+      str(at.radio[0].options))
+check("직접 입력 선택지 제공", any("직접 입력" in o for o in at.radio[0].options),
       str(at.radio[0].options))
 check("사유 노출", any("소문자" in str(c.value) for c in at.caption))
 _btns = [b.label for b in at.button]
@@ -322,7 +326,7 @@ check("수정 반영 표시 사라짐", not any("수정 1건" in b for b in _btn
 # 취소하면 목록으로 돌아간다
 at3 = [b for b in at2.button if b.label == "취소"][0].click().run()
 try:
-    _left = at3.session_state["catalog_review_terms"]
+    _left = at3.session_state["catalog_review"]
 except Exception:
     _left = None
 check("취소 시 검수 상태 해제", _left is None, str(_left)[:60])
@@ -336,18 +340,19 @@ at.session_state["catalog_result"] = _res
 at.session_state["catalog_parsed"] = [_FakeParsed()]
 at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
 at.session_state["catalog_sig"] = "seeded"
-at.session_state["catalog_review_terms"] = {
-    "kind": "term",
-    "rows": [{"KO": "문서", "EN": "Document", "문맥(key)": "label",
-              "기존대조": "충돌(기존)", "기존 EN": "file"}],
-    "sugg": {0: {"suggest": "file",
-                 "reason": "기존 글로서리에는 `file`로 등록돼 있습니다.",
-                 "labels": ["기존 글로서리", "카탈로그 표기"]}},
+at.session_state["catalog_review"] = {
+    "term": {
+        "rows": [{"KO": "문서", "EN": "Document", "문맥(key)": "label",
+                  "기존대조": "충돌(기존)", "기존 EN": "file"}],
+        "sugg": {0: {"suggest": "file",
+                     "reason": "기존 글로서리에는 `file`로 등록돼 있습니다.",
+                     "labels": ["기존 글로서리", "카탈로그 표기"]}},
+    },
 }
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
-check("양쪽 표기가 선택지로", set(at.radio[0].options) == {"file", "Document"},
-      str(at.radio[0].options))
+check("양쪽 표기가 선택지로",
+      {"file", "Document"} <= set(at.radio[0].options), str(at.radio[0].options))
 check("기존 표기가 기본값", at.radio[0].value == "file", str(at.radio[0].value))
 check("무엇과 다른지 안내", any("기존 글로서리에는" in str(c.value) for c in at.caption),
       str([str(c.value)[:40] for c in at.caption]))
@@ -356,6 +361,68 @@ check("헤더에 충돌 건수", any("기존 글로서리와 충돌" in str(c.va
 at2 = at.radio[0].set_value("Document").run()
 check("카탈로그 표기로 바꿀 수 있음", at2.radio[0].value == "Document",
       str(at2.radio[0].value))
+
+print("[14] 검수 — 직접 입력으로 고쳐 쓰기")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.session_state["catalog_result"] = _res
+at.session_state["catalog_parsed"] = [_FakeParsed()]
+at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+at.session_state["catalog_sig"] = "seeded"
+at.session_state["catalog_review"] = {
+    "term": {
+        "rows": [{"KO": "취약점 점검", "EN": "Vulnerability Check", "문맥(key)": "rule"}],
+        "sugg": {0: {"suggest": "vulnerability check", "reason": "일반 명사는 소문자"}},
+    },
+}
+at.run()
+check("기본은 입력칸 없음", len(at.text_input) == 0, f"{len(at.text_input)}개")
+
+_custom = [o for o in at.radio[0].options if "직접 입력" in o][0]
+at2 = at.radio[0].set_value(_custom).run()
+check("직접 입력 고르면 입력칸 등장", len(at2.text_input) == 1, f"{len(at2.text_input)}개")
+check("원본이 미리 채워져 있음",
+      at2.text_input[0].value == "Vulnerability Check", str(at2.text_input[0].value))
+
+at3 = at2.text_input[0].set_value("vuln scan").run()
+check("고친 값이 등재 버튼에 반영",
+      any("수정 1건" in b.label for b in at3.button),
+      str([b.label for b in at3.button]))
+
+at4 = at2.text_input[0].set_value("   ").run()
+check("공백만 넣으면 원본 유지",
+      not any("수정 1건" in b.label for b in at4.button),
+      str([b.label for b in at4.button]))
+
+print("[15] 용어 + 패턴을 한 번에 검수·등재")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.session_state["catalog_result"] = _res
+at.session_state["catalog_parsed"] = [_FakeParsed()]
+at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+at.session_state["catalog_sig"] = "seeded"
+at.session_state["catalog_review"] = {
+    "term": {
+        "rows": [{"KO": "취약점 점검", "EN": "Vulnerability Check", "문맥(key)": "rule"}],
+        "sugg": {0: {"suggest": "vulnerability check", "reason": "일반 명사는 소문자"}},
+    },
+    "pattern": {
+        "rows": [{"KO": "저장을 클릭합니다.", "EN": "Click save.", "문맥(key)": "rule"}],
+        "sugg": {0: {"suggest": "Click Save.", "reason": "UI 라벨은 대문자"}},
+    },
+}
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+_txt = " ".join(str(m.value) for m in at.markdown)
+check("한 화면에 검수", "등재 전 검수 · 2건" in _txt, _txt[:120])
+check("용어 묶음 표시", "용어 1건" in _txt, _txt[:200])
+check("패턴 묶음 표시", "패턴 1건" in _txt, _txt[:200])
+check("두 종류 모두 라디오", len(at.radio) == 2, f"radio {len(at.radio)}개")
+check("확정 버튼에 합계", any("2건 등재" in b.label for b in at.button),
+      str([b.label for b in at.button]))
+
 
 print()
 if failures:

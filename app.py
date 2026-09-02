@@ -1462,112 +1462,168 @@ if st.session_state.app_mode == "Glossary 추출":
                     current_user=st.session_state.current_user,
                 )
 
-            def _start_review(sel_df, key, kind):
-                """등재 직전 검수 — 고른 항목만 LLM에 보내고 검토 단계로 넘어간다."""
+            _KIND_KO = {"term": "용어", "pattern": "패턴"}
+
+            def _start_review(selections):
+                """
+                등재 직전 검수 — 고른 항목을 LLM에 보내고 검토 단계로 넘어간다.
+
+                용어와 패턴은 판단 기준이 달라 LLM 호출은 따로 하지만(kind별
+                프롬프트), 화면은 하나로 합친다. 두 번 고르고 두 번 확인하는
+                수고를 없애기 위함.
+                """
                 from openai import OpenAI  # 이 화면에서만 필요
 
+                client = OpenAI(api_key=OPENAI_API_KEY)
+                state = {}
                 with st.spinner("검수 중"):
-                    try:
-                        _sugg = catalog.review_entries(
-                            OpenAI(api_key=OPENAI_API_KEY),
-                            list(zip(sel_df["KO"], sel_df["EN"])),
-                            kind=kind,
-                        )
-                    except Exception as e:
-                        st.error(f"검수 오류: {e}")
-                        return
-                # 기존 글로서리와 표기가 다른 항목은 검수 단계에서 함께 고르게 한다.
-                # "1건이 다릅니다"라고만 알리면 무엇이 어떻게 다른지 알 수 없다.
-                _merged = {int(i): v for i, v in _sugg.items()}
-                if "기존대조" in sel_df.columns:
-                    for _i, (_, _r) in enumerate(sel_df.iterrows()):
-                        if _r.get("기존대조") != "충돌(기존)":
+                    for kind, sel_df in selections:
+                        if sel_df is None or sel_df.empty:
                             continue
-                        _prev = str(_r.get("기존 EN") or "").split(" / ")[0].strip()
-                        if not _prev or _prev == _r["EN"]:
-                            continue
-                        _merged[_i] = {
-                            "suggest": _prev,
-                            "reason": f"기존 글로서리에는 `{_prev}`로 등록돼 있습니다.",
-                            "labels": ["기존 글로서리", "카탈로그 표기"],
+                        try:
+                            _sugg = catalog.review_entries(
+                                client, list(zip(sel_df["KO"], sel_df["EN"])),
+                                kind=kind,
+                            )
+                        except Exception as e:
+                            st.error(f"검수 오류: {e}")
+                            return
+                        # 기존 글로서리와 표기가 다른 항목도 검수에서 함께 고르게
+                        # 한다. "1건이 다릅니다"라고만 알리면 무엇이 어떻게
+                        # 다른지 알 수 없다.
+                        _merged = {int(i): v for i, v in _sugg.items()}
+                        if "기존대조" in sel_df.columns:
+                            for _i, (_, _r) in enumerate(sel_df.iterrows()):
+                                if _r.get("기존대조") != "충돌(기존)":
+                                    continue
+                                _prev = str(_r.get("기존 EN") or "").split(" / ")[0].strip()
+                                if not _prev or _prev == _r["EN"]:
+                                    continue
+                                _merged[_i] = {
+                                    "suggest": _prev,
+                                    "reason": f"기존 글로서리에는 `{_prev}`로 등록돼 있습니다.",
+                                    "labels": ["기존 글로서리", "카탈로그 표기"],
+                                }
+                        state[kind] = {
+                            "rows": sel_df.to_dict("records"), "sugg": _merged,
                         }
-                st.session_state[f"catalog_review_{key}"] = {
-                    "rows": sel_df.to_dict("records"),
-                    "sugg": _merged,
-                    "kind": kind,
-                }
+                if not state:
+                    return
+                st.session_state["catalog_review"] = state
                 st.rerun()
 
-            def _render_review(key):
-                """수정 제안을 하나씩 승인/반려하고 확정 등재."""
-                rv = st.session_state[f"catalog_review_{key}"]
-                rows, sugg, kind = rv["rows"], rv["sugg"], rv["kind"]
+            _CUSTOM = "✏️ 직접 입력"
 
-                st.markdown(f"##### 등재 전 검수 · {len(rows)}건")
-                if sugg:
-                    _n_prior = sum(1 for v in sugg.values() if v.get("labels"))
+            def _review_one(kind, i, r, s):
+                """제안이 있는 항목 하나 — 제안 / 원본 / 직접 입력 중 고르기."""
+                with st.container(border=True):
+                    st.markdown(f"**{r['KO']}**")
+                    _opts = [s["suggest"], r["EN"]]
+                    _caps = list(s.get("labels", ["제안", "원본 유지"]))[:2]
+                    if _opts[0] == _opts[1]:          # 같으면 라디오가 깨진다
+                        _opts, _caps = _opts[:1], _caps[:1]
+                    pick = st.radio(
+                        r["KO"],
+                        options=_opts + [_CUSTOM],
+                        captions=_caps + ["내가 고쳐 쓰기"],
+                        index=0, horizontal=True, label_visibility="collapsed",
+                        key=f"catalog_rev_{kind}_{i}",
+                    )
+                    if pick == _CUSTOM:
+                        # 원본을 채워두고 거기서 고치게 한다 — 빈 칸에서
+                        # 다시 타이핑하는 것보다 훨씬 빠르다.
+                        typed = st.text_input(
+                            "직접 입력", value=r["EN"],
+                            key=f"catalog_rev_txt_{kind}_{i}",
+                            label_visibility="collapsed",
+                            placeholder="등재할 영문 표기",
+                        )
+                        pick = typed.strip() or r["EN"]   # 비우면 원본 유지
+                    if s.get("reason"):
+                        st.caption(s["reason"])
+                return {**r, "EN": pick}
+
+            def _render_review():
+                """용어·패턴 제안을 한 화면에서 승인/반려/수정하고 확정 등재."""
+                rv = st.session_state["catalog_review"]
+                _total = sum(len(v["rows"]) for v in rv.values())
+                _all_sugg = {k: v["sugg"] for k, v in rv.items()}
+                _n_sugg = sum(len(v) for v in _all_sugg.values())
+
+                st.markdown(f"##### 등재 전 검수 · {_total}건")
+                if _n_sugg:
+                    _n_prior = sum(1 for sg in _all_sugg.values()
+                                   for v in sg.values() if v.get("labels"))
                     _bits = []
-                    if len(sugg) - _n_prior:
-                        _bits.append(f"수정 제안 {len(sugg) - _n_prior}건")
+                    if _n_sugg - _n_prior:
+                        _bits.append(f"수정 제안 {_n_sugg - _n_prior}건")
                     if _n_prior:
                         _bits.append(f"기존 글로서리와 충돌 {_n_prior}건")
                     st.caption(
                         " · ".join(_bits)
-                        + f" · 나머지 {len(rows) - len(sugg)}건은 그대로 등재됩니다."
+                        + f" · 나머지 {_total - _n_sugg}건은 그대로 등재됩니다."
+                        + "  ·  제안이 마음에 들지 않으면 **직접 입력**으로 고칠 수 있습니다."
                     )
                 else:
                     st.caption("수정할 항목이 없습니다. 그대로 등재하시면 됩니다.")
 
-                final = []
-                for i, r in enumerate(rows):
-                    s = sugg.get(i)
-                    if not s:
-                        final.append(r)
+                finals, changed = {}, 0
+                for kind in ("term", "pattern"):
+                    blk = rv.get(kind)
+                    if not blk:
                         continue
-                    with st.container(border=True):
-                        st.markdown(f"**{r['KO']}**")
-                        pick = st.radio(
-                            r["KO"],
-                            options=[s["suggest"], r["EN"]],
-                            captions=s.get("labels", ["제안", "원본 유지"]),
-                            index=0, horizontal=True, label_visibility="collapsed",
-                            key=f"catalog_rev_{key}_{i}",
+                    rows, sugg = blk["rows"], blk["sugg"]
+                    if len(rv) > 1:
+                        st.markdown(
+                            f"**{_KIND_KO[kind]} {len(rows)}건**"
+                            + (f"  ·  제안 {len(sugg)}건" if sugg else "")
                         )
-                        if s.get("reason"):
-                            st.caption(s["reason"])
-                    final.append({**r, "EN": pick})
+                    out = []
+                    for i, r in enumerate(rows):
+                        s = sugg.get(i)
+                        if not s:
+                            out.append(r)
+                            continue
+                        picked = _review_one(kind, i, r, s)
+                        changed += int(picked["EN"] != r["EN"])
+                        out.append(picked)
+                    finals[kind] = out
 
-                _changed = sum(
-                    1 for i, r in enumerate(rows)
-                    if i in sugg and final[i]["EN"] != r["EN"]
-                )
                 b1, b2 = st.columns([1, 2])
-                if b1.button("취소", key=f"catalog_rev_cancel_{key}",
+                if b1.button("취소", key="catalog_rev_cancel",
                              use_container_width=True):
-                    st.session_state.pop(f"catalog_review_{key}", None)
+                    st.session_state.pop("catalog_review", None)
                     st.rerun()
                 if b2.button(
-                    f"확정하고 {len(final)}건 등재"
-                    + (f" (수정 {_changed}건 반영)" if _changed else ""),
-                    type="primary", key=f"catalog_rev_ok_{key}",
+                    f"확정하고 {_total}건 등재"
+                    + (f" (수정 {changed}건 반영)" if changed else ""),
+                    type="primary", key="catalog_rev_ok",
                     use_container_width=True,
                 ):
                     try:
-                        counts = _register(pd.DataFrame(final), kind)
-                        st.session_state.pop(f"catalog_review_{key}", None)
-                        st.success(f"{counts['inserted']}개를 등재했습니다.")
+                        _msg = []
+                        for kind, out in finals.items():
+                            if not out:
+                                continue
+                            counts = _register(pd.DataFrame(out), kind)
+                            _msg.append(f"{_KIND_KO[kind]} {counts['inserted']}개")
+                        st.session_state.pop("catalog_review", None)
+                        st.success(" · ".join(_msg) + "를 등재했습니다.")
                         st.session_state.pop("catalog_result_key", None)
                     except Exception as e:
                         st.error(f"등재 오류: {e}")
 
             def _render_table(df, cols, key, kind, hidden=()):
-                """cols = 화면에 보일 컬럼, hidden = 뒤 단계에서만 쓰는 컬럼."""
-                if st.session_state.get(f"catalog_review_{key}") is not None:
-                    _render_review(key)
-                    return
+                """
+                후보 표를 그리고 **체크된 행을 돌려준다**.
+
+                등재 버튼은 여기 두지 않는다. 용어와 패턴을 한 번에 검수·등재
+                하려면 두 탭의 선택을 모아야 하는데, 탭 안에 버튼이 있으면
+                각자 등재하는 흐름이 되기 때문.
+                """
                 if df.empty:
                     st.caption("후보가 없습니다.")
-                    return
+                    return df.head(0)
 
                 f1, f2, f3 = st.columns([1.2, 3, 1.6])
                 with f1:
@@ -1633,50 +1689,68 @@ if st.session_state.app_mode == "Glossary 추출":
                     column_order=["적용"] + [c for c in cols if c in _keep],
                     key=f"catalog_edit_{key}_{int(select_all)}_{q.strip()}",
                 )
-                chosen = edited[edited["적용"] == True]  # noqa: E712
+                # 선택이 없을 때의 안내는 탭 아래 한 곳에서만 한다 —
+                # 탭마다 같은 문구를 반복하면 하단 안내와 겹친다.
+                return edited[edited["적용"] == True]  # noqa: E712
 
-                if chosen.empty:
-                    st.caption("왼쪽 체크박스로 등재할 항목을 고르세요.")
-                    return
+            if st.session_state.get("catalog_review") is not None:
+                _render_review()
+            else:
+                # 탭 순서는 [Glossary 관리]와 맞춘다 — 용어, 패턴.
+                _tab_terms, _tab_patterns = st.tabs(
+                    [f"용어 {_stats['용어후보']:,}", f"패턴 {_stats['패턴후보']:,}"]
+                )
+                with _tab_terms:
+                    # '기존대조'는 표에서 뺐다. 보이는 행은 거의 전부 '신규'라
+                    # 정보량이 없기 때문 — '동일'은 위 '등록된 항목 숨기기'가
+                    # 걸러내고, '충돌(기존)'은 아래 경고에서 따로 다룬다.
+                    _sel_terms = _render_table(
+                        _result.terms,
+                        ["빈도", "KO", "EN", "문맥(key)", "DNT"],
+                        "terms", "term", hidden=("기존대조", "기존 EN"),
+                    )
+                with _tab_patterns:
+                    _sel_patterns = _render_table(
+                        _result.patterns,
+                        ["문형 빈도", "KO", "EN", "문맥(key)"],
+                        "patterns", "pattern",
+                    )
 
-                if "기존대조" in chosen.columns:
-                    _dup = chosen[chosen["기존대조"] == "충돌(기존)"]
-                    if not _dup.empty:
-                        st.warning(
-                            f"기존 글로서리와 영어가 다른 항목 {len(_dup)}건 — "
-                            "다음 검수 단계에서 어느 쪽을 쓸지 고르게 됩니다.",
-                            icon="⚠️",
+                # ── 두 탭의 선택을 합쳐 한 번에 검수·등재 ──────────────
+                _n_t, _n_p = len(_sel_terms), len(_sel_patterns)
+                if _n_t + _n_p:
+                    if "기존대조" in _sel_terms.columns:
+                        _dup = _sel_terms[_sel_terms["기존대조"] == "충돌(기존)"]
+                        if not _dup.empty:
+                            st.warning(
+                                f"기존 글로서리와 영어가 다른 항목 {len(_dup)}건 — "
+                                "다음 검수 단계에서 어느 쪽을 쓸지 고르게 됩니다.",
+                                icon="⚠️",
+                            )
+                            st.dataframe(
+                                _dup[["KO", "EN", "기존 EN"]].rename(
+                                    columns={"EN": "카탈로그", "기존 EN": "기존 글로서리"}
+                                ),
+                                use_container_width=True, hide_index=True,
+                            )
+                    _picked = " + ".join(
+                        f"{_KIND_KO[k]} {n:,}"
+                        for k, n in (("term", _n_t), ("pattern", _n_p)) if n
+                    )
+                    if st.button(
+                        f"{_picked} = {_n_t + _n_p:,}건 검수 후 등재"
+                        if _n_t and _n_p else f"{_picked}건 검수 후 등재",
+                        type="primary", key="catalog_save_all",
+                        use_container_width=True,
+                    ):
+                        _start_review(
+                            [("term", _sel_terms), ("pattern", _sel_patterns)]
                         )
-                        st.dataframe(
-                            _dup[["KO", "EN", "기존 EN"]].rename(
-                                columns={"EN": "카탈로그", "기존 EN": "기존 글로서리"}
-                            ),
-                            use_container_width=True, hide_index=True,
-                        )
-
-                if st.button(
-                    f"{len(chosen):,}개 검수 후 등재",
-                    type="primary", key=f"catalog_save_{key}",
-                    use_container_width=True,
-                ):
-                    _start_review(chosen, key, kind)
-
-            # 탭 순서는 [Glossary 관리]와 맞춘다 — 용어, 패턴.
-            _tab_terms, _tab_patterns = st.tabs(
-                [f"용어 {_stats['용어후보']:,}", f"패턴 {_stats['패턴후보']:,}"]
-            )
-            with _tab_terms:
-                # '기존대조'는 표에서 뺐다. 보이는 행은 거의 전부 '신규'라
-                # 정보량이 없기 때문 — '동일'은 위 '등록된 항목 숨기기'가
-                # 걸러내고, '충돌(기존)'은 표 아래 경고에서 따로 다룬다.
-                _render_table(_result.terms,
-                              ["빈도", "KO", "EN", "문맥(key)", "DNT"],
-                              "terms", "term",
-                              hidden=("기존대조", "기존 EN"))
-            with _tab_patterns:
-                _render_table(_result.patterns,
-                              ["문형 빈도", "KO", "EN", "문맥(key)"],
-                              "patterns", "pattern")
+                else:
+                    st.caption(
+                        "각 탭에서 등재할 항목을 고르세요. "
+                        "용어와 패턴을 함께 골라 한 번에 검수·등재할 수 있습니다."
+                    )
 
             # ── 표기가 갈리는 항목 ────────────────────────────────────
             # 표로 두면 안 된다. Streamlit의 SelectboxColumn은 컬럼 전체에
