@@ -764,6 +764,149 @@ def analyze(pick: LanguagePick,
     return ExtractResult(labels=labels, terms=terms, patterns=patterns, stats=stats)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 번역 대상 문서에서 반복 용어 뽑기
+#
+# Glossary 추출(카탈로그/매뉴얼 쌍)은 **이미 번역된** 자료에서 KO↔EN을 캔다.
+# 그런데 새 버전에서 새로 생긴 용어는 당연히 그 자료에 없다. 실제로 이전
+# 버전 매뉴얼로 만든 글로서리를 쓴 탓에 "데이터 기반 답변 에이전트"가
+# data-driven response / data-based answer / data-driven answering …
+# 다섯 가지로 번역됐다.
+#
+# 그래서 번역 **직전에**, 이번 문서에서 반복되는 한국어 복합어를 뽑아
+# "영문을 정해 두시겠습니까"라고 묻는다. EN이 없으니 여기서는 빈도와
+# 모양만으로 후보를 고른다 — 판단은 사람이 한다.
+# ──────────────────────────────────────────────────────────────────────
+
+# 용어 후보를 걸러내는 조건들.
+#
+# 처음엔 Glossary 추출의 _looks_like_term()만 재사용했는데, 그건 이미 KO↔EN
+# 쌍으로 짝지어진 **라벨**을 거르는 용도라 본문 n-gram에는 턱없이 헐거웠다.
+# 실제로 상위 후보가 "저장을 클릭합니다", "수 있습니다", "메뉴에서 시스템 > AI"
+# 처럼 문장 조각과 메뉴 경로로 뒤덮였다. 본문에서 캘 때는 더 엄격해야 한다.
+
+# n-gram 어디에든 이게 있으면 문장이지 용어가 아니다.
+_DOC_SENT_RE = re.compile(
+    r"(니다|하세요|하십시오|십시오|있음|없음|하려면|하면|한다|된다|이다"
+    r"|하거나|거나|하며|하고|합니까|입니까)"
+)
+# 메뉴 경로·나열 기호가 낀 조각 (내비게이션 메뉴에서 시스템 > AI …)
+_DOC_SEPARATOR_RE = re.compile(r"[>/·,~…()\[\]\\|]")
+# 마지막 어절이 조사로 끝나면 문장 조각이다 ("관리자 웹사이트에")
+# 부사격 조사가 중간에 있으면 문장 조각이다
+# ("내비게이션 메뉴에서 시스템" 같은 메뉴 안내문)
+_DOC_MID_JOSA_RE = re.compile(r"(에서|에게|부터|까지)(\s|$)")
+# 마지막 어절이 조사·관형형으로 끝나도 조각이다
+# ("관리자 웹사이트에", "Fireside에 등록된")
+_DOC_JOSA_TAIL_RE = re.compile(
+    r"(을|를|이|가|은|는|에|의|로|와|과|도|만|께|에서|에게|으로|부터|까지|보다"
+    r"|된|는|한|할|하는|되는|면|해|져)$"
+)
+# 이런 말로 시작하면 앞이 잘린 조각이다
+_DOC_HEAD_STOP = {
+    "수", "것", "및", "또는", "등", "이", "그", "저", "위", "아래", "다음",
+    "해당", "각", "본", "때", "후", "전", "중",
+}
+# 통째로 제외할 관용 표현
+_TERM_STOPWORDS = {
+    "다음과 같습니다", "할 수 있습니다", "다음과 같이", "경우에 따라",
+    "이 경우", "그 다음", "아래와 같이", "위와 같이",
+}
+
+
+def _looks_like_doc_term(ko: str) -> bool:
+    """본문 n-gram이 용어인가. _looks_like_term()보다 엄격하다."""
+    if not _looks_like_term(ko):
+        return False
+    if (_DOC_SENT_RE.search(ko) or _DOC_SEPARATOR_RE.search(ko)
+            or _DOC_MID_JOSA_RE.search(ko)):
+        return False
+    words = ko.split()
+    if not words:
+        return False
+    if words[0] in _DOC_HEAD_STOP:
+        return False
+    # 첫 어절이 조사로 끝나면 앞이 잘린 조각이다 ("메뉴는 전사 관리자만 접근")
+    if len(words) > 1 and _DOC_JOSA_TAIL_RE.search(words[0]):
+        return False
+    if _DOC_JOSA_TAIL_RE.search(words[-1]):
+        return False
+    # 마지막 어절이 한 글자면 대개 잘린 조각이다 ("데이터 기반 답 ")
+    if len(words[-1]) == 1 and _KOREAN_RE.search(words[-1]):
+        return False
+    return True
+
+
+def _ngrams(words: List[str], lo: int, hi: int):
+    for n in range(lo, hi + 1):
+        for i in range(len(words) - n + 1):
+            yield " ".join(words[i:i + n])
+
+
+def suggest_terms_from_texts(
+    texts: List[str],
+    exclude: Optional[set] = None,
+    min_freq: int = TERM_MIN_FREQ,
+    limit: int = 60,
+) -> pd.DataFrame:
+    """
+    문단 목록에서 반복되는 한국어 복합어를 글로서리 후보로 뽑는다.
+
+    exclude: 이미 글로서리에 있거나 UI 매핑으로 다루는 KO — 중복 제안 방지.
+    """
+    exclude = {e.strip() for e in (exclude or set()) if e and e.strip()}
+    freq: Counter = Counter()
+    first_ctx: Dict[str, str] = {}
+
+    for t in texts:
+        words = t.split()
+        seen_here = set()
+        for g in _ngrams(words, TERM_MIN_WORDS, TERM_MAX_WORDS):
+            g = g.strip(" .,()[]{}\u201c\u201d\u2018\u2019\"'")
+            if g in seen_here or not _looks_like_doc_term(g):
+                continue
+            seen_here.add(g)
+            freq[g] += 1
+            first_ctx.setdefault(g, t)
+
+    rows = []
+    for g, n in freq.items():
+        if n < min_freq or g in exclude or g in _TERM_STOPWORDS:
+            continue
+        rows.append({"KO": g, "빈도": n})
+    if not rows:
+        return pd.DataFrame(columns=["KO", "EN (입력)", "빈도", "맥락"])
+
+    rows.sort(key=lambda r: (-r["빈도"], -len(r["KO"])))
+
+    # 부분 문자열 정리 — "데이터 기반", "기반 답변", "데이터 기반 답변",
+    # "데이터 기반 답변 에이전트"가 전부 올라오면 고를 수가 없다. 더 긴
+    # 후보가 비슷한 빈도로 존재하면 짧은 쪽은 그 안에 흡수된 것으로 본다.
+    kept: List[dict] = []
+    for r in sorted(rows, key=lambda r: -len(r["KO"])):
+        if any(r["KO"] in k["KO"] and r["빈도"] <= k["빈도"] / 0.8 for k in kept):
+            continue
+        kept.append(r)
+
+    kept.sort(key=lambda r: (-r["빈도"], r["KO"]))
+    kept = kept[:limit]
+    return pd.DataFrame([{
+        "KO": r["KO"],
+        "EN (입력)": "",
+        "빈도": r["빈도"],
+        "맥락": _excerpt(first_ctx.get(r["KO"], ""), r["KO"]),
+    } for r in kept])
+
+
+def _excerpt(text: str, target: str, around: int = 28) -> str:
+    """용어가 등장한 자리의 앞뒤 문맥. 「대상」으로 강조한다."""
+    i = text.find(target)
+    if i < 0:
+        return text[:70]
+    lo, hi = max(0, i - around), min(len(text), i + len(target) + around)
+    return (("…" if lo else "") + text[lo:i] + "\u300c" + target + "\u300d"
+            + text[i + len(target):hi] + ("…" if hi < len(text) else ""))
+
 def existing_terms_index(terms_df: pd.DataFrame) -> Dict[str, set]:
     """
     load_terms() 결과를 {ko: {원본 EN, …}} 인덱스로.

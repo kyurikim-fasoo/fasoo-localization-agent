@@ -12,3 +12,8 @@ __pycache__/
 # app data
 uploads/
 outputs/
+# 고객 문서 / 대용량 입력물 — 저장소에 넣지 않는다.
+# 이미 추적 중인 test.docx 등은 gitignore가 영향을 주지 않으므로 그대로 남는다.
+/*.docx
+/*.mdx
+/watchtower-*.json

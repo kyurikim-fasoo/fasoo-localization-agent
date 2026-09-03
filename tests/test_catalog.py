@@ -367,6 +367,49 @@ except ValueError as e:
     check("Heading 없으면 예외", "제목" in str(e), str(e))
 
 
+print("[13] 번역 대상 문서에서 반복 용어 뽑기")
+
+_doc = [
+    "데이터 기반 답변 에이전트를 등록합니다.",
+    "데이터 기반 답변 에이전트 목록을 확인합니다.",
+    "데이터 기반 답변 에이전트 수정 화면으로 이동합니다.",
+    "AI 프로바이더 유형을 선택합니다.",
+    "AI 프로바이더 정보를 저장합니다.",
+    "AI 프로바이더 목록이 나타납니다.",
+    "내비게이션 메뉴에서 시스템 > AI 시스템을 클릭합니다.",
+    "저장을 클릭합니다.",
+    "삭제를 클릭합니다.",
+    "수정을 클릭합니다.",
+]
+_cand = ct.suggest_terms_from_texts(_doc, min_freq=3)
+_kos = list(_cand["KO"])
+check("반복 복합어를 뽑는다",
+      any("데이터 기반 답변" in k for k in _kos) and any("AI 프로바이더" in k for k in _kos),
+      str(_kos))
+check("문장 조각은 안 뽑는다 (…합니다)",
+      not any("니다" in k for k in _kos), str([k for k in _kos if "니다" in k]))
+check("메뉴 경로 조각도 안 뽑는다 (> 포함)",
+      not any(">" in k for k in _kos), str([k for k in _kos if ">" in k]))
+check("부사격 조사 낀 조각 제외 (…메뉴에서 …)",
+      not any("에서" in k for k in _kos), str([k for k in _kos if "에서" in k]))
+check("빈도 컬럼", "빈도" in _cand.columns and all(_cand["빈도"] >= 3), str(list(_cand["빈도"])))
+check("EN 입력칸이 비어 있음", all(v == "" for v in _cand["EN (입력)"]))
+check("맥락에 「대상」 강조", all("「" in c for c in _cand["맥락"]), str(list(_cand["맥락"])[:2]))
+
+check("exclude로 이미 아는 용어 제외",
+      not any(k == _kos[0] for k in
+              ct.suggest_terms_from_texts(_doc, exclude={_kos[0]}, min_freq=3)["KO"]),
+      _kos[0])
+check("min_freq 미만은 안 나옴",
+      ct.suggest_terms_from_texts(["한 번만 나오는 특수 용어입니다."], min_freq=3).empty)
+check("빈 입력도 안전", ct.suggest_terms_from_texts([]).empty)
+
+# 부분 문자열 정리 — 짧은 조각이 긴 용어에 흡수되는지
+_sub = ct.suggest_terms_from_texts(["멤버 내보내기 기능"] * 5, min_freq=3)
+check("같은 빈도면 더 긴 쪽만 남는다",
+      list(_sub["KO"]) == ["멤버 내보내기 기능"], str(list(_sub["KO"])))
+
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

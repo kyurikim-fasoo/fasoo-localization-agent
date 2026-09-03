@@ -4,7 +4,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import pandas as pd
 import streamlit as st
@@ -34,7 +34,8 @@ from services.translation_logs import (
 from services import catalog
 from services.jobs import get_job, start_job
 from services.users import add_user, list_users
-from translator_engine import MARKDOWN_EXTENSIONS, extract_bold_terms
+from translator_engine import (MARKDOWN_EXTENSIONS, extract_bold_terms,
+                               extract_korean_paragraphs)
 
 
 load_dotenv()
@@ -195,6 +196,33 @@ def render_translation_progress() -> None:
         )
     except Exception as log_err:
         st.warning(f"로그 저장 중 경고: {log_err}")
+
+    # Step 2에서 채운 반복 용어를 글로서리에 등재 (체크한 경우에만).
+    # 번역이 끝난 뒤에 하는 이유 — 번역이 실패하면 검증되지 않은 표기가
+    # 글로서리에 남는다. 성공한 표기만 재사용할 가치가 있다.
+    _pending_terms = st.session_state.pop("pending_term_registrations", None)
+    if _pending_terms:
+        try:
+            _saved = save_terms_from_dataframe(
+                pd.DataFrame({
+                    "id": None, "Scope": "Team",
+                    "KO": list(_pending_terms.keys()),
+                    "EN": list(_pending_terms.values()),
+                    "Product": st.session_state.selected_product or "ALL",
+                    "DNT": False, "Case-sensitive": False,
+                    "Note": "번역 전 반복 용어에서 등재",
+                    "Status": "approved",
+                    "File": pending.get("uploaded_name")
+                            or Path(params["in_path"]).name,
+                }),
+                view_ids=set(),
+                current_user=st.session_state.current_user,
+            )
+            if _saved.get("inserted"):
+                st.toast(f"용어 {_saved['inserted']}개를 글로서리에 등재했습니다.",
+                         icon="📖")
+        except Exception as term_err:
+            st.warning(f"용어 등재 중 경고: {term_err}")
 
     # 임시 상태 정리
     st.session_state.pop("ui_text_mapping_rows", None)
@@ -598,6 +626,7 @@ def _clear_unsaved_state() -> None:
     """사용자가 '예, 버리고 이동'을 선택했을 때 임시 상태를 정리."""
     for k in (
         "ui_text_mapping_rows", "ui_text_source_sig", "ui_text_input_path",
+        "term_candidate_rows",
         "ui_text_preload_counts", "staged_master", "glossary_table_dirty",
     ):
         st.session_state.pop(k, None)
@@ -2118,7 +2147,7 @@ if st.session_state.step == 2:
         # 파일 바뀌면 재추출 (파일명 + size + 컬럼 스키마 버전).
         # 스키마 버전은 ui_text_mapping_rows의 키 구조를 바꿀 때마다 올린다 —
         # 그래야 이전 세션의 row가 새 컬럼과 안 맞을 때 자동 재추출된다.
-        file_sig = f"{uploaded_docx.name}::{uploaded_docx.size}::ctx_v1"
+        file_sig = f"{uploaded_docx.name}::{uploaded_docx.size}::ctx_v2"
         if st.session_state.get("ui_text_source_sig") != file_sig:
             try:
                 tmp_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
@@ -2154,6 +2183,22 @@ if st.session_state.step == 2:
                 st.session_state.ui_text_source_sig = file_sig
                 st.session_state.ui_text_input_path = str(tmp_path)
                 st.session_state.ui_text_preload_counts = _source_counts
+
+                # 반복 용어 → 글로서리 후보.
+                #
+                # 글로서리는 보통 **이전 버전** 매뉴얼로 만들어 둔다. 그래서
+                # 이번 버전에 새로 생긴 용어는 글로서리에 있을 수가 없고,
+                # 문단마다 다르게 번역된다 (실제로 "데이터 기반 답변
+                # 에이전트"가 다섯 가지로 나왔다). 번역 직전에 이 문서에서
+                # 반복되는 용어를 보여주고 영문을 정하게 한다.
+                _known = {r.get("KO") for r in glossary_rows if r.get("KO")}
+                _known |= {r["KO (Bold)"] for r in initial_rows}
+                st.session_state.term_candidate_rows = (
+                    catalog.suggest_terms_from_texts(
+                        extract_korean_paragraphs(str(tmp_path)),
+                        exclude=_known,
+                    ).to_dict("records")
+                )
             except Exception as e:
                 st.error(f"문서에서 볼드 텍스트 추출 실패: {e}")
 
@@ -2267,6 +2312,51 @@ if st.session_state.step == 2:
                 key="ui_text_editor",
             )
 
+        # ── 반복 용어 (글로서리 후보) ────────────────────────────
+        # UI 텍스트와 같은 위계로 둔다. 다만 성격이 다르다 —
+        # UI 매핑은 **굵은 라벨 안에서만** 치환되고, 이쪽은 글로서리와
+        # 똑같이 **본문 어디서든** 치환된다. 그래서 표를 나눈다.
+        _term_rows = st.session_state.get("term_candidate_rows") or []
+        if _term_rows:
+            term_df = pd.DataFrame(_term_rows,
+                                   columns=["KO", "EN (입력)", "빈도", "맥락"])
+            st.markdown(f"##### 📖 반복 용어 — Glossary 후보 ({len(term_df)}개)")
+            st.caption(
+                "이 문서에서 3회 이상 반복되는데 **글로서리에 아직 없는** 용어입니다. "
+                "영문을 정해두면 문서 전체에서 그 표기로 통일됩니다. "
+                "비워두면 LLM이 문단마다 알아서 번역합니다 — 표기가 갈릴 수 있습니다."
+            )
+            term_df = st.data_editor(
+                term_df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                disabled=["KO", "빈도", "맥락"],
+                column_order=["빈도", "KO", "EN (입력)", "맥락"],
+                column_config={
+                    "빈도": st.column_config.NumberColumn(
+                        "빈도", disabled=True, width="small",
+                        help="이 문서에서 몇 번 나오는지.",
+                    ),
+                    "KO": st.column_config.TextColumn("KO", width="medium"),
+                    "EN (입력)": st.column_config.TextColumn(
+                        "EN (입력)",
+                        help="정해두면 본문 어디서든 이 표기로 통일됩니다.",
+                        width="medium",
+                    ),
+                    "맥락": st.column_config.TextColumn(
+                        "맥락 (앞뒤 문장)", width="large",
+                        help="해당 용어가 처음 등장한 자리. 「대상」으로 강조 표시.",
+                    ),
+                },
+                key="term_candidate_editor",
+            )
+            st.checkbox(
+                "번역 후 이 용어들을 글로서리에도 등재",
+                key="term_candidates_register",
+                help="다음 번역부터는 다시 입력하지 않아도 됩니다.",
+            )
+
     st.markdown("---")
     col_back, col_translate = st.columns(2)
 
@@ -2289,6 +2379,27 @@ if st.session_state.step == 2:
         if uploaded_docx is None:
             st.error("문서를 업로드하세요.")
         else:
+            # 사용자가 채운 반복 용어를 이번 번역의 글로서리에 얹는다.
+            # UI 매핑(굵은 라벨 한정)과 달리 본문 전체에 적용돼야 하므로
+            # glossary_rows 쪽에 넣는다.
+            _term_pairs: Dict[str, str] = {}
+            if _term_rows:
+                for _, _tr in term_df.iterrows():
+                    _tko = str(_tr.get("KO", "") or "").strip()
+                    _ten = str(_tr.get("EN (입력)", "") or "").strip()
+                    if _tko and _ten:
+                        _term_pairs[_tko] = _ten
+            if _term_pairs:
+                _existing_ko = {r.get("KO") for r in glossary_rows}
+                glossary_rows = glossary_rows + [
+                    {"KO": k, "EN": v, "DNT": False, "Case-sensitive": False}
+                    for k, v in _term_pairs.items() if k not in _existing_ko
+                ]
+                st.session_state["pending_term_registrations"] = (
+                    _term_pairs if st.session_state.get("term_candidates_register")
+                    else {}
+                )
+
             _ui_overrides_pending = {}
             if ui_mapping_df is not None and not ui_mapping_df.empty:
                 for _, row in ui_mapping_df.iterrows():

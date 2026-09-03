@@ -4,7 +4,7 @@ import re
 import tempfile
 import zipfile
 import zlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Iterable, Optional, Callable, Any
 
@@ -37,17 +37,21 @@ TAB_MARKER = "⟦TB⟧"
 
 G_PREFIX = "⟦G"
 D_PREFIX = "⟦D"
+# 원문 영문 리터럴 봉인용. 'L'은 ⟦LB⟧와 눈으로 헷갈리므로 X를 쓴다
+# (BR_MARKER가 B를 피한 것과 같은 이유).
+X_PREFIX = "⟦X"
 SUFFIX = "⟧"
 
 KOREAN_RE = re.compile(r"[가-힣]")
 PLACEHOLDER_RE = re.compile(r"⟦G\d+⟧")
+LITERAL_PH_RE = re.compile(r"⟦X\d+⟧")
 DRAWING_PH_RE = re.compile(r"⟦D\d+⟧")
 H_OPEN_RE    = re.compile(r"⟦H(\d+)⟧")
 H_CLOSE_RE   = re.compile(r"⟦/H(\d+)⟧")
 HL_OPEN_RE   = re.compile(r"⟦HL:([a-zA-Z]+)⟧")
 HL_CLOSE     = "⟦/HL⟧"
 BR_MARKER_RE = re.compile(re.escape(BR_MARKER))
-ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧)")
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧|⟦X\d+⟧)")
 # ⟦LB⟧ / ⟦TB⟧ 는 run 내부에서 <w:br/> · <w:tab/> 요소로 되살려야 하므로
 # _make_run에서 텍스트를 이 마커 기준으로 쪼갠다.
 LAYOUT_MARKER_SPLIT_RE = re.compile(
@@ -59,7 +63,7 @@ MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d
 # 잡혀 "⟦Hl:yellow⟧ / ⟦/hl⟧"로 훼손되고, 이후 ALL_MARKER_RE 토크나이저가 인식하지
 # 못해 마커가 문서에 그대로 찍힌다.
 ANY_MARKER_SPLIT_RE = re.compile(
-    r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦G\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧)"
+    r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦G\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧|⟦X\d+⟧)"
 )
 
 # 안전장치용 정규식 — LLM이 ⟦LB⟧를 파괴적으로 응답해서 "⟦L⟧B⟧" 같은 잔해나
@@ -261,6 +265,7 @@ def build_pattern_pairs_from_rows(rows: List[dict]) -> List[Tuple[str, str]]:
 def preprocess_with_glossary_placeholders(
     text: str,
     entries: List[GlossaryEntry],
+    start_idx: int = 0,
 ) -> Tuple[str, Dict[str, GlossaryEntry]]:
     """
     Replace glossary KO terms in *text* with ⟦G0⟧ … placeholders.
@@ -270,10 +275,13 @@ def preprocess_with_glossary_placeholders(
     with a different number of spaces (or a zero-width space, thin space, etc.).
     Longer KO terms are tried first (entries are pre-sorted by length desc)
     to avoid a short term swallowing part of a longer one.
+
+    start_idx는 앞선 전처리(UI 매핑)가 이미 ⟦G0⟧…를 쓴 경우 번호가 겹치지
+    않게 이어 붙이기 위한 것이다.
     """
     out = text
     mapping: Dict[str, GlossaryEntry] = {}
-    idx = 0
+    idx = start_idx
 
     for entry in entries:
         if not entry.ko:
@@ -376,6 +384,92 @@ def _is_at_sentence_or_bold_start(text_before: str) -> bool:
     if s.endswith(B_OPEN):
         return True
     return False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 원문 영문 리터럴 봉인
+#
+# 프롬프트에 "기존 영문은 바꾸지 마라"라고 써도 모델은 지키지 않는다.
+# 실제 산출물에서 K-Assistant가 AI Assistant로 바뀌었고, "Enable basic AI
+# features"가 "…basic ai features"가 됐다. 뒤엣것은 모델이 아니라 우리
+# 후처리(_sentence_case_preserving_markers)가 저지른 것이다 — 첫 글자 뒤의
+# 알파벳을 전부 소문자로 내리기 때문이다.
+#
+# 지시로 막을 수 없으면 **구조로** 막는다. 번역 전에 자리표시자로 바꿔두면
+# 모델도 후처리도 건드릴 수 없다. 복원은 대소문자 정규화까지 모두 끝난 뒤.
+# ──────────────────────────────────────────────────────────────────────
+
+# 경계에 \b를 쓰면 안 된다. 파이썬 정규식의 \w는 한글을 포함하므로
+# "K-Assistant는" 에서 t와 는 사이에 경계가 생기지 않아 매칭이 통째로 실패한다.
+# 실제로 리포트가 문제 삼은 K-Assistant가 바로 이 형태였다.
+# 그래서 "영문·숫자가 아니면 경계"로 직접 정의한다.
+_LB = r"(?<![A-Za-z0-9])"
+_RB = r"(?![A-Za-z0-9])"
+_LITERAL_RE = re.compile(
+    r"https?://[^\s⟦⟧]+"                                     # URL
+    r"|[\w.+-]+@[\w-]+\.[\w.-]+"                             # 이메일
+    rf"|{_LB}v\d+(?:\.\d+)+{_RB}"                            # v2.1, v1.7.1
+    rf"|{_LB}[A-Za-z][A-Za-z0-9+#_-]*\.(?:docx?|xlsx?|pptx?|pdf|txt|csv"
+    rf"|json|xml|zip|png|jpe?g|gif|svg|mdx?){_RB}"           # 파일명
+    rf"|{_LB}[A-Z][A-Za-z]*-[A-Z][A-Za-z0-9]+{_RB}"           # K-Assistant, MS-SQL
+    rf"|{_LB}(?:SaaS|PaaS|IaaS|IoT|iOS|macOS){_RB}"           # 혼합 대소문자 관용 표기
+    rf"|{_LB}[A-Z][A-Z0-9]{{1,7}}{_RB}"                       # AI, API, SQL, JDK…
+)
+
+
+def seal_literals(text: str) -> Tuple[str, Dict[str, str]]:
+    """
+    번역·후처리가 건드리면 안 되는 원문 영문을 ⟦X#⟧로 봉인한다.
+
+    마커 안쪽은 절대 건드리지 않는다 — ⟦HL:yellow⟧의 "HL"이 대문자 두 글자라
+    약어 규칙에 걸리기 때문이다. 그래서 마커 기준으로 쪼갠 뒤 사이 구간만 본다.
+    """
+    if not text:
+        return text, {}
+    mapping: Dict[str, str] = {}
+    parts = _split_preserving_markers(text)
+    out = []
+    for part in parts:
+        if not part or _is_marker_token(part):
+            out.append(part)
+            continue
+
+        def _seal(m):
+            ph = make_marker(X_PREFIX, len(mapping))
+            mapping[ph] = m.group(0)
+            return ph
+
+        out.append(_LITERAL_RE.sub(_seal, part))
+    return "".join(out), mapping
+
+
+def restore_literals(text: str, mapping: Dict[str, str]) -> str:
+    """봉인한 영문을 원래 표기 그대로 되돌린다."""
+    if not mapping or not text:
+        return text
+    # 자리표시자가 통째로 사라진 경우(모델이 삼킴)는 여기서 되살릴 수 없다.
+    # check_marker_integrity가 ⟦X#⟧ 소실로 잡아준다.
+    for ph, original in mapping.items():
+        text = text.replace(ph, original)
+    return text
+
+
+def enforce_literal_casing(text: str, source_text: str) -> str:
+    """
+    QA(Pass 2)가 흐트러뜨린 원문 영문의 대소문자를 되돌린다.
+
+    Pass 2는 봉인 바깥에서 돌기 때문에 여기서 한 번 더 지켜야 한다.
+    치환이 아니라 **대소문자만** 맞춘다 — 단어 자체가 바뀐 경우는 QA의
+    판단일 수 있으므로 건드리지 않는다.
+    """
+    if not text or not source_text:
+        return text
+    for lit in dict.fromkeys(_LITERAL_RE.findall(source_text)):
+        if len(lit) < 2:
+            continue
+        text = re.sub(rf"{_LB}{re.escape(lit)}{_RB}", lit, text,
+                      flags=re.IGNORECASE)
+    return text
 
 
 def restore_glossary_placeholders(
@@ -1098,6 +1192,66 @@ def _write_paragraph_inplace(p_elem, translated_marked: str,
         _rebuild_group(run_groups[gi], text_slots[gi] if gi < len(text_slots) else [], hl_groups[gi])
 
 
+# 마커처럼 생겼지만 우리가 아는 형태가 아닌 것 — ⟦HL:yellow (닫힘 없음),
+# ⟦/b (소문자), ⟧만 남은 조각 등. 이런 게 Word에 그대로 찍혀 왔다.
+# 색 이름은 Word가 쓰는 값으로 한정한다. [A-Za-z]+ 로 두면 탐욕적으로 매칭돼
+# "⟦HL:yellowAI provider" 에서 뒤따르는 본문 "AI"까지 먹어버린다.
+_HL_COLOR_ALT = (
+    "darkBlue|darkCyan|darkGray|darkGrey|darkGreen|darkMagenta|darkRed|darkYellow|"
+    "lightGray|lightGrey|black|blue|cyan|green|magenta|red|white|yellow|none"
+)
+_MARKER_DEBRIS_RE = re.compile(
+    rf"⟦/?HL(?::(?:{_HL_COLOR_ALT}))?⟧?|⟦/?[A-Za-z]{{1,2}}\d*⟧?",
+    re.IGNORECASE,
+)
+
+
+def sanitize_broken_markers(text: str) -> str:
+    """
+    정상 마커는 그대로 두고, 손상된 마커 잔재만 지운다.
+
+    복구(repair_*)는 어디까지나 추측이라 형태가 조금만 어긋나도 못 잡는다.
+    실제 산출물에는 "⟦HL:yellowAI provider type" 이나 "…schema⟦/b" 가 그대로
+    남았다. 마지막 방어선은 **추측하지 않는 것** — 못 알아보는 마커는 텍스트로
+    출력하느니 지운다. 서식은 잃어도 문서에 쓰레기 문자가 박히지는 않는다.
+    """
+    if not text or ("⟦" not in text and "⟧" not in text):
+        return text
+    parts = re.split(f"({_KNOWN_MARKER_RE.pattern})", text)
+    out = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:                      # 정상 마커 — 손대지 않는다
+            out.append(part)
+            continue
+        part = _MARKER_DEBRIS_RE.sub("", part)
+        out.append(part.replace("⟦", "").replace("⟧", ""))
+    return "".join(out)
+
+
+def finalize_markers(src_marked: str, translated: str) -> Tuple[str, List[str]]:
+    """
+    Word에 쓰기 **직전** 마지막 관문. (정리된 텍스트, 남은 문제 목록)
+
+    지금까지 마커 복구는 번역 직후에만 돌았다. 그런데 그 뒤로도 대소문자
+    정규화·문장부호 보정 같은 후처리가 줄줄이 이어지고, 거기서 깨진 마커는
+    아무도 다시 보지 않은 채 문서에 기록됐다. 하이라이트가 사라진 8개 문단과
+    본문에 노출된 마커 2곳이 모두 이 구간에서 생겼다.
+
+    그래서 순서를 이렇게 잡는다.
+      1. 복구할 수 있는 건 복구하고
+      2. 경계 공백을 정리하고
+      3. 그래도 못 알아보는 잔재는 지우고
+      4. 하이라이트가 통째로 날아갔으면 문단 전체에 다시 씌우고
+      5. 마지막으로 검사해 남은 문제를 보고한다
+    """
+    text = repair_bold_markers(translated)
+    text = repair_hl_markers(text)
+    text = normalize_marker_boundary_spaces(text)
+    text = sanitize_broken_markers(text)
+    text = apply_highlight_fallback(text, src_marked)
+    return text, check_marker_integrity(src_marked, text)
+
+
 def strip_bold_markers(text: str) -> str:
     """Remove ⟦B⟧/⟦/B⟧ bold markers and ⟦HL:colour⟧/⟦/HL⟧ highlight markers."""
     text = text.replace(B_OPEN, "").replace(B_CLOSE, "")
@@ -1148,25 +1302,167 @@ def repair_bold_markers(text: str) -> str:
     return text
 
 
-def normalize_bold_spaces(text: str) -> str:
-    """
-    Remove spurious spaces that accumulate at bold-marker boundaries,
-    then collapse any remaining double-spaces to single spaces.
+# 인라인 구간을 여는/닫는 마커 — 경계 공백을 밖으로 밀어낼 대상.
+_SPAN_OPEN_RE = re.compile(r"(⟦B⟧|⟦I⟧|⟦HL:[a-zA-Z]+⟧|⟦H\d+⟧)[ \t]+")
+_SPAN_CLOSE_RE = re.compile(r"[ \t]+(⟦/B⟧|⟦/I⟧|⟦/HL⟧|⟦/H\d+⟧)")
+# 줄이 시작하는 자리 — 여기에 밀려온 공백은 버린다.
+_LINE_HEAD_RE = re.compile(r"(^|⟦LB⟧|⟦TB⟧)[ \t]+")
+_LINE_TAIL_RE = re.compile(r"[ \t]+($|⟦LB⟧|⟦TB⟧)")
 
-    The LLM sometimes outputs "click ⟦B⟧ Rule ⟦/B⟧." or
-    "click  ⟦B⟧Rule⟦/B⟧." — both produce double-space artifacts.
 
-    Steps
-    -----
-    1. Strip whitespace immediately after  ⟦B⟧  → "⟦B⟧ Rule" → "⟦B⟧Rule"
-    2. Strip whitespace immediately before ⟦/B⟧ → "Rule ⟦/B⟧" → "Rule⟦/B⟧"
-    3. Collapse any remaining consecutive spaces to a single space.
+def normalize_marker_boundary_spaces(text: str) -> str:
     """
-    text = re.sub(r"⟦B⟧\s+", B_OPEN, text)
-    text = re.sub(r"\s+⟦/B⟧", B_CLOSE, text)
+    마커 경계에 낀 공백을 **삭제하지 않고 마커 바깥으로 옮긴다.**
+
+    예전 구현은 그냥 지웠다. 그래서 원문이
+        ⟦B⟧Agent Feedback ⟦/B⟧탭
+    처럼 공백을 볼드 안쪽에 두고 있으면 번역 결과가
+        Agent Feedbacktab
+    으로 붙어버렸다. 실제 산출물의 "Delete Agentwindow", "Agent Feedbacktab"이
+    전부 이것이다. 원문 Fireside v2.5 기준으로 볼드 닫기 직후에 글자가 붙는
+    자리가 212곳이라 영향 범위가 작지 않다.
+
+    공백은 의미를 가진 문자다. 없앨 게 아니라 구간 밖에 두면 된다.
+        "…에서⟦B⟧ 사용자⟦/B⟧를"  ->  "…에서 ⟦B⟧사용자⟦/B⟧ 를"  (뒤에서 조사 정리)
+    """
+    text = _SPAN_OPEN_RE.sub(lambda m: " " + m.group(1), text)
+    text = _SPAN_CLOSE_RE.sub(lambda m: m.group(1) + " ", text)
+    # 구두점 앞으로 밀려난 공백은 되돌린다 ("Rule ." -> "Rule.")
+    text = re.sub(r"[ \t]+([.,;:!?)\]}…])", r"\1", text)
+    # 줄 머리/꼬리로 밀려난 공백은 버린다
+    text = _LINE_HEAD_RE.sub(r"\1", text)
+    text = _LINE_TAIL_RE.sub(r"\1", text)
     text = re.sub(r"  +", " ", text)
     return text
 
+
+# ──────────────────────────────────────────────────────────────────────
+# 마커 무결성 검사
+#
+# 지금까지는 손상된 마커를 repair_*() 로 "고쳐서" 통과시켰다. 그런데 실제
+# 산출물에는 ⟦HL:yellowAI provider type 이나 ⟦/b 처럼 복구 규칙이 잡지 못하는
+# 형태가 그대로 Word에 기록됐다. 복구는 어디까지나 추측이고, 추측이 틀리면
+# 조용히 망가진 문서가 나간다.
+#
+# 그래서 판단 기준을 바꾼다 — **고칠 수 있으면 고치고, 검사에 실패하면 그
+# 후보 번역을 거부한다.** 무엇을 거부할지 판단하려면 먼저 "무엇이 잘못됐는가"
+# 를 말할 수 있어야 하므로, 이 함수는 문제 목록을 사람이 읽는 문장으로
+# 돌려준다. 빈 리스트면 무결성 통과.
+# ──────────────────────────────────────────────────────────────────────
+
+# ID를 가진 마커 — 원문과 **같은 것이 같은 개수만큼** 있어야 한다.
+_ID_MARKER_KINDS = (
+    ("용어 자리표시자 ⟦G#⟧", re.compile(r"⟦G\d+⟧")),
+    ("원문 영문 봉인 ⟦X#⟧", re.compile(r"⟦X\d+⟧")),
+    ("이미지 ⟦D#⟧", re.compile(r"⟦D\d+⟧")),
+    ("주석 ⟦C#⟧", re.compile(r"⟦C\d+⟧")),
+    ("하이퍼링크 열기 ⟦H#⟧", re.compile(r"⟦H\d+⟧")),
+    ("하이퍼링크 닫기 ⟦/H#⟧", re.compile(r"⟦/H\d+⟧")),
+)
+# 개수만 맞으면 되는 마커
+_COUNT_MARKER_KINDS = (
+    ("줄바꿈 ⟦LB⟧", BR_MARKER),
+    ("탭 ⟦TB⟧", TAB_MARKER),
+)
+# 열기/닫기가 짝을 이뤄야 하는 마커
+_PAIR_MARKER_KINDS = (
+    ("굵게", B_OPEN, B_CLOSE),
+    ("기울임", "⟦I⟧", "⟦/I⟧"),
+)
+# 우리가 아는 정상 마커 전부. ⟦HL:…⟧을 ⟦H\d+⟧보다 앞에 둘 필요는 없다
+# (H 뒤에 숫자를 요구하므로 겹치지 않는다) — 그래도 읽기 좋게 앞에 둔다.
+_KNOWN_MARKER_RE = re.compile(
+    r"⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦/?B⟧|⟦/?I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦G\d+⟧|⟦X\d+⟧|"
+    r"⟦/?H\d+⟧|⟦LB⟧|⟦TB⟧"
+)
+
+
+def _pairing_ok(text: str, open_tok: str, close_tok: str) -> bool:
+    """열기/닫기가 순서대로 짝을 이루는가 (중첩 허용)."""
+    depth = 0
+    for m in re.finditer(
+        rf"{re.escape(open_tok)}|{re.escape(close_tok)}", text
+    ):
+        depth += 1 if m.group(0) == open_tok else -1
+        if depth < 0:
+            return False
+    return depth == 0
+
+
+def check_marker_integrity(src: str, out: str) -> List[str]:
+    """
+    번역 후보(out)가 원문 marked text(src)의 마커 구조를 지켰는지 검사한다.
+
+    반환값은 사람이 읽는 문제 설명 목록. 빈 리스트면 통과.
+    """
+    problems: List[str] = []
+    if not src:
+        return problems
+    out = out or ""
+
+    # 1. ID 마커는 멀티셋이 같아야 한다 (순서는 언어마다 달라질 수 있으므로 무시)
+    for label, rx in _ID_MARKER_KINDS:
+        a, b = Counter(rx.findall(src)), Counter(rx.findall(out))
+        if a == b:
+            continue
+        lost = sorted((a - b).elements())
+        extra = sorted((b - a).elements())
+        bits = []
+        if lost:
+            bits.append(f"사라짐 {' '.join(lost[:5])}")
+        if extra:
+            bits.append(f"없던 것 생김 {' '.join(extra[:5])}")
+        problems.append(f"{label}: " + " · ".join(bits))
+
+    # 2. 개수만 맞으면 되는 마커
+    for label, tok in _COUNT_MARKER_KINDS:
+        na, nb = src.count(tok), out.count(tok)
+        if na != nb:
+            problems.append(f"{label}: {na}개 → {nb}개")
+
+    # 3. 열기/닫기 짝
+    for label, op, cl in _PAIR_MARKER_KINDS:
+        na, nb = src.count(op), out.count(op)
+        if na != nb or src.count(cl) != out.count(cl):
+            problems.append(
+                f"{label} 마커 개수 불일치: "
+                f"열기 {na}→{nb} · 닫기 {src.count(cl)}→{out.count(cl)}"
+            )
+        elif not _pairing_ok(out, op, cl):
+            problems.append(f"{label} 마커 짝이 어긋남 (닫기가 열기보다 먼저이거나 남음)")
+
+    # 4. 하이라이트 — 색상까지 같아야 한다
+    a, b = Counter(HL_OPEN_RE.findall(src)), Counter(HL_OPEN_RE.findall(out))
+    if a != b:
+        lost = sorted((a - b).elements())
+        extra = sorted((b - a).elements())
+        bits = []
+        if lost:
+            bits.append(f"사라진 색 {' '.join(lost)}")
+        if extra:
+            bits.append(f"생긴 색 {' '.join(extra)}")
+        problems.append("하이라이트 색상 불일치: " + " · ".join(bits))
+    elif src.count(HL_CLOSE) != out.count(HL_CLOSE):
+        problems.append(
+            f"하이라이트 닫기 개수: {src.count(HL_CLOSE)}개 → {out.count(HL_CLOSE)}개"
+        )
+    elif not _pairing_ok(HL_OPEN_RE.sub("⟦HL⟧", out), "⟦HL⟧", HL_CLOSE):
+        problems.append("하이라이트 마커 짝이 어긋남")
+
+    # 5. 하이퍼링크는 ID별로 열기·닫기가 하나씩
+    for m in set(H_OPEN_RE.findall(out)):
+        if out.count(f"⟦H{m}⟧") != out.count(f"⟦/H{m}⟧"):
+            problems.append(f"하이퍼링크 ⟦H{m}⟧ 열기/닫기 개수가 다름")
+
+    # 6. 정상 마커를 모두 지운 뒤에도 ⟦ ⟧ 가 남으면 손상된 마커다.
+    #    ⟦HL:yellowAI provider… / ⟦/b 같은 형태가 여기서 잡힌다.
+    residue = _KNOWN_MARKER_RE.sub("", out)
+    if "⟦" in residue or "⟧" in residue:
+        broken = re.findall(r"⟦[^⟦⟧]{0,30}|[^⟦⟧]{0,10}⟧", residue)
+        sample = " / ".join(x.strip() for x in broken[:3] if x.strip())
+        problems.append(f"손상된 마커가 남아 있음: {sample}")
+
+    return problems
 
 def repair_hl_markers(text: str) -> str:
     """
@@ -1335,10 +1631,17 @@ def normalize_ui_in_bold_segments(text: str) -> str:
     )
 
 
-def fix_indefinite_articles(text: str) -> str:
-    text = re.sub(r"\b([Aa])\s+([aeiouAEIOU])", r"\1n \2", text)
-    text = re.sub(r"\b[Aa]n\s+([bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ])", r"A \1", text)
-    return text
+# fix_indefinite_articles()는 제거했다.
+#
+# 철자만 보고 a/an을 바꾸는 규칙은 구조적으로 안전하지 않다. 관사는 뒤따르는
+# 단어의 **발음**을 따르는데 정규식은 철자밖에 못 본다.
+#     a user      -> an user      (틀림)
+#     a URL       -> an URL       (틀림, "유알엘"로 읽는다)
+#     a university-> an university(틀림)
+# 게다가 역방향 규칙은 치환문이 대문자 "A"로 고정돼 있어 문장 중간의
+#     an hour -> A hour
+# 처럼 관사와 대소문자를 동시에 망가뜨렸다.
+# 관사 교정은 정규식이 아니라 QA 프롬프트에서 다룬다.
 
 
 def capitalize_bullet_lines(text: str) -> str:
@@ -2033,47 +2336,43 @@ _QA_HEADER_RE = re.compile(r"\[(\d+)\]")
 
 # 메타 라벨 정규식들 — LLM이 무단으로 "Draft: X Revised: Y" 형태를 반환하는
 # 경우를 감지·복구하기 위함. Draft/Revised 뿐 아니라 흔한 대체 표현도 커버.
-_META_LABEL_EARLIER = (
-    r"Draft|Original|Before|Version\s*1|Ver\s*1|v1|Candidate\s*1|Option\s*A|Initial"
+# 이전 구현은 이 라벨들을 **문장 어디서든** 찾아 그 앞을 통째로 버렸다.
+# 그래서 본문을 조용히 잘라먹었다.
+#     "v2.1 update"          -> "1 update"     (v2. 가 라벨로 잡힘)
+#     "...decide the final." -> ""             (final. 이 라벨로 잡힘)
+# 라벨은 원래 "Draft: … Revised: …" 처럼 **줄 맨 앞에 콜론과 함께** 오는
+# 형태다. 그 형태만 보고, 본문 중간은 건드리지 않는다. 버전 표기(v1/v2)와
+# 마침표는 라벨 판정에서 뺀다 — 정상 텍스트와 구별되지 않기 때문.
+_META_LABEL_WORDS = (
+    r"Draft|Revised|Original|Before|After|Correction|Corrected|"
+    r"Improved|Final(?:\s*version)?|Candidate\s*[12]|Option\s*[AB]"
 )
-_META_LABEL_LATER = (
-    r"Revised|Final(?:\s*version)?|After|Corrected|Version\s*2|Ver\s*2|v2|"
-    r"Candidate\s*2|Option\s*B|Improved|Better|Updated"
+_META_PREFIX_RE = re.compile(
+    rf"^\s*(?:{_META_LABEL_WORDS})\s*:\s*", re.IGNORECASE
 )
-_META_LATER_RE = re.compile(rf"\b(?:{_META_LABEL_LATER})\s*[:.\-]", re.IGNORECASE)
-_META_EARLIER_LEADING_RE = re.compile(
-    rf"^\s*(?:{_META_LABEL_EARLIER})\s*[:.\-]\s*", re.IGNORECASE
-)
+# 응답 전체가 라벨 비교 형식인지 판정할 때만 쓴다 (자르지 않고 거부용).
 _META_LABEL_ANY_RE = re.compile(
-    rf"\b(?:{_META_LABEL_EARLIER}|{_META_LABEL_LATER})\s*[:.\-]",
-    re.IGNORECASE,
+    rf"(?:^|[\n\r])\s*(?:{_META_LABEL_WORDS})\s*:", re.IGNORECASE
 )
 
 
 def strip_meta_version_labels(text: str) -> str:
     """
-    Remove "Draft: X ... Revised: Y" style meta-version noise that occasionally
-    leaks into pass-1 or pass-2 output despite the prompt forbidding it.
+    맨 앞의 "Draft:" / "Revised:" 같은 메타 라벨 **하나만** 떼어낸다.
 
-    Strategy:
-    1. If a "later-version" label (Revised/Final/After/Improved/...) appears,
-       keep only the text AFTER that label — the LLM's own final choice.
-    2. If only an "earlier-version" label (Draft/Original/Before/...) appears
-       at the start, strip that label.
-    3. If neither, return the text unchanged.
-
-    This is a safety net; the prompt still asks the LLM not to emit these,
-    but we never trust the LLM to obey.
+    프롬프트가 금지해도 LLM이 가끔 버전 비교 형식으로 답하는 것에 대한
+    최소한의 안전망이다. 본문을 자르지 않는 것이 핵심 — 잘라내야 할 만큼
+    응답이 망가졌다면 그건 여기서 손볼 게 아니라 **응답 자체를 거부**해야
+    한다(has_meta_version_labels 참고).
     """
     if not text:
         return text
-    m = _META_LATER_RE.search(text)
-    if m:
-        text = text[m.end():].strip()
-    # After removing later-version prefix there may still be a leading "Draft:"
-    # on a residual line — or the text may only have had "Draft:" from the start.
-    text = _META_EARLIER_LEADING_RE.sub("", text).strip()
-    return text
+    return _META_PREFIX_RE.sub("", text, count=1).strip()
+
+
+def has_meta_version_labels(text: str) -> bool:
+    """응답이 "Draft: … Revised: …" 형식인가 — 거부·재시도 판정용."""
+    return bool(text) and bool(_META_LABEL_ANY_RE.search(text))
 # 메타 라벨 감지 — 이런 label이 들어있으면 LLM이 프롬프트를 무시하고 다양한
 # 버전 비교를 응답에 담은 경우. 안전을 위해 그 revision을 통째로 버림.
 _QA_META_LABEL_RE = re.compile(
@@ -2139,8 +2438,16 @@ def qa_check_batch(
     if not items:
         return {}
 
+    # 앞에서 80개를 자르던 것을 **이 배치에 실제로 등장하는 용어**만 고르는
+    # 방식으로 바꿨다. 글로서리가 수백 개일 때 앞 80개를 자르면 정작 지금
+    # 검사할 문단에 나오는 용어가 통째로 빠진다 — 일관성 검사인데 근거를
+    # 안 주는 셈이었다. 등장하는 것만 주면 개수가 줄고 정확도는 오른다.
+    _batch_src = " ".join(src for _, src, _ in items)
+    _relevant = [(ko, en) for ko, en in glossary_pairs if ko and ko in _batch_src]
+    if not _relevant:
+        _relevant = glossary_pairs[:40]        # 하나도 안 걸리면 최소한만
     glossary_block = (
-        "\n".join(f"- {ko} -> {en}" for ko, en in glossary_pairs[:80]) or "(none)"
+        "\n".join(f"- {ko} -> {en}" for ko, en in _relevant[:120]) or "(none)"
     )
     pairs_block = "\n\n".join(
         f"[{idx}]\nSOURCE: {src}\nTRANSLATION: {tr}" for idx, src, tr in items
@@ -2336,6 +2643,28 @@ def make_adapter(in_path: str):
     return DocxAdapter(in_path)
 
 
+def extract_korean_paragraphs(in_path: str) -> List[str]:
+    """
+    번역 대상이 되는 한국어 문단만 모아 돌려준다.
+
+    글로서리 후보를 뽑으려면 굵은 라벨뿐 아니라 **본문 전체**가 필요하다.
+    같은 용어가 문서 곳곳에서 몇 번 반복되는지가 곧 용어성의 근거이기
+    때문이다. 마커는 지우고 순수 텍스트만 남긴다 — 빈도만 세면 되므로.
+    """
+    ext = os.path.splitext(in_path)[1].lower()
+    out: List[str] = []
+    if ext in MARKDOWN_EXTENSIONS:
+        text, _, _, _ = markdown_format.read_text(in_path)
+        for u in markdown_format.parse_markdown(text):
+            if contains_korean(u.src):
+                out.append(u.src)
+    else:
+        doc = Document(in_path)
+        for p in iter_all_paragraphs(doc):
+            if contains_korean(p.text):
+                out.append(p.text)
+    return [strip_zero_width(ALL_MARKER_RE.sub(" ", t)).strip() for t in out]
+
 def extract_bold_terms(in_path: str) -> List[Tuple[str, str]]:
     """
     UI 텍스트 매핑 화면용 — 굵게 표시된 한국어 조각과 그 문맥.
@@ -2393,10 +2722,13 @@ def translate_document(
             en_s = (en or "").strip()
             if ko_s and en_s:
                 ui_overrides_clean[ko_s] = en_s
-        # 충돌 방지 — glossary에 같은 ko가 있으면 UI 매핑 우선하므로 glossary에서 제거
-        if ui_overrides_clean:
-            ui_ko_set = set(ui_overrides_clean.keys())
-            glossary_entries = [e for e in glossary_entries if e.ko not in ui_ko_set]
+        # 예전에는 UI 매핑과 같은 KO를 glossary_entries에서 **통째로 지웠다**.
+        # 그러면 굵게 표시되지 않은 본문에서는 그 용어의 강제가 사라져,
+        # 같은 "사용자 및 부서 관리"가 User and Group management /
+        # User and department management로 갈렸다.
+        # 지우지 않고 **순서**로 푼다 — UI 매핑을 먼저 적용하면 굵은 구간은
+        # 이미 자리표시자로 바뀌어 있어 글로서리가 건드릴 수 없고, 나머지
+        # 본문에는 글로서리가 그대로 걸린다.
 
     patterns = build_pattern_pairs_from_rows(pattern_rows)
     # QA prompt엔 UI 매핑도 참고용으로 함께 (일관성 유지 위해)
@@ -2451,11 +2783,10 @@ def translate_document(
     if enable_qa:
         seen_for_estimate = set()
         for u in units:
-            if u.src in seen_for_estimate:
+            key = (u.src, bool(u.is_heading))
+            if key in seen_for_estimate:
                 continue
-            seen_for_estimate.add(u.src)
-            if u.is_heading:
-                continue
+            seen_for_estimate.add(key)
             qa_estimated += 1
     total_work = total_paras + qa_estimated
 
@@ -2471,18 +2802,27 @@ def translate_document(
         if enable_cache and src in cache:
             translated = cache[src]
         else:
-            # 1) Glossary 치환 (본문 전체)
-            gl_pre, gl_map = preprocess_with_glossary_placeholders(src, glossary_entries)
-            # 2) UI 텍스트 매핑 치환 — 오직 non-heading에서만.
+            # 1) UI 텍스트 매핑을 **먼저** — 오직 굵은 구간, non-heading에서만.
             #    Heading은 무조건 sentence case로 정규화될 예정이므로 UI 매핑을
-            #    적용해봐야 결국 case가 바뀌어 의미가 없고, 오히려 어색해질 수 있다.
+            #    적용해봐야 결국 case가 바뀌어 어색해질 수 있다.
+            ui_map: Dict[str, GlossaryEntry] = {}
+            next_idx = 0
+            ui_pre = src
             if not is_heading:
-                ui_pre, ui_map, _ = preprocess_ui_overrides_in_bold(
-                    gl_pre, ui_overrides_clean, start_idx=len(gl_map)
+                ui_pre, ui_map, next_idx = preprocess_ui_overrides_in_bold(
+                    src, ui_overrides_clean, start_idx=0
                 )
-                gl_pre = ui_pre
-                if ui_map:
-                    gl_map = {**gl_map, **ui_map}
+            # 2) 남은 텍스트에 Glossary 치환 (본문 전체).
+            #    UI가 잡은 자리는 이미 ⟦G#⟧이므로 여기서 다시 걸리지 않는다.
+            gl_pre, gl_map = preprocess_with_glossary_placeholders(
+                ui_pre, glossary_entries, start_idx=next_idx
+            )
+            if ui_map:
+                gl_map = {**ui_map, **gl_map}
+
+            # 원문 영문 봉인 — 여기부터 복원 전까지 AI/API/v2.1/K-Assistant는
+            # ⟦X#⟧로 가려져 있어 모델도, 우리 후처리도 건드릴 수 없다.
+            gl_pre, lit_map = seal_literals(gl_pre)
 
             selected_pattern_examples = select_relevant_patterns(gl_pre, patterns)
 
@@ -2494,6 +2834,21 @@ def translate_document(
                 translation_mode=translation_mode,
                 style_reference=style_guide,
             )
+
+            # 마커가 망가진 채 후처리로 넘어가면 그 뒤로는 복구가 추측이
+            # 된다. 값이 싼 단계에서 한 번 더 물어보는 편이 낫다.
+            if check_marker_integrity(gl_pre, translated):
+                retry = translate_marked_paragraph(
+                    client=client,
+                    source_text=gl_pre,
+                    pattern_examples=selected_pattern_examples,
+                    model=model,
+                    translation_mode=translation_mode,
+                    style_reference=style_guide,
+                )
+                if retry.strip() and len(check_marker_integrity(gl_pre, retry)) \
+                        < len(check_marker_integrity(gl_pre, translated)):
+                    translated = retry
 
             # 0-a) 폭 없는 문자 제거 — **모든 후처리보다 먼저** 해야 한다.
             #      모델이 문장 끝에 U+FEFF를 붙여 보내면 restore_sentence_period가
@@ -2512,7 +2867,7 @@ def translate_document(
             translated = repair_hl_markers(translated)
 
             # 1-b) bold 경계 공백 제거
-            translated = normalize_bold_spaces(translated)
+            translated = normalize_marker_boundary_spaces(translated)
 
             # 1-c) HL 마커 누락 폴백
             translated = apply_highlight_fallback(translated, src)
@@ -2530,7 +2885,7 @@ def translate_document(
                 translated = enforce_line_breaks(translated, gl_pre)
                 translated = repair_bold_markers(translated)
                 translated = repair_hl_markers(translated)
-                translated = normalize_bold_spaces(translated)
+                translated = normalize_marker_boundary_spaces(translated)
                 translated = apply_highlight_fallback(translated, src)
                 translated = restore_glossary_placeholders(translated, gl_map or {})
                 translated = normalize_colon_label_line(translated)
@@ -2548,7 +2903,6 @@ def translate_document(
                 translated = _cap_first_alpha(translated)
 
             # 6) 마지막 품질 보정
-            translated = fix_indefinite_articles(translated)
             translated = capitalize_bullet_lines(translated)
             translated = restore_sentence_period(translated, src)
             translated = normalize_paragraph_breaks(translated, src)
@@ -2568,6 +2922,10 @@ def translate_document(
             #    대문자화하지는 않고(그건 사용자 몫), 등록된 것만 존중한다.
             translated = enforce_case_sensitive_glossary(translated, glossary_entries)
 
+            # 8) 봉인 해제. 반드시 대소문자 정규화가 **모두 끝난 뒤**여야 한다.
+            #    먼저 풀면 heading sentence-case가 "AI"를 "ai"로 내려버린다.
+            translated = restore_literals(translated, lit_map)
+
             if enable_cache:
                 cache[src] = translated
 
@@ -2583,19 +2941,24 @@ def translate_document(
     # ── Pass 2: batch QA (일관성 검사) ───────────────────────────────
     # src별 그룹핑으로 동일 원문은 한 번만 QA → 결과를 모든 사본에 적용.
     if enable_qa:
-        src_groups: Dict[str, List[Dict]] = defaultdict(list)
+        # 그룹키에 heading 여부를 넣는다. 예전엔 src만 썼는데, 같은 문장이
+        # 제목으로도 본문으로도 쓰이면 한 그룹이 되고 대표(group[0])가 제목이면
+        # **본문까지 통째로 QA에서 빠졌다**. 제목과 본문은 대소문자 규칙부터
+        # 다르므로 애초에 같은 리비전을 공유해서도 안 된다.
+        src_groups: Dict[Tuple[str, bool], List[Dict]] = defaultdict(list)
         for r in pass1_results:
-            src_groups[r["src"]].append(r)
+            src_groups[(r["src"], bool(r["unit"].is_heading))].append(r)
 
+        # 제목도 QA한다. 예전엔 건너뛰었는데, 그 탓에 "Reset an user password",
+        # "Save ai provider information" 같은 제목 오류가 그대로 남았다.
+        # 제목이야말로 눈에 가장 먼저 띄는 자리다.
         qa_items: List[Dict] = []
-        for src, group in src_groups.items():
-            rep = group[0]
-            if rep["unit"].is_heading:
-                continue
+        for (src, _is_heading), group in src_groups.items():
             qa_items.append({
                 "src": src,
-                "translated": rep["translated"],
+                "translated": group[0]["translated"],
                 "group": group,
+                "is_heading": _is_heading,
             })
 
         qa_done = 0
@@ -2628,7 +2991,7 @@ def translate_document(
                 # Pass 2 응답에도 동일한 marker 후처리를 적용
                 revised = repair_bold_markers(revised)
                 revised = repair_hl_markers(revised)
-                revised = normalize_bold_spaces(revised)
+                revised = normalize_marker_boundary_spaces(revised)
                 revised = apply_highlight_fallback(revised, item["src"])
                 # QA 응답에서도 line break/meta label 정리 (pass-1과 동일 수준으로)
                 revised = normalize_paragraph_breaks(revised, item["src"])
@@ -2639,8 +3002,18 @@ def translate_document(
                 # 만한 개선은 없다. Pass 1 결과를 그대로 유지한다.
                 if not line_breaks_match(revised, item["src"]):
                     continue
+                # 제목은 sentence case 규칙을 다시 씌운다 — QA가 본문 기준으로
+                # 고쳐 놓으면 제목만 표기 규칙이 어긋난다.
+                if item.get("is_heading"):
+                    revised = normalize_heading_text(revised)
+                    revised = normalize_ui_label_text(revised)
+                    revised = _cap_first_alpha(revised).rstrip()
+                    if revised.endswith("."):
+                        revised = revised[:-1]
                 # QA가 case-sensitive 용어를 흐트러뜨리는 경우도 복원
                 revised = enforce_case_sensitive_glossary(revised, glossary_entries)
+                # Pass 2는 봉인 바깥에서 돌므로 원문 영문 대소문자를 여기서 지킨다
+                revised = enforce_literal_casing(revised, item["src"])
                 for r in item["group"]:
                     r["translated"] = revised
                     if enable_cache:
@@ -2651,8 +3024,16 @@ def translate_document(
                 progress_callback(total_paras + qa_done, total_work)
 
     # ── Final: 모든 결과를 한 번에 쓰기 ───────────────────────────────
+    # 여기가 문서로 나가는 유일한 통로다. 마커 검사를 다른 데 두면 이후
+    # 후처리가 또 망가뜨릴 수 있으므로, 관문은 반드시 이 자리여야 한다.
+    marker_repaired = marker_failed = 0
     for r in pass1_results:
-        adapter.write(r["unit"], r["translated"])
+        text, problems = finalize_markers(r["unit"].src, r["translated"])
+        if problems:
+            marker_failed += 1
+        elif text != r["translated"]:
+            marker_repaired += 1
+        adapter.write(r["unit"], text)
 
     adapter.save(out_path)
 
@@ -2662,4 +3043,6 @@ def translate_document(
         "output_tokens": TOTAL_OUTPUT_TOKENS,
         "total_tokens": TOTAL_TOKENS,
         "paragraphs_translated": total_paras,
+        "marker_repaired": marker_repaired,
+        "marker_failed": marker_failed,
     }

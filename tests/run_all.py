@@ -21,6 +21,7 @@ SUITES = [
     ("docx 회귀(어댑터 리팩터링 안전망)", "regression_docx.py"),
     ("카탈로그 추출", "test_catalog.py"),
     ("앱 UI", "test_app_ui.py"),
+    ("산출물 검증(마커·저장 후 대조)", "test_output_check.py"),
 ]
 
 
