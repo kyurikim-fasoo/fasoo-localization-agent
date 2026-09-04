@@ -837,6 +837,56 @@ def _looks_like_doc_term(ko: str) -> bool:
     return True
 
 
+# 어절 끝에 붙는 조사. 긴 것부터 확인한다.
+#
+# 한국어는 조사가 어절에 붙어 있어서 공백 n-gram만으로는 용어를 못 찾는다.
+# "전사 관리자만 접근 가능하며"에서 어절은 [전사, 관리자만, 접근, …]이라
+# "전사 관리자"라는 n-gram이 아예 만들어지지 않는다. 실제로 이 용어가
+# 문서에 4번 나오는데 후보에 오르지 못했고, 대신 "전사 관리자만 접근"이라는
+# 조각이 올라왔다. 그래서 세기 전에 조사를 떼어 표제형으로 맞춘다.
+_JOSA_SUFFIXES = (
+    "에서는", "에게는", "으로는", "에서도", "에게도",
+    "에서", "에게", "으로", "부터", "까지", "처럼", "보다", "만큼",
+    "라도", "이나", "든지", "이란", "이든", "마다", "조차", "밖에",
+    "은", "는", "이", "가", "을", "를", "의", "에", "로", "와", "과",
+    "도", "만", "나", "랑", "께",
+)
+# 조사를 뗀 뒤 남는 몸통이 이보다 짧으면 떼지 않는다. "추가"에서 "가"를
+# 떼면 "추"가 되는 식의 사고를 막는다.
+_JOSA_MIN_STEM = 2
+
+
+def _strip_josa(word: str) -> str:
+    """
+    어절에서 조사를 떼어 표제형에 가깝게 만든다.
+
+    가장 긴 조사가 먼저 걸리면 거기서 판단을 끝낸다. 몸통이 짧다고 다음
+    후보로 넘어가면 안 된다 — "탭으로"는 "으로"가 걸리지만 몸통 "탭"이
+    한 글자라 떼지 않아야 하는데, 넘어가면 "로"가 걸려 "탭으"가 된다.
+    """
+    if not _KOREAN_RE.search(word):
+        return word                      # 영문·숫자 어절은 손대지 않는다
+    for suf in _JOSA_SUFFIXES:
+        if word.endswith(suf):
+            if len(word) - len(suf) >= _JOSA_MIN_STEM:
+                return word[: -len(suf)]
+            return word                  # 첫 매칭에서 판단을 끝낸다
+    return word
+
+
+# 붙는 말에 따라 영어 동사가 갈리는 동작 명사. 이들로 끝나는 용어는 한
+# 묶음으로 보여준다. "-기"로 끝나면(내보내기·불러오기·보기) 대개 동작 명사다.
+_ACTION_NOUNS = {
+    "확인", "수정", "삭제", "저장", "등록", "추가", "변경", "설정", "관리",
+    "적용", "사용", "검색", "복원", "동기화", "생성", "발급", "해제", "차단",
+    "입력", "선택", "이동", "종료", "실행", "연동", "전송", "수신", "공유",
+}
+
+
+def _is_action_noun(word: str) -> bool:
+    return word in _ACTION_NOUNS or (len(word) >= 3 and word.endswith("기"))
+
+
 def _ngrams(words: List[str], lo: int, hi: int):
     for n in range(lo, hi + 1):
         for i in range(len(words) - n + 1):
@@ -847,7 +897,7 @@ def suggest_terms_from_texts(
     texts: List[str],
     exclude: Optional[set] = None,
     min_freq: int = TERM_MIN_FREQ,
-    limit: int = 60,
+    limit: int = 150,
 ) -> pd.DataFrame:
     """
     문단 목록에서 반복되는 한국어 복합어를 글로서리 후보로 뽑는다.
@@ -859,7 +909,7 @@ def suggest_terms_from_texts(
     first_ctx: Dict[str, str] = {}
 
     for t in texts:
-        words = t.split()
+        words = [_strip_josa(w) for w in t.split()]
         seen_here = set()
         for g in _ngrams(words, TERM_MIN_WORDS, TERM_MAX_WORDS):
             g = g.strip(" .,()[]{}\u201c\u201d\u2018\u2019\"'")
@@ -875,7 +925,7 @@ def suggest_terms_from_texts(
             continue
         rows.append({"KO": g, "빈도": n})
     if not rows:
-        return pd.DataFrame(columns=["KO", "EN (입력)", "빈도", "맥락"])
+        return pd.DataFrame(columns=["KO", "EN (입력)", "빈도", "묶음", "맥락"])
 
     rows.sort(key=lambda r: (-r["빈도"], -len(r["KO"])))
 
@@ -890,10 +940,30 @@ def suggest_terms_from_texts(
 
     kept.sort(key=lambda r: (-r["빈도"], r["KO"]))
     kept = kept[:limit]
+
+    # 끝 어절이 같은 후보들을 묶는다 — 단, **동작 명사**일 때만.
+    #
+    # 한국어에는 붙는 말에 따라 영어 동사가 갈리는 낱말이 있다.
+    #   대화 내용 내보내기 → export messages
+    #   사용자 내보내기     → remove from Room
+    # 하나로 등재하면 절반이 틀린다. 이런 낱말로 끝나는 후보들을 나란히
+    # 보여줘, 영문을 각각 정해야 한다는 걸 눈으로 알게 한다.
+    #
+    # 반면 "정보 / 이름 / 목록 / 유형" 같은 일반 명사는 영어 머리말이
+    # 고정이라(information, name, list) 묶어봐야 신호가 아니라 소음이다.
+    # 그래서 동작 명사에만 표시한다.
+    _tail = Counter(r["KO"].split()[-1] for r in kept)
+    for r in kept:
+        t = r["KO"].split()[-1]
+        r["묶음"] = t if (_tail[t] > 1 and _is_action_noun(t)) else ""
+
+    # 묶인 것끼리 붙여 놓는다 — 표에서 나란히 보여야 비교가 된다
+    kept.sort(key=lambda r: (r["묶음"] == "", r["묶음"], -r["빈도"], r["KO"]))
     return pd.DataFrame([{
         "KO": r["KO"],
         "EN (입력)": "",
         "빈도": r["빈도"],
+        "묶음": r["묶음"],
         "맥락": _excerpt(first_ctx.get(r["KO"], ""), r["KO"]),
     } for r in kept])
 
@@ -902,7 +972,13 @@ def _excerpt(text: str, target: str, around: int = 28) -> str:
     """용어가 등장한 자리의 앞뒤 문맥. 「대상」으로 강조한다."""
     i = text.find(target)
     if i < 0:
-        return text[:70]
+        # 조사를 뗀 표제형이라 원문에 그대로 없을 수 있다 ("전사 관리자"는
+        # 문서에 "전사 관리자만"으로 있다). 첫 어절로 위치만 잡는다.
+        head = target.split()[0] if target.split() else target
+        i = text.find(head)
+        if i < 0:
+            return text[:70]
+        target = text[i:i + len(target) + 4].split("  ")[0]
     lo, hi = max(0, i - around), min(len(text), i + len(target) + around)
     return (("…" if lo else "") + text[lo:i] + "\u300c" + target + "\u300d"
             + text[i + len(target):hi] + ("…" if hi < len(text) else ""))

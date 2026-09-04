@@ -2340,21 +2340,31 @@ if st.session_state.step == 2:
         # 똑같이 **본문 어디서든** 치환된다. 그래서 표를 나눈다.
         _term_rows = st.session_state.get("term_candidate_rows") or []
         if _term_rows:
-            term_df = pd.DataFrame(_term_rows,
-                                   columns=["KO", "EN (입력)", "빈도", "맥락"])
+            term_df = pd.DataFrame(
+                _term_rows, columns=["KO", "EN (입력)", "빈도", "묶음", "맥락"])
+            _n_grouped = int((term_df["묶음"] != "").sum())
             st.markdown(f"##### 📖 반복 용어 — Glossary 후보 ({len(term_df)}개)")
             st.caption(
                 "이 문서에서 3회 이상 반복되는데 **글로서리에 아직 없는** 용어입니다. "
                 "영문을 정해두면 문서 전체에서 그 표기로 통일됩니다. "
                 "비워두면 LLM이 문단마다 알아서 번역합니다 — 표기가 갈릴 수 있습니다."
             )
+            if _n_grouped:
+                st.info(
+                    f"**묶음** 표시가 붙은 {_n_grouped}개는 끝말이 같은 용어끼리 "
+                    "모아둔 것입니다. 붙는 말에 따라 **영어가 달라지는** 낱말이라 "
+                    "각각 따로 정해야 합니다.\n\n"
+                    "예: `대화 내용 내보내기` → export · `사용자 내보내기` → remove · "
+                    "`삭제 확인` → confirm · `상태 확인` → check",
+                    icon="🔀",
+                )
             term_df = st.data_editor(
                 term_df,
                 use_container_width=True,
                 hide_index=True,
                 num_rows="fixed",
-                disabled=["KO", "빈도", "맥락"],
-                column_order=["빈도", "KO", "EN (입력)", "맥락"],
+                disabled=["KO", "빈도", "묶음", "맥락"],
+                column_order=["묶음", "빈도", "KO", "EN (입력)", "맥락"],
                 column_config={
                     "빈도": st.column_config.NumberColumn(
                         "빈도", disabled=True, width="small",
@@ -2365,6 +2375,11 @@ if st.session_state.step == 2:
                         "EN (입력)",
                         help="정해두면 본문 어디서든 이 표기로 통일됩니다.",
                         width="medium",
+                    ),
+                    "묶음": st.column_config.TextColumn(
+                        "묶음", disabled=True, width="small",
+                        help="끝말이 같은 용어끼리 모은 것. 붙는 말에 따라 영어가 "
+                             "달라지므로 각각 따로 정하세요.",
                     ),
                     "맥락": st.column_config.TextColumn(
                         "맥락 (앞뒤 문장)", width="large",
@@ -2478,7 +2493,16 @@ elif st.session_state.step == 3:
         result.get("output_tokens", 0),
     )
 
-    st.success("로컬라이즈가 완료되었습니다.")
+    _verify = result.get("verification") or []
+    _v_err = [v for v in _verify if v.get("level") == "오류"]
+    if _v_err:
+        st.warning(
+            f"로컬라이즈는 끝났지만 산출물 검증에서 오류 {len(_v_err)}건이 나왔습니다. "
+            "아래를 확인한 뒤 배포하세요.",
+            icon="⚠️",
+        )
+    else:
+        st.success("로컬라이즈가 완료되었습니다.")
     st.write("### 결과")
 
     col_a, col_b, col_c = st.columns(3)
@@ -2497,6 +2521,29 @@ elif st.session_state.step == 3:
             type="primary",
             use_container_width=True,
         )
+
+    # ── 산출물 검증 ──────────────────────────────────────────────────
+    # 번역 파이프라인은 문단 단위라, 링크·아이콘을 문서에 되꽂은 뒤 만들어지는
+    # 문장 오류를 스스로 볼 수 없다. 저장된 문서를 다시 읽어 검사한 결과다.
+    if _verify:
+        st.markdown(" ")
+        with st.container(border=True):
+            _n_warn = len(_verify) - len(_v_err)
+            st.markdown(
+                f"##### {'⚠️' if _v_err else '✅'} 산출물 검증"
+                + (f" — 오류 {len(_v_err)}건" if _v_err else " — 오류 없음")
+                + (f" · 경고 {_n_warn}건" if _n_warn else "")
+            )
+            for _v in _verify:
+                _icon = "✗" if _v["level"] == "오류" else "!"
+                st.markdown(f"**{_icon} {_v['title']}**")
+                if _v.get("detail"):
+                    st.caption(_v["detail"])
+            st.caption(
+                "원본과 번역본을 대조해 마커 노출·결측값·낱말 붙음·구조 요소·"
+                "용어 표기 갈림을 확인합니다. 터미널에서 다시 보려면: "
+                "`python output_check.py <원본> <번역본>`"
+            )
 
     # ── 메모 입력 (이번 번역에 대한 비고) ─────────────────────────────
     _log_id = st.session_state.get("last_log_id")

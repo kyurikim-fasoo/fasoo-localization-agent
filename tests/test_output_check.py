@@ -620,6 +620,91 @@ for _n in ("_nan_src", "_nan_out", "_asm", "_asm_src"):
     (TMP / f"{_n}.docx").unlink(missing_ok=True)
 
 
+# ══════════════════════════════════════════════════════════════════
+print("[18] 3차 리포트 — 링크 뒤 결합 방지 (문서 저장까지)")
+
+def _docx_with_link(path, link_text, tail):
+    from docx import Document as _D
+    from docx.oxml.ns import qn as _qn
+    from docx.oxml import OxmlElement as _OE
+    d = _D(); p = d.add_paragraph()
+    rid = d.part.relate_to("https://example.com",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True)
+    h = _OE("w:hyperlink"); h.set(_qn("r:id"), rid)
+    r = _OE("w:r"); t = _OE("w:t"); t.text = link_text; r.append(t); h.append(r)
+    p._p.append(h); p.add_run(tail)
+    d.save(path); return path
+
+
+_lk_in = _docx_with_link(str(TMP / "_lk3_in.docx"),
+                         "Fireside 관리자 웹사이트", "에 접속합니다.")
+_lk_out = TMP / "_lk3_out.docx"
+
+_orig_tp = te.translate_paragraph_with_patterns
+_orig_trk = te.translate_remaining_korean
+_orig_qa2 = te.qa_check_batch
+try:
+    # 모델이 마커를 제자리에 둔 채 문장을 이어 붙이는 최악의 경우
+    def _glue_stub(client=None, source_text="", pattern_examples=(),
+                   model="", translation_mode="", style_reference="",
+                   line_count=0, **kw):
+        return (source_text
+                .replace("Fireside 관리자 웹사이트", "Fireside admin website")
+                .replace("에 접속합니다.", "Access it."))
+
+    te.translate_paragraph_with_patterns = _glue_stub
+    te.translate_remaining_korean = lambda *a, **k: (a[1] if len(a) > 1 else "")
+    te.qa_check_batch = lambda *a, **k: {}
+    _m = te.translate_document(
+        in_path=_lk_in, out_path=str(_lk_out),
+        glossary_rows=[], pattern_rows=[], api_key="sk-stub",
+        enable_cache=False, enable_qa=False, translation_mode="매뉴얼",
+        ui_text_overrides={},
+    )
+finally:
+    te.translate_paragraph_with_patterns = _orig_tp
+    te.translate_remaining_korean = _orig_trk
+    te.qa_check_batch = _orig_qa2
+
+_txt = " ".join(oc.collect(str(_lk_out)).para_texts)
+check("링크 뒤 낱말이 붙지 않는다", "websiteAccess" not in _txt, _txt)
+check("공백이 들어간다", "website Access" in _txt, _txt)
+
+print("[19] 3차 리포트 — 저장 후 자체 검증이 결과에 실린다")
+check("verification 키 존재", "verification" in _m, str(_m.keys()))
+check("검증이 리스트를 돌려줌", isinstance(_m["verification"], list), str(_m["verification"]))
+check("정상 문서는 오류 없음",
+      not [v for v in _m["verification"] if v["level"] == "오류"],
+      str(_m["verification"]))
+
+_bad_glossary = [{"KO": "상태", "EN": "Status"}, {"KO": "사용 여부", "EN": "Status"}]
+_vf = te.verify_saved_output(_lk_in, str(_lk_out), _bad_glossary)
+check("같은 영문으로 매핑된 용어를 짚어준다",
+      any("하나로 매핑" in v["title"] for v in _vf), str(_vf))
+check("마크다운 경로는 대상 아님",
+      te.verify_saved_output("a.md", "b.md", []) == [])
+
+print("[20] 3차 리포트 — 문장 중간 용어는 구 전체를 소문자로")
+_lp = te._lower_phrase
+check("Agent Feedback -> agent feedback", _lp("Agent Feedback") == "agent feedback")
+check("약어는 유지", _lp("SQL Injection") == "SQL injection", _lp("SQL Injection"))
+check("혼합 표기는 유지", _lp("K-Assistant Chat") == "K-Assistant chat")
+check("이미 소문자면 그대로", _lp("access policy") == "access policy")
+
+_e = te.build_glossary_entries_from_rows([{"KO": "에이전트 피드백", "EN": "Agent Feedback"}])
+_pre, _map = te.preprocess_with_glossary_placeholders("이 화면에서 에이전트 피드백을 봅니다.", _e)
+_restored = te.restore_glossary_placeholders(_pre, _map)
+check("문장 중간 치환은 소문자", "agent feedback" in _restored, _restored)
+_pre2, _map2 = te.preprocess_with_glossary_placeholders("에이전트 피드백 화면입니다.", _e)
+check("문장 처음은 대문자",
+      te.restore_glossary_placeholders(_pre2, _map2).startswith("Agent feedback"),
+      te.restore_glossary_placeholders(_pre2, _map2))
+
+for _n in ("_lk3_in", "_lk3_out"):
+    (TMP / f"{_n}.docx").unlink(missing_ok=True)
+
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

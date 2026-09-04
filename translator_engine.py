@@ -482,6 +482,26 @@ def enforce_literal_casing(text: str, source_text: str) -> str:
     return text
 
 
+def _lower_phrase(en: str) -> str:
+    """
+    문장 중간에 놓일 용어를 소문자로. **첫 글자만이 아니라 구 전체**를 본다.
+
+    첫 글자만 내리면 "Agent Feedback"이 "agent Feedback"이 되어 어중간하다.
+    다만 약어(SQL, ID, AI)와 혼합 표기(K-Assistant, SaaS)는 그대로 둔다 —
+    이들은 문장 어디에 오든 표기가 고정이다.
+    """
+    if not en:
+        return en
+    words = []
+    for w in en.split(" "):
+        core = w.strip(".,;:()[]")
+        if core.isupper() or any(c.isupper() for c in core[1:]):
+            words.append(w)                       # 약어·혼합 표기는 유지
+        else:
+            words.append(w[:1].lower() + w[1:])
+    return " ".join(words)
+
+
 def restore_glossary_placeholders(
     text: str,
     mapping: Dict[str, GlossaryEntry],
@@ -524,7 +544,12 @@ def restore_glossary_placeholders(
 
             en = entry.en
             if en:
-                en = en[0].upper() + en[1:] if at_start else en[0].lower() + en[1:]
+                # 어느 위치든 구 전체를 먼저 소문자 관례로 맞춘 뒤, 문장
+                # 처음이면 첫 글자만 올린다. 그래야 같은 용어가 한 문서에서
+                # "Agent Feedback"과 "agent feedback"으로 갈리지 않는다.
+                en = _lower_phrase(en)
+                if at_start:
+                    en = en[0].upper() + en[1:]
 
             result += remaining[:idx] + en
             remaining = remaining[idx + len(ph):]
@@ -2501,6 +2526,16 @@ Revise a translation ONLY when it has a clear problem:
 - Missing article where English requires one (Korean has no articles, so the draft may omit them)
 - Misspelling, typo, or non-word — especially Korean phonetic transliteration
   e.g. "logram" → "program", any nonsense English output is wrong
+- WRONG SENSE of a polysemous Korean word. Several Korean words map to different
+  English verbs depending on what they act on. Check the object, not the word:
+    · 내보내기 — "export" for data/files/messages, but "remove"/"kick out" for a
+      person leaving a group ("Room에서 사용자 내보내기" = remove a user from a Room)
+    · 삭제 — "delete" for records, "remove" for a list entry
+    · 저장 — "save" for a document, "store" for data at rest
+    · 확인 — "check"/"view" for inspecting, "confirm"/"OK" for a dialog button
+  A translation that picked the wrong sense is a factual error, not a style
+  preference — revise it. e.g. Korean "내보낸 이력" (export history) rendered as
+  "History of Removing" is WRONG.
 - Missing or duplicated marker, or marker merged with a word
 - Glossary term not preserved (see glossary list below) — including the exact casing of case-sensitive terms
 
@@ -2724,6 +2759,56 @@ def extract_bold_terms(in_path: str) -> List[Tuple[str, str]]:
             seen.add(term)
             result.append((term, _make_context_excerpt(plain, term)))
     return result
+
+
+def verify_saved_output(in_path: str, out_path: str,
+                        glossary_rows: Optional[List[dict]] = None) -> List[dict]:
+    """
+    저장이 끝난 문서를 원본과 대조한다. 실패해도 번역을 막지는 않는다.
+
+    반환: [{"level": "오류"|"경고", "title": …, "detail": …}, …]
+
+    번역 파이프라인은 문단을 하나씩 다루므로, 링크·아이콘을 XML에 되꽂은
+    **뒤에** 생기는 문장 오류를 구조적으로 볼 수 없다. 그래서 결과물을
+    바깥에서 다시 읽는 층을 둔다. output_check는 읽기 전용이라 여기서
+    실패해도 산출물에는 영향이 없다.
+    """
+    if not (out_path.lower().endswith(".docx")
+            and in_path.lower().endswith(".docx")):
+        return []                     # 마크다운 경로는 대상이 아니다
+    try:
+        import output_check
+    except Exception:
+        return []
+
+    rows = glossary_rows or []
+    dnt = [_clean(r.get("KO")) for r in rows if _to_bool(r.get("DNT"))]
+    literals = [_clean(r.get("EN")) for r in rows
+                if _to_bool(r.get("DNT")) or _to_bool(r.get("Case-sensitive"))]
+    try:
+        findings, _, _ = output_check.verify(
+            in_path, out_path,
+            dnt=[d for d in dnt if d],
+            literals=[l for l in literals if l],
+        )
+        out = [{"level": f.level, "title": f.title, "detail": f.detail}
+               for f in findings]
+        # 서로 다른 국문이 같은 영문으로 등재돼 있으면 문서에 "Status, and
+        # Status"처럼 구분 불가능한 문장이 생긴다. 데이터 문제라 산출물만
+        # 봐서는 원인을 알 수 없으므로 여기서 함께 짚는다.
+        for en, kos in output_check.check_duplicate_targets(
+            [(_clean(r.get("KO")), _clean(r.get("EN"))) for r in rows]
+        ):
+            out.append({
+                "level": "경고",
+                "title": f"서로 다른 용어가 «{en}» 하나로 매핑돼 있습니다",
+                "detail": " · ".join(kos)
+                          + " — 문서에서 구분되지 않습니다. 글로서리를 나누세요.",
+            })
+        return out
+    except Exception as e:
+        return [{"level": "경고", "title": "저장 후 검증을 마치지 못했습니다",
+                 "detail": str(e)}]
 
 
 def translate_document(
@@ -3073,6 +3158,12 @@ def translate_document(
 
     adapter.save(out_path)
 
+    # ── 저장 후 자체 검증 ────────────────────────────────────────────
+    # 여기까지의 검사는 전부 **문단 단위**라, 링크와 아이콘을 Word에 다시
+    # 조립한 뒤 만들어지는 문장은 아무도 보지 않았다. "websiteAccess it."
+    # 같은 오류가 그 틈에서 나온다. 저장된 문서를 다시 읽어 문장을 본다.
+    verification = verify_saved_output(in_path, out_path, glossary_rows)
+
     return {
         "input_tokens": TOTAL_INPUT_TOKENS,
         "cached_tokens": TOTAL_CACHED_INPUT_TOKENS,
@@ -3081,4 +3172,5 @@ def translate_document(
         "paragraphs_translated": total_paras,
         "marker_repaired": marker_repaired,
         "marker_failed": marker_failed,
+        "verification": verification,
     }

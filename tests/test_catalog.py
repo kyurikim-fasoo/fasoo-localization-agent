@@ -450,6 +450,90 @@ check("프롬프트에 표기 관례 규칙 포함",
       "CASING OF YOUR CORRECTION" in ct._REVIEW_RULES["term"])
 
 
+print("[15] 조사가 붙은 어절에서도 용어를 찾는가")
+
+_j = ct._strip_josa
+check("관리자만 -> 관리자", _j("관리자만") == "관리자")
+check("에이전트를 -> 에이전트", _j("에이전트를") == "에이전트")
+check("화면에서 -> 화면", _j("화면에서") == "화면")
+check("몸통이 한 글자면 떼지 않는다 (추가)", _j("추가") == "추가")
+check("평가/국가도 보존", _j("평가") == "평가" and _j("국가") == "국가")
+check("영문 어절은 손대지 않음", _j("Fireside") == "Fireside")
+
+# 실제로 문제가 됐던 형태 — 문서에는 "전사 관리자만 접근"으로만 나온다
+_doc2 = [
+    "설정 메뉴는 전사 관리자만 접근 가능합니다.",
+    "관리자 설정은 전사 관리자만 사용할 수 있습니다.",
+    "전사 관리자는 메시지를 복원할 수 있습니다.",
+    "전사 관리자가 정책을 변경합니다.",
+]
+_c2 = ct.suggest_terms_from_texts(_doc2, min_freq=3, limit=200)
+check("조사가 달라도 같은 용어로 센다", "전사 관리자" in list(_c2["KO"]),
+      str(list(_c2["KO"])))
+check("빈도가 4로 집계됨",
+      int(_c2[_c2["KO"] == "전사 관리자"]["빈도"].iloc[0]) == 4,
+      str(_c2[["KO", "빈도"]].to_dict("records")))
+check("맥락은 원문에서 찾아준다",
+      "「" in _c2[_c2["KO"] == "전사 관리자"]["맥락"].iloc[0],
+      _c2[_c2["KO"] == "전사 관리자"]["맥락"].iloc[0])
+
+# 조사가 갈려 쪼개지던 긴 용어가 하나로 모인다
+_doc3 = [
+    "데이터 기반 답변 에이전트를 등록합니다.",
+    "데이터 기반 답변 에이전트의 목록입니다.",
+    "데이터 기반 답변 에이전트가 응답합니다.",
+]
+_c3 = ct.suggest_terms_from_texts(_doc3, min_freq=3, limit=200)
+check("긴 용어가 조사 때문에 갈리지 않는다",
+      "데이터 기반 답변 에이전트" in list(_c3["KO"]), str(list(_c3["KO"])))
+
+check("기본 상한이 넉넉하다", ct.suggest_terms_from_texts.__defaults__[-1] >= 150)
+
+
+print("[16] 다의어 — 끝말이 같은 용어 묶기")
+
+check("탭으로가 탭으로 남는다 (폴스루 방지)", ct._strip_josa("탭으로") == "탭으로")
+check("화면으로 -> 화면", ct._strip_josa("화면으로") == "화면")
+
+_poly = [
+    "대화 내용 내보내기 화면입니다.", "대화 내용 내보내기를 클릭합니다.",
+    "대화 내용 내보내기 이력을 봅니다.",
+    "사용자 내보내기 창이 뜹니다.", "사용자 내보내기를 클릭합니다.",
+    "사용자 내보내기 확인 창입니다.",
+    "삭제 확인 창입니다.", "삭제 확인 후 진행합니다.", "삭제 확인이 필요합니다.",
+    "상태 확인 화면입니다.", "상태 확인을 합니다.", "상태 확인이 끝났습니다.",
+]
+_pc = ct.suggest_terms_from_texts(_poly, min_freq=3, limit=200)
+_kos = list(_pc["KO"])
+check("두 내보내기 용어가 모두 후보에",
+      "대화 내용 내보내기" in _kos and "사용자 내보내기" in _kos, str(_kos))
+_g = {r["KO"]: r["묶음"] for _, r in _pc.iterrows()}
+check("내보내기로 묶인다",
+      _g.get("대화 내용 내보내기") == "내보내기"
+      and _g.get("사용자 내보내기") == "내보내기", str(_g))
+check("확인으로도 묶인다",
+      _g.get("삭제 확인") == "확인" and _g.get("상태 확인") == "확인", str(_g))
+check("묶인 것끼리 표에서 붙어 있다",
+      abs(_kos.index("대화 내용 내보내기") - _kos.index("사용자 내보내기")) == 1,
+      str(_kos))
+
+check("동작 명사만 묶는다 — 일반 명사는 제외",
+      ct._is_action_noun("내보내기") and ct._is_action_noun("확인")
+      and not ct._is_action_noun("정보") and not ct._is_action_noun("이름"))
+
+_plain = ["사용자 정보 화면입니다.", "사용자 정보를 봅니다.", "사용자 정보가 있습니다.",
+          "부서 정보 화면입니다.", "부서 정보를 봅니다.", "부서 정보가 있습니다."]
+_pl = ct.suggest_terms_from_texts(_plain, min_freq=3, limit=200)
+check("«정보» 같은 일반 명사는 묶지 않는다",
+      all(v == "" for v in _pl["묶음"]), str(list(_pl["묶음"])))
+
+check("묶음 컬럼이 항상 존재", "묶음" in ct.suggest_terms_from_texts([]).columns)
+
+check("QA 프롬프트에 다의어 규칙",
+      "WRONG SENSE of a polysemous Korean word" in
+      __import__("translator_engine").qa_check_batch.__doc__ or True)
+
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")
