@@ -424,6 +424,36 @@ check("확정 버튼에 합계", any("2건 등재" in b.label for b in at.button
       str([b.label for b in at.button]))
 
 
+print("[16] 검수 — 등재 안 함")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 추출"
+at.session_state["catalog_result"] = _res
+at.session_state["catalog_parsed"] = [_FakeParsed()]
+at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+at.session_state["catalog_sig"] = "seeded"
+at.session_state["catalog_review"] = {
+    "term": {
+        "rows": [{"KO": "취약점 점검", "EN": "Vulnerability Check", "문맥(key)": "rule"},
+                 {"KO": "무한 재귀 호출", "EN": "Infinite recursive call", "문맥(key)": "rule"}],
+        "sugg": {0: {"suggest": "vulnerability check", "reason": "일반 명사는 소문자"}},
+    },
+}
+at.run()
+check("등재 안 함 선택지 제공",
+      any("등재 안 함" in o for o in at.radio[0].options), str(at.radio[0].options))
+_before = [b.label for b in at.button if "확정하고" in b.label]
+check("기본은 2건 등재", any("2건 등재" in b for b in _before), str(_before))
+
+_skip = [o for o in at.radio[0].options if "등재 안 함" in o][0]
+at2 = at.radio[0].set_value(_skip).run()
+_after = [b.label for b in at2.button if "확정하고" in b.label]
+check("제외하면 건수가 줄어든다", any("1건 등재" in b for b in _after), str(_after))
+check("제외 건수 표시", any("제외 1건" in b for b in _after), str(_after))
+check("안내 문구", any("등재하지 않습니다" in str(c.value) for c in at2.caption),
+      str([str(c.value)[:30] for c in at2.caption]))
+
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

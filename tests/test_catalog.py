@@ -410,6 +410,46 @@ check("같은 빈도면 더 긴 쪽만 남는다",
       list(_sub["KO"]) == ["멤버 내보내기 기능"], str(list(_sub["KO"])))
 
 
+print("[14] 검수 제안의 대소문자 관례")
+
+_k = ct._keep_original_case
+check("오타를 고쳐도 소문자 관례 유지",
+      _k("access policy", "Access Policy", "오타 수정") == "access policy",
+      _k("access policy", "Access Policy", "오타 수정"))
+check("의미 누락을 채워도 소문자",
+      _k("data agent", "Data-driven Answer Agent", "의미 누락")
+      == "data-driven answer agent",
+      _k("data agent", "Data-driven Answer Agent", "의미 누락"))
+check("철자 교정도 소문자", _k("managmer", "Manager", "철자 오류") == "manager")
+check("약어는 대문자 유지",
+      _k("sql injection", "SQL Injection", "약어는 대문자") == "SQL Injection")
+check("제품명은 대문자 유지",
+      _k("wrapsody drive", "Wrapsody Drive", "제품명") == "Wrapsody Drive")
+check("사유가 대소문자면 제안을 존중",
+      _k("room", "Room", "고유 명사") == "Room")
+check("문장 중간 약어는 살린다",
+      _k("user id", "User ID", "의미 누락") == "user ID",
+      _k("user id", "User ID", "의미 누락"))
+check("혼합 표기는 건드리지 않는다",
+      _k("k assistant", "K-Assistant Chat", "의미 누락") == "K-Assistant chat",
+      _k("k assistant", "K-Assistant Chat", "의미 누락"))
+check("원본이 대문자로 시작하면 그대로",
+      _k("Access Policy", "Access policy", "오타") == "Access policy")
+check("소문자 제안은 손대지 않음",
+      _k("Access Policy", "access policy", "일반 명사는 소문자") == "access policy")
+
+_cli3 = _FakeClient("[0] Data-driven Answer Agent|의미 누락")
+_rev3 = ct.review_entries(_cli3, [("데이터 기반 답변 에이전트", "data agent")])
+check("review_entries가 보정을 적용",
+      _rev3[0]["suggest"] == "data-driven answer agent", str(_rev3))
+check("패턴에는 적용하지 않음 (문장이므로 대문자 시작이 정상)",
+      ct.review_entries(_FakeClient("[0] Click Save.|대문자"),
+                        [("저장을 클릭합니다.", "click save.")],
+                        kind="pattern")[0]["suggest"] == "Click Save.")
+check("프롬프트에 표기 관례 규칙 포함",
+      "CASING OF YOUR CORRECTION" in ct._REVIEW_RULES["term"])
+
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

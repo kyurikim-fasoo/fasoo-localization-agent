@@ -36,6 +36,10 @@ from services.jobs import get_job, start_job
 from services.users import add_user, list_users
 from translator_engine import (MARKDOWN_EXTENSIONS, extract_bold_terms,
                                extract_korean_paragraphs)
+from translator_engine import _clean as _cell
+# _cell(): DataFrame 셀을 안전하게 문자열로. 빈 셀이 pandas NaN으로
+# 돌아오는데 NaN은 참(truthy)이라 `v or ""`를 통과하고 str(NaN)이
+# "nan"이 된다. 그 "nan"이 치환어로 등록돼 본문에 찍힌 적이 있다.
 
 
 load_dotenv()
@@ -611,7 +615,7 @@ def _has_unsaved_changes() -> bool:
     # Localize Step 2: UI 텍스트 매핑에 EN 입력이 있으면 unsaved
     if mode == "Localize" and st.session_state.get("step") == 2:
         rows = st.session_state.get("ui_text_mapping_rows", [])
-        if any(str(r.get("EN (입력)") or "").strip() for r in rows):
+        if any(_cell(r.get("EN (입력)")) for r in rows):
             return True
     # Glossary 관리: staged_master 또는 표 편집 dirty 플래그
     if mode == "Glossary 관리":
@@ -1542,9 +1546,16 @@ if st.session_state.app_mode == "Glossary 추출":
                 st.rerun()
 
             _CUSTOM = "✏️ 직접 입력"
+            _SKIP = "🚫 등재 안 함"
 
             def _review_one(kind, i, r, s):
-                """제안이 있는 항목 하나 — 제안 / 원본 / 직접 입력 중 고르기."""
+                """
+                제안이 있는 항목 하나 — 제안 / 원본 / 직접 입력 / 등재 안 함.
+
+                제외를 고르면 None을 돌려준다. 검수하다 보면 "이건 아예 용어가
+                아니네" 싶은 것이 나오는데, 그때 표로 되돌아가 체크를 풀고 다시
+                검수를 돌리는 건 낭비다.
+                """
                 with st.container(border=True):
                     st.markdown(f"**{r['KO']}**")
                     _opts = [s["suggest"], r["EN"]]
@@ -1553,11 +1564,14 @@ if st.session_state.app_mode == "Glossary 추출":
                         _opts, _caps = _opts[:1], _caps[:1]
                     pick = st.radio(
                         r["KO"],
-                        options=_opts + [_CUSTOM],
-                        captions=_caps + ["내가 고쳐 쓰기"],
+                        options=_opts + [_CUSTOM, _SKIP],
+                        captions=_caps + ["내가 고쳐 쓰기", "이 항목 빼기"],
                         index=0, horizontal=True, label_visibility="collapsed",
                         key=f"catalog_rev_{kind}_{i}",
                     )
+                    if pick == _SKIP:
+                        st.caption("이 항목은 등재하지 않습니다.")
+                        return None
                     if pick == _CUSTOM:
                         # 원본을 채워두고 거기서 고치게 한다 — 빈 칸에서
                         # 다시 타이핑하는 것보다 훨씬 빠르다.
@@ -1596,7 +1610,7 @@ if st.session_state.app_mode == "Glossary 추출":
                 else:
                     st.caption("수정할 항목이 없습니다. 그대로 등재하시면 됩니다.")
 
-                finals, changed = {}, 0
+                finals, changed, skipped = {}, 0, 0
                 for kind in ("term", "pattern"):
                     blk = rv.get(kind)
                     if not blk:
@@ -1614,6 +1628,9 @@ if st.session_state.app_mode == "Glossary 추출":
                             out.append(r)
                             continue
                         picked = _review_one(kind, i, r, s)
+                        if picked is None:      # 등재 안 함
+                            skipped += 1
+                            continue
                         changed += int(picked["EN"] != r["EN"])
                         out.append(picked)
                     finals[kind] = out
@@ -1623,11 +1640,16 @@ if st.session_state.app_mode == "Glossary 추출":
                              use_container_width=True):
                     st.session_state.pop("catalog_review", None)
                     st.rerun()
+                _final_n = sum(len(v) for v in finals.values())
+                if skipped:
+                    st.caption(f"🚫 {skipped}건은 등재하지 않습니다.")
                 if b2.button(
-                    f"확정하고 {_total}건 등재"
-                    + (f" (수정 {changed}건 반영)" if changed else ""),
+                    f"확정하고 {_final_n}건 등재"
+                    + (f" (수정 {changed}건 반영)" if changed else "")
+                    + (f" · 제외 {skipped}건" if skipped else ""),
                     type="primary", key="catalog_rev_ok",
                     use_container_width=True,
+                    disabled=_final_n == 0,
                 ):
                     try:
                         _msg = []
@@ -2385,8 +2407,8 @@ if st.session_state.step == 2:
             _term_pairs: Dict[str, str] = {}
             if _term_rows:
                 for _, _tr in term_df.iterrows():
-                    _tko = str(_tr.get("KO", "") or "").strip()
-                    _ten = str(_tr.get("EN (입력)", "") or "").strip()
+                    _tko = _cell(_tr.get("KO"))
+                    _ten = _cell(_tr.get("EN (입력)"))
                     if _tko and _ten:
                         _term_pairs[_tko] = _ten
             if _term_pairs:
@@ -2403,8 +2425,8 @@ if st.session_state.step == 2:
             _ui_overrides_pending = {}
             if ui_mapping_df is not None and not ui_mapping_df.empty:
                 for _, row in ui_mapping_df.iterrows():
-                    ko = str(row.get("KO (Bold)", "") or "").strip()
-                    en = str(row.get("EN (입력)", "") or "").strip()
+                    ko = _cell(row.get("KO (Bold)"))
+                    en = _cell(row.get("EN (입력)"))
                     if ko and en:
                         _ui_overrides_pending[ko] = en
 

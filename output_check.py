@@ -35,6 +35,24 @@ _VERSION_RE = re.compile(r"\bv\d+(?:\.\d+)+\b", re.IGNORECASE)
 # 마커 잔재 — 정상 산출물에는 이 문자들이 있을 수 없다.
 _MARKER_CHARS = ("⟦", "⟧")
 
+# 결측값이 문자열로 새어 나온 것. 글로서리/UI 매핑의 빈 셀이 pandas NaN으로
+# 넘어와 str(NaN)="nan"이 치환어로 등록되면 본문에 그대로 찍힌다.
+# 사람이 읽으면 즉시 이상하지만 마커 검사로는 절대 안 걸린다.
+_NULLISH_RE = re.compile(r"(?<![A-Za-z0-9])(nan|none|null|undefined|NaT)"
+                         r"(?![A-Za-z0-9])")
+# 마커를 걷어낸 자리에서 낱말이 붙어버린 흔적.
+#   websiteGo / syncClick / optionsto / toEdit
+# 소문자 뒤에 대문자가 오는 자리는 영어에서 거의 항상 오타다. camelCase 식별자
+# (appKey, serverId)와 겹치므로 흔한 것은 예외로 둔다.
+# 대문자 뒤 소문자는 1자만 있어도 잡아야 한다 — "websiteGo"가 그 형태다.
+# 소문자끼리 붙은 "optionsto"는 대소문자 신호가 없어 이 방법으로 못 잡는다.
+# 그쪽은 normalize_marker_boundary_spaces()가 애초에 만들지 않도록 막는다.
+_GLUED_RE = re.compile(r"[a-z]{2,}[A-Z][a-z]+")
+_GLUE_ALLOW = {
+    "appKey", "serverId", "userId", "roomId", "javaScript", "iPhone",
+    "macOS", "iOS", "openAI", "chatBot", "wrapSody",
+}
+
 # 본문에 남아도 되는 한국어 — 회사명·제품명 등. 필요하면 --dnt로 추가한다.
 DEFAULT_DNT: Tuple[str, ...] = ()
 
@@ -354,6 +372,33 @@ def verify(src_path: str, out_path: str,
             f"원본 {_sc:,}자 → 번역본 {_oc:,}자 · 내용 누락일 수 있습니다",
         ))
 
+    # 10. 결측값이 본문에 찍혔는가 — 무조건 차단해야 하는 부류
+    _nullish = []
+    for t in out.para_texts:
+        for m in _NULLISH_RE.finditer(t):
+            _nullish.append((m.group(0), t.strip()[:60]))
+    if _nullish:
+        f.append(Finding(
+            "오류", f"결측값이 본문에 찍혔습니다 ({len(_nullish)}곳)",
+            " / ".join(f"«{w}» {ctx}" for w, ctx in _nullish[:3])
+            + "  ※ 글로서리·UI 매핑의 빈 셀이 문자열로 새어 나온 것입니다",
+        ))
+
+    # 11. 마커 자리에서 낱말이 붙었는가
+    _glued = []
+    for t in out.para_texts:
+        for m in _GLUED_RE.finditer(t):
+            w = m.group(0)
+            if w in _GLUE_ALLOW or w.lower() in {a.lower() for a in _GLUE_ALLOW}:
+                continue
+            _glued.append((w, t.strip()[:60]))
+    if _glued:
+        f.append(Finding(
+            "오류", f"낱말이 붙어 있습니다 ({len(_glued)}곳)",
+            " / ".join(f"«{w}»" for w, _ in _glued[:6])
+            + "  ※ 마커 경계에서 공백이 빠진 자리입니다",
+        ))
+
     # 9. 용어별 영문 표기가 갈렸는가 (문단 1:1 정렬이 성립할 때만)
     for term, cov, rivals in check_term_consistency(src, out):
         f.append(Finding(
@@ -363,6 +408,26 @@ def verify(src_path: str, out_path: str,
         ))
 
     return f, src, out
+
+
+def check_duplicate_targets(pairs: Sequence[Tuple[str, str]]
+                            ) -> List[Tuple[str, List[str]]]:
+    """
+    서로 다른 원문이 같은 영문으로 매핑됐는가.
+
+    "상태"와 "사용 여부"가 둘 다 Status로 등록되면 한 목록 안에
+    "Status, and Status"가 나온다. 사람이 목록을 읽어도 구분할 수 없으니
+    데이터 단계에서 막아야 한다.
+    """
+    by_en: Dict[str, List[str]] = {}
+    for ko, en in pairs:
+        ko, en = (ko or "").strip(), (en or "").strip()
+        if not ko or not en:
+            continue
+        by_en.setdefault(en.lower(), [])
+        if ko not in by_en[en.lower()]:
+            by_en[en.lower()].append(ko)
+    return [(en, kos) for en, kos in sorted(by_en.items()) if len(kos) > 1]
 
 
 def format_report(findings: List[Finding], src: DocStats, out: DocStats) -> str:

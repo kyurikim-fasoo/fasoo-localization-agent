@@ -1036,6 +1036,15 @@ Flag an entry ONLY when the English has a real problem:
 - Singular/plural or article error
 - Obvious mistranslation of the Korean
 
+CASING OF YOUR CORRECTION — this applies NO MATTER WHY you are changing the
+entry. Even when you are fixing a mistranslation or a missing word, the
+corrected English must follow the glossary convention:
+- ordinary nouns and noun phrases start LOWER CASE ("access policy", not
+  "Access Policy") because the term is substituted into the middle of a sentence
+- keep the capital ONLY for product names, feature names, screen labels and
+  acronyms ("Wrapsody Drive", "SQL Injection", "AI Assistant")
+Never capitalise the first letter just because it starts your answer.
+
 Do NOT flag an entry merely because you would have phrased it differently.""",
     "pattern": """These are translation examples: a Korean sentence and its English.
 
@@ -1047,6 +1056,48 @@ Flag an entry ONLY when the English has a real problem:
 
 Do NOT flag an entry merely because you would have phrased it differently.""",
 }
+
+
+# 사유가 대소문자·고유명사에 관한 것인지 판별한다. 이런 사유가 달렸다면
+# 대문자로 올리는 것이 의도이므로 아래 보정을 건너뛴다.
+_CASING_REASON_RE = re.compile(
+    r"대문자|소문자|고유\s*명사|제품\s*명|기능\s*명|약어|화면\s*명|라벨"
+    r"|capital|title\s*case|acronym|proper\s*noun",
+    re.IGNORECASE,
+)
+
+
+def _keep_original_case(original: str, suggest: str, reason: str) -> str:
+    """
+    원본이 소문자로 시작했으면 제안도 소문자로 시작하게 맞춘다.
+
+    글로서리 용어는 문장 중간에 치환되므로 일반 명사는 소문자로 시작해야
+    한다. 그런데 LLM은 오역이나 누락을 고칠 때도 답변을 문장처럼 써서 첫
+    글자를 대문자로 올린다 — 고치려던 것과 무관한 변경이 딸려 온다.
+    사유가 실제로 대소문자·고유명사에 관한 것일 때만 그 변경을 존중한다.
+    """
+    if not original or not suggest:
+        return suggest
+    if not original[0].islower() or not suggest[0].isupper():
+        return suggest
+    if _CASING_REASON_RE.search(reason or ""):
+        return suggest
+    # 제안이 통째로 대문자거나(약어) 두 번째 글자도 대문자면 손대지 않는다
+    if suggest.isupper() or (len(suggest) > 1 and suggest[1].isupper()):
+        return suggest
+    # 원본이 전부 소문자였다면 제안도 전부 소문자여야 한다. 첫 글자만
+    # 내리면 "access policy" -> "access Policy" 처럼 어중간해진다.
+    # 다만 약어(SQL)와 혼합 표기(K-Assistant, SaaS)는 건드리지 않는다.
+    if not any(c.isupper() for c in original):
+        words = []
+        for w in suggest.split(" "):
+            core = w.strip(".,;:()[]")
+            if core.isupper() or any(c.isupper() for c in core[1:]):
+                words.append(w)           # 약어·혼합 표기는 그대로
+            else:
+                words.append(w[:1].lower() + w[1:] if w else w)
+        return " ".join(words)
+    return suggest[0].lower() + suggest[1:]
 
 
 def review_entries(client, items: List[Tuple[str, str]], kind: str = "term",
@@ -1093,9 +1144,12 @@ Entries:
             suggest = suggest.strip()
             if i >= len(batch) or not suggest:
                 continue
+            reason = reason.strip()
+            if kind == "term":
+                suggest = _keep_original_case(batch[i][1], suggest, reason)
             if suggest == batch[i][1]:
                 continue          # 제안이 원본과 같으면 무시
-            out[start + i] = {"suggest": suggest, "reason": reason.strip()}
+            out[start + i] = {"suggest": suggest, "reason": reason}
     return out
 
 

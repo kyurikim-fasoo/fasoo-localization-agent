@@ -551,6 +551,75 @@ for _n in ("_ord_in", "_ord_out"):
     (TMP / f"{_n}.docx").unlink(missing_ok=True)
 
 
+# ══════════════════════════════════════════════════════════════════
+print("[14] 2차 리포트 — 마커 경계에 공백을 '넣는다'")
+
+_ns2 = te.normalize_marker_boundary_spaces
+for _name, _in, _want in [
+    ("websiteGo", "⟦H0⟧Fireside admin website⟦/H0⟧Go to the website.",
+     "⟦H0⟧Fireside admin website⟦/H0⟧ Go to the website."),
+    ("syncClick", "schema you want to sync⟦D3⟧Click it.",
+     "schema you want to sync ⟦D3⟧ Click it."),
+    ("optionsto", "More options⟦D0⟧to the right",
+     "More options ⟦D0⟧ to the right"),
+    ("toEdit", "table name to⟦B⟧Edit the column⟦/B⟧",
+     "table name to ⟦B⟧Edit the column⟦/B⟧"),
+    ("a.csv", "using a⟦X0⟧ file", "using a ⟦X0⟧ file"),
+]:
+    check(f"{_name} 방지", _ns2(_in) == _want, f"{_ns2(_in)!r}")
+check("구두점 앞에는 안 넣는다", _ns2("⟦B⟧Save⟦/B⟧.") == "⟦B⟧Save⟦/B⟧.", _ns2("⟦B⟧Save⟦/B⟧."))
+check("이미 공백 있으면 겹치지 않는다",
+      _ns2("⟦B⟧Save⟦/B⟧ and close") == "⟦B⟧Save⟦/B⟧ and close",
+      _ns2("⟦B⟧Save⟦/B⟧ and close"))
+
+print("[15] 2차 리포트 — nan 차단")
+check("pandas NaN", te._clean(float("nan")) == "")
+check("문자열 nan", te._clean("nan") == "" and te._clean("NaN") == "")
+check("none/null", te._clean("None") == "" and te._clean("null") == "")
+check("정상 값은 유지", te._clean("Save") == "Save")
+
+_nan_src = _docx([("상태를 확인합니다.", None, None)], str(TMP / "_nan_src.docx"))
+_nan_out = TMP / "_nan_out.docx"
+import stub_llm as _stub3
+_stub3.install()
+te.translate_document(
+    in_path=_nan_src, out_path=str(_nan_out),
+    glossary_rows=[], pattern_rows=[], api_key="sk-stub",
+    enable_cache=False, enable_qa=False, translation_mode="매뉴얼",
+    ui_text_overrides={"상태": float("nan"), float("nan"): "Status"},
+)
+check("NaN이 든 UI 매핑이 본문을 오염시키지 않음",
+      "nan" not in " ".join(oc.collect(str(_nan_out)).para_texts).lower(),
+      str(oc.collect(str(_nan_out)).para_texts))
+
+print("[16] 2차 리포트 — 조립된 문장 검사")
+_asm = _docx([
+    ("nan can remove all messages.", None, None),
+    ("Fireside admin websiteGo to the website.", None, None),
+    ("Enter the appKey and serverId.", None, None),
+], str(TMP / "_asm.docx"))
+_asm_src = _docx([
+    ("전사 관리자는 메시지를 삭제할 수 있습니다.", None, None),
+    ("Fireside 관리자 웹사이트에 접속합니다.", None, None),
+    ("appKey와 serverId를 입력합니다.", None, None),
+], str(TMP / "_asm_src.docx"))
+_f5, _, _ = oc.verify(_asm_src, _asm)
+check("nan 노출 감지", has(_f5, "결측값이 본문에"), str(_f5))
+check("결합 문자열 감지", has(_f5, "낱말이 붙어"), str(_f5))
+check("camelCase 식별자는 오탐 아님", "appKey" not in str(_f5), str(_f5))
+
+print("[17] 2차 리포트 — 같은 영문으로 매핑된 서로 다른 원문")
+_dups = oc.check_duplicate_targets(
+    [("상태", "Status"), ("사용 여부", "Status"), ("설명", "Description")])
+check("중복 매핑 검출", len(_dups) == 1 and set(_dups[0][1]) == {"상태", "사용 여부"},
+      str(_dups))
+check("고유 매핑은 통과", oc.check_duplicate_targets([("상태", "Status")]) == [])
+check("빈 값은 무시", oc.check_duplicate_targets([("", "X"), ("가", "")]) == [])
+
+for _n in ("_nan_src", "_nan_out", "_asm", "_asm_src"):
+    (TMP / f"{_n}.docx").unlink(missing_ok=True)
+
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

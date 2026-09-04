@@ -186,11 +186,21 @@ def _to_bool(v: Any) -> bool:
     return s in {"true", "y", "yes", "1"}
 
 
+# 유효한 값처럼 보이지만 실은 결측값이 문자열로 새어 나온 것들.
+# pandas의 NaN은 **참(truthy)** 이라 `v or ""` 를 그냥 통과한다.
+_NULLISH = {"nan", "none", "null", "<na>", "nat"}
+
+
 def _clean(v: Any) -> str:
     if v is None:
         return ""
+    try:
+        if v != v:                      # NaN은 자기 자신과 같지 않다
+            return ""
+    except Exception:
+        pass
     s = str(v).strip()
-    if s.lower() == "nan":
+    if s.lower() in _NULLISH:
         return ""
     return s
 
@@ -1309,6 +1319,19 @@ _SPAN_CLOSE_RE = re.compile(r"[ \t]+(⟦/B⟧|⟦/I⟧|⟦/HL⟧|⟦/H\d+⟧)")
 _LINE_HEAD_RE = re.compile(r"(^|⟦LB⟧|⟦TB⟧)[ \t]+")
 _LINE_TAIL_RE = re.compile(r"[ \t]+($|⟦LB⟧|⟦TB⟧)")
 
+# 경계에 **없는** 공백을 새로 넣어야 하는 자리.
+#
+# 공백을 옮기는 것만으로는 부족하다. 원문이 한국어면 조사가 마커에 딱 붙어
+# 있어(⟦/H0⟧에 접속합니다) 옮길 공백 자체가 없다. 번역되면 그 자리가
+# 영단어끼리 맞붙어 "websiteGo", "syncClick", "optionsto", "toEdit",
+# "a.csv"가 된다. 영문에서 낱말이 붙어 있으면 그건 오타지 서식이 아니다.
+_GLUE_AFTER_RE = re.compile(
+    r"(⟦/B⟧|⟦/I⟧|⟦/HL⟧|⟦/H\d+⟧|⟦D\d+⟧|⟦C\d+⟧|⟦G\d+⟧|⟦X\d+⟧)(?=[A-Za-z0-9])"
+)
+_GLUE_BEFORE_RE = re.compile(
+    r"(?<=[A-Za-z0-9])(⟦B⟧|⟦I⟧|⟦HL:[a-zA-Z]+⟧|⟦H\d+⟧|⟦D\d+⟧|⟦C\d+⟧|⟦G\d+⟧|⟦X\d+⟧)"
+)
+
 
 def normalize_marker_boundary_spaces(text: str) -> str:
     """
@@ -1329,6 +1352,9 @@ def normalize_marker_boundary_spaces(text: str) -> str:
     text = _SPAN_CLOSE_RE.sub(lambda m: m.group(1) + " ", text)
     # 구두점 앞으로 밀려난 공백은 되돌린다 ("Rule ." -> "Rule.")
     text = re.sub(r"[ \t]+([.,;:!?)\]}…])", r"\1", text)
+    # 붙어버린 낱말 사이에는 공백을 새로 넣는다
+    text = _GLUE_AFTER_RE.sub(r"\1 ", text)
+    text = _GLUE_BEFORE_RE.sub(r" \1", text)
     # 줄 머리/꼬리로 밀려난 공백은 버린다
     text = _LINE_HEAD_RE.sub(r"\1", text)
     text = _LINE_TAIL_RE.sub(r"\1", text)
@@ -2085,6 +2111,14 @@ Rules:
 - ⟦I⟧…⟦/I⟧ = italic span — translate the text inside, keep the pair around it.
 - ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
 - ⟦H#⟧…⟦/H#⟧ = hyperlink span — translate the text inside, keep the markers around it.
+- IMPORTANT — you MAY MOVE ⟦H#⟧…⟦/H#⟧ and ⟦D#⟧ to wherever English word order
+  needs them. Korean puts the link first ("⟦H0⟧the admin site⟦/H0⟧에 접속합니다")
+  but English needs it last ("Go to ⟦H0⟧the admin site⟦/H0⟧."). Rewrite the
+  sentence naturally and carry the span with it. Do NOT leave the span stranded
+  at the front and then repeat its meaning in the rest of the sentence — that
+  produces "⟦H0⟧the admin site⟦/H0⟧Go to the site." which is wrong.
+- Put a space around a marker whenever English needs one between words. Korean
+  particles attach directly to the marker; English words do not.
 - ⟦HL:colour⟧…⟦/HL⟧ = highlighted text — translate the inside and keep the markers
   around the same semantic content in the translation.
 - If the source contains existing English words or phrases, leave them EXACTLY as-is.
@@ -2718,8 +2752,10 @@ def translate_document(
     ui_overrides_clean: Dict[str, str] = {}
     if ui_text_overrides:
         for ko, en in ui_text_overrides.items():
-            ko_s = (ko or "").strip()
-            en_s = (en or "").strip()
+            # _clean()을 쓴다 — 호출자가 pandas DataFrame에서 값을 꺼내며
+            # 빈 셀을 str(nan)="nan"으로 만들어 넘기는 사고가 실제로 있었다.
+            # "nan"이 치환어로 등록되면 본문에 그대로 찍힌다.
+            ko_s, en_s = _clean(ko), _clean(en)
             if ko_s and en_s:
                 ui_overrides_clean[ko_s] = en_s
         # 예전에는 UI 매핑과 같은 KO를 glossary_entries에서 **통째로 지웠다**.
