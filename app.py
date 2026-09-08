@@ -1666,6 +1666,9 @@ if st.session_state.app_mode == "Glossary 추출":
                             _sugg = catalog.review_entries(
                                 client, list(zip(sel_df["KO"], sel_df["EN"])),
                                 kind=kind,
+                                contexts=(list(sel_df["문서 용례"])
+                                          if "문서 용례" in sel_df.columns
+                                          else None),
                             )
                         except Exception as e:
                             st.error(f"검수 오류: {e}")
@@ -1686,6 +1689,24 @@ if st.session_state.app_mode == "Glossary 추출":
                                     "reason": f"기존 글로서리에는 `{_prev}`로 등록돼 있습니다.",
                                     "labels": ["기존 글로서리", "카탈로그 표기"],
                                 }
+                        # 카탈로그 안에서 표기가 갈리는 항목은 반드시 사람이
+                        # 고르게 한다. 제안이 없으면 검수 카드 없이 그대로
+                        # 등재되어, 최빈 표기가 조용히 확정돼 버린다.
+                        if "후보수" in sel_df.columns:
+                            for _i, (_, _r) in enumerate(sel_df.iterrows()):
+                                try:
+                                    _n = int(_r.get("후보수") or 1)
+                                except (TypeError, ValueError):
+                                    _n = 1
+                                if _n <= 1:
+                                    continue
+                                _cur = dict(_merged.get(_i) or {})
+                                _cur.setdefault("suggest", _r["EN"])
+                                _cur["reason"] = (
+                                    f"고객 카탈로그에 {_n}가지 표기가 있습니다 — "
+                                    f"{_r.get('EN 후보', '')}"
+                                )
+                                _merged[_i] = _cur
                         state[kind] = {
                             "rows": sel_df.to_dict("records"), "sugg": _merged,
                         }
@@ -1707,15 +1728,28 @@ if st.session_state.app_mode == "Glossary 추출":
                 """
                 with st.container(border=True):
                     st.markdown(f"**{r['KO']}**")
+                    # 이 말이 번역할 문서에서 실제로 어떻게 쓰이는지 먼저.
+                    # '기록'이 이력(History)인지 녹화(Record)인지는 카탈로그만
+                    # 봐서는 알 수 없고 — 실제로 History로 잘못 등재돼 세 곳이
+                    # 틀렸다 — 이 한 줄이면 바로 갈린다.
+                    if r.get("문서 용례"):
+                        st.caption(f"문서 용례 · {r['문서 용례']}")
                     _opts = [s["suggest"], r["EN"]]
                     _caps = list(s.get("labels", ["제안", "원본 유지"]))[:2]
                     if _opts[0] == _opts[1]:          # 같으면 라디오가 깨진다
                         _opts, _caps = _opts[:1], _caps[:1]
+                    # 카탈로그에 표기가 여럿이면 나머지도 선택지로 올린다.
+                    for _v in str(r.get("EN 후보") or "").split(" / "):
+                        _v = _v.strip()
+                        if _v and _v not in _opts:
+                            _opts.append(_v)
+                            _caps.append("카탈로그 표기")
                     pick = st.radio(
                         r["KO"],
                         options=_opts + [_CUSTOM, _SKIP],
                         captions=_caps + ["내가 고쳐 쓰기", "이 항목 빼기"],
-                        index=0, horizontal=True, label_visibility="collapsed",
+                        index=0, horizontal=len(_opts) <= 2,
+                        label_visibility="collapsed",
                         key=f"catalog_rev_{kind}_{i}",
                     )
                     if pick == _SKIP:
@@ -1929,7 +1963,8 @@ if st.session_state.app_mode == "Glossary 추출":
                     # 번역 대상 문서를 준 경우엔 카탈로그 내부 빈도(빈도)가
                     # 아니라 그 문서에서 몇 번 쓰이는지(문서빈도)가 판단 근거다.
                     _tcols = (
-                        ["상태", "문서빈도", "KO", "EN", "문맥(key)", "DNT"]
+                        ["상태", "문서빈도", "KO", "EN", "문서 용례",
+                         "문맥(key)", "DNT"]
                         if "문서빈도" in _result.terms.columns
                         else ["상태", "빈도", "KO", "EN", "문맥(key)", "DNT"]
                     )

@@ -582,6 +582,72 @@ check("문서적중 0", res0.stats.get("문서적중") == 0, res0.stats)
 check("한 어절 라벨은 종전대로 용어 후보가 아님",
       "저장소" not in list(res0.terms["KO"]), str(list(res0.terms["KO"])))
 
+print("[16] 표기가 갈리는 라벨도 문서 기반 후보에 들어간다")
+# '압축 파일'이 Zip File / Zipped file 로 갈린다는 이유로 후보에서 빠지면,
+# 등재가 안 되고 번역기가 'compression file' 같은 말을 지어낸다.
+_ko2 = [{"key": "a.zip", "ko": "압축 파일"}, {"key": "b.zip", "ko": "압축 파일"}]
+_en2 = [{"key": "a.zip", "en": "Zip File"}, {"key": "b.zip", "en": "Zipped file"}]
+_pick2 = ct.pick_languages([ct.parse_json("z-ko.json", _ko2),
+                            ct.parse_json("z-en.json", _en2)])
+_res2 = ct.analyze(_pick2, target_texts=["압축 파일을 분석할 수 있습니다."])
+_row = _res2.terms[_res2.terms["KO"] == "압축 파일"]
+check("충돌 라벨이 후보에 포함", len(_row) == 1, str(list(_res2.terms["KO"])))
+if len(_row):
+    check("표기 후보가 함께 실린다",
+          "Zipped file" in str(_row.iloc[0]["EN 후보"]), str(_row.iloc[0].to_dict()))
+    check("후보수 2", int(_row.iloc[0]["후보수"]) == 2)
+
+print("[17] 문서 용례 컬럼")
+_res3 = ct.analyze(_pick2, target_texts=["압축 파일을 분석할 수 있습니다."])
+check("용례 컬럼 존재", "문서 용례" in _res3.terms.columns)
+check("용례에 원문이 담긴다",
+      "압축 파일" in str(_res3.terms.iloc[0]["문서 용례"]),
+      str(_res3.terms.iloc[0]["문서 용례"]))
+
+
+class _FakeResp:
+    def __init__(self, t):
+        self.output_text = t
+
+
+class _FakeAPI:
+    def __init__(self, reply):
+        self.prompt = None
+        self._reply = reply
+
+    def create(self, model=None, input=None, **kw):
+        self.prompt = input
+        return _FakeResp(self._reply)
+
+
+class _FakeClient:
+    def __init__(self, reply):
+        self.responses = _FakeAPI(reply)
+
+
+print("[18] 검수에 문서 용례를 함께 보낸다")
+# '기록 → History'는 카탈로그만 보면 맞다. 문서에서 녹화 버튼이라는 걸
+# 알아야 틀렸다는 판단이 선다.
+_c = _FakeClient("[0] Record|녹화 버튼입니다.")
+_out = ct.review_entries(_c, [("기록", "History")], kind="term",
+                         contexts=["이벤트를 「기록」하고 저장하는 도구입니다"])
+check("프롬프트에 문서 용례", "문서: 이벤트를" in (_c.responses.prompt or ""))
+check("공식 표기 권위 규칙", "AUTHORITATIVE" in (_c.responses.prompt or ""))
+check("교정 결과 반영", _out.get(0, {}).get("suggest") == "Record", str(_out))
+
+_c2 = _FakeClient("NONE")
+ct.review_entries(_c2, [("기록", "History")], kind="term")
+check("용례 없으면 규칙도 없다", "AUTHORITATIVE" not in (_c2.responses.prompt or ""))
+check("용례 없으면 문서줄도 없다", "문서:" not in (_c2.responses.prompt or ""))
+
+print("[19] 공식 표기의 대소문자를 검수가 낮추지 않는다")
+# 고객 카탈로그의 'Search File'은 화면 라벨이라 소문자로 바꾸면 안 된다.
+_c3 = _FakeClient("[0] Search Files|복수형이 맞습니다.")
+_o3 = ct.review_entries(_c3, [("파일 찾아보기", "Search File")], kind="term",
+                        contexts=["**파일 찾아보기** 버튼을 클릭하세요"])
+check("제안이 대소문자를 유지", _o3.get(0, {}).get("suggest") == "Search Files",
+      str(_o3))
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

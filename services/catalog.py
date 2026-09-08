@@ -646,6 +646,17 @@ def document_ngram_counts(texts: List[str],
     return counts
 
 
+def _first_doc_example(ko: str, texts: List[str]) -> str:
+    """그 말이 문서에서 실제로 쓰인 첫 문장. 검수자가 뜻을 가르는 근거."""
+    ko = (ko or "").strip()
+    if not ko:
+        return ""
+    for t in texts:
+        if ko in t:
+            return _excerpt(t, ko)
+    return ""
+
+
 def _doc_substring_count(ko: str, texts: List[str]) -> int:
     """문장형(패턴)용. 문장은 길어서 부분문자열로 세도 오탐이 없다."""
     ko = (ko or "").strip()
@@ -778,6 +789,13 @@ def analyze(pick: LanguagePick,
             labels["문서빈도"] = labels["KO"].map(
                 lambda k: doc_counts.get(str(k).strip(), 0)
             )
+            # 그 말이 문서에서 어떻게 쓰이는지. '기록'이 버튼 이름인지
+            # 동작인지는 카탈로그만 봐서는 알 수 없다 — 실제로 카탈로그의
+            # '기록 → History'가 녹화 버튼에 적용돼 오역이 났다.
+            labels["문서 용례"] = [
+                _first_doc_example(str(k), target_texts) if f > 0 else ""
+                for k, f in zip(labels["KO"], labels["문서빈도"])
+            ]
             # 문서에 나오는 것을 위로. 충돌(후보수>1)도 이 순서를 따르므로
             # 검수 화면에서 '이 문서에 실제로 쓰이는 충돌'이 먼저 보인다.
             labels = labels.sort_values(
@@ -796,10 +814,13 @@ def analyze(pick: LanguagePick,
             # '기록', '설정하기'처럼 한 어절짜리 UI 라벨을 전부 떨어뜨리는데,
             # 매뉴얼에서 정작 자주 쓰이는 게 바로 그것들이다. 문서에 실제로
             # 나온다는 사실 자체가 이미 충분한 근거다.
+            # 후보수 > 1(카탈로그 안에서 표기가 갈리는 것)도 넣는다.
+            # 빼 두면 등재가 안 되고, 번역기가 카탈로그에 없는 말을 지어낸다
+            # ('압축 파일' → compression file). 어느 표기를 쓸지는 검수
+            # 카드에서 사람이 고른다.
             shortlist = labels[
                 (labels["문서빈도"] > 0)
                 & (labels["KO"].str.len() >= DOC_TERM_MIN_CHARS)
-                & (labels["후보수"] == 1)
             ].copy()
             if shortlist.empty:
                 shortlist["빈도"] = pd.Series(dtype="int64")
@@ -1290,10 +1311,28 @@ def _keep_original_case(original: str, suggest: str, reason: str) -> str:
     return suggest[0].lower() + suggest[1:]
 
 
+_REVIEW_CONTEXT_RULES = """
+
+DOCUMENT USAGE — some entries carry a "문서:" line showing how the Korean is
+actually used in the document that is about to be translated. Use it to check
+the SENSE of the English:
+- If the English is the wrong sense of a polysemous Korean word, correct it.
+  Example: '기록' shown as "…이벤트를 기록하고 저장할 수 있는…" is a capture
+  action, so "Record" — not "History".
+- The English comes from the customer's own product UI catalog, so its wording
+  and capitalisation are AUTHORITATIVE. Never change the casing of such an
+  entry, and never rephrase it, unless the sense is genuinely wrong. This
+  overrides the lower-case convention above."""
+
+
 def review_entries(client, items: List[Tuple[str, str]], kind: str = "term",
-                   model: str = "gpt-5.2", batch_size: int = 25) -> Dict[int, dict]:
+                   model: str = "gpt-5.2", batch_size: int = 25,
+                   contexts: Optional[List[str]] = None) -> Dict[int, dict]:
     """
     등재 직전 검수. items = [(ko, en), …]
+
+    contexts: items와 같은 길이의 '문서 용례'. 주면 다의어 오적용을 잡는
+    근거로 함께 보낸다. 카탈로그만 봐서는 알 수 없는 오류가 여기서 걸린다.
 
     Returns {index: {"suggest": 고친 영어, "reason": 사유}}
     — 문제가 없다고 판단한 항목은 결과에 들어가지 않는다.
@@ -1301,10 +1340,22 @@ def review_entries(client, items: List[Tuple[str, str]], kind: str = "term",
     out: Dict[int, dict] = {}
     for start in range(0, len(items), batch_size):
         batch = items[start:start + batch_size]
+        def _entry(i: int, ko: str, en: str) -> str:
+            line = f"[{i}] KO: {ko}\n    EN: {en}"
+            if contexts:
+                c = str(contexts[start + i] or "").strip() \
+                    if start + i < len(contexts) else ""
+                if c:
+                    line += f"\n    문서: {c}"
+            return line
+
         block = "\n".join(
-            f"[{i}] KO: {ko}\n    EN: {en}" for i, (ko, en) in enumerate(batch)
+            _entry(i, ko, en) for i, (ko, en) in enumerate(batch)
         )
-        prompt = f"""{_REVIEW_RULES.get(kind, _REVIEW_RULES["term"])}
+        _rules = _REVIEW_RULES.get(kind, _REVIEW_RULES["term"])
+        if contexts:
+            _rules += _REVIEW_CONTEXT_RULES
+        prompt = f"""{_rules}
 
 Output one line per entry that needs a change, nothing else:
 [N] <corrected English>|<short reason in Korean>
@@ -1335,7 +1386,9 @@ Entries:
             if i >= len(batch) or not suggest:
                 continue
             reason = reason.strip()
-            if kind == "term":
+            if kind == "term" and not contexts:
+                # 용례를 준 실행은 고객 공식 카탈로그 기준이라, 여기서
+                # 소문자로 낮추면 'Search File'이 'search file'이 된다.
                 suggest = _keep_original_case(batch[i][1], suggest, reason)
             if suggest == batch[i][1]:
                 continue          # 제안이 원본과 같으면 무시
