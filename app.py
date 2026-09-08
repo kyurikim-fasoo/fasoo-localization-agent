@@ -87,6 +87,30 @@ def load_product_config():
         return json.load(f)
 
 
+def add_product(name: str) -> tuple[bool, str]:
+    """
+    product_config.json에 제품을 추가한다. (성공여부, 메시지)
+
+    이 파일은 지금 제품 목록 역할만 한다 — default_glossaries/patterns는
+    글로서리가 DB로 옮겨간 뒤로 아무도 읽지 않는다. 그래도 기존 항목과
+    같은 모양을 유지해 둔다.
+    """
+    name = (name or "").strip()
+    if not name:
+        return False, "제품 이름을 입력하세요."
+    if len(name) > 40:
+        return False, "제품 이름이 너무 깁니다 (40자 이내)."
+    cfg = load_product_config()
+    if name in cfg:
+        return False, f"«{name}» 은(는) 이미 있습니다."
+    if name.upper() == "ALL":
+        return False, "ALL은 '전 제품 공통'을 뜻하는 예약어입니다."
+    cfg[name] = {"default_glossaries": [], "default_patterns": []}
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    return True, f"제품 «{name}» 을(를) 추가했습니다."
+
+
 def save_uploaded_file(uploaded_file, save_dir: Path) -> Path:
     save_path = save_dir / uploaded_file.name
     with open(save_path, "wb") as f:
@@ -637,11 +661,14 @@ def _clear_unsaved_state() -> None:
 
 
 def _apply_nav_target(target: dict) -> None:
-    """모달 통과 또는 unsaved 없음 → 실제 이동."""
-    if "app_mode" in target:
-        st.session_state.app_mode = target["app_mode"]
-    if "step" in target:
-        st.session_state.step = target["step"]
+    """
+    모달 통과 또는 unsaved 없음 → 실제 이동.
+
+    app_mode/step 외의 키는 그대로 session_state에 넣는다. "이 글로서리로
+    Localize"처럼 이동하면서 제품·모드를 함께 정해줘야 하는 경우가 있다.
+    """
+    for k, v in target.items():
+        st.session_state[k] = v
 
 
 def _try_navigate(target: dict) -> None:
@@ -1379,9 +1406,22 @@ if st.session_state.app_mode == "Glossary 추출":
                     f"{_last['msg']}를 `{_last['product']}` · `{_last['scope']}` 에 "
                     "등재했습니다."
                     + (f"  ·  제외 {_last['skipped']}건" if _last.get("skipped") else "")
+                    + (f"  ·  이미 있어 건너뜀 {_last['skipped_db']}건"
+                       if _last.get("skipped_db") else "")
                     + "  —  아래 표에서 ✅ 로 표시됩니다.",
                     icon="📖",
                 )
+                # 등재하자마자 바로 번역하러 갈 수 있게. 방금 등재한 제품을
+                # 들고 넘어가므로 Localize에서 다시 고르지 않아도 된다.
+                if st.button(
+                    f"이 글로서리로 Localize 하기  ({_last['product']})",
+                    type="primary", use_container_width=True,
+                    key="catalog_go_localize_banner",
+                ):
+                    _try_navigate({
+                        "app_mode": "Localize", "step": 1,
+                        "selected_product": _last["product"],
+                    })
 
             _align = st.session_state.get("catalog_align")
             _align_on = _align is not None
@@ -1680,18 +1720,22 @@ if st.session_state.app_mode == "Glossary 추출":
                     disabled=_final_n == 0,
                 ):
                     try:
-                        _msg = []
+                        _msg, _skipped_db = [], 0
                         for kind, out in finals.items():
                             if not out:
                                 continue
                             counts = _register(pd.DataFrame(out), kind)
                             _msg.append(f"{_KIND_KO[kind]} {counts['inserted']}개")
+                            _skipped_db += counts.get("skipped", 0)
                         st.session_state.pop("catalog_review", None)
                         st.session_state["catalog_last_save"] = {
                             "msg": " · ".join(_msg),
                             "product": _extract_product,
                             "scope": _extract_scope,
                             "skipped": skipped,
+                            # 저장 계층이 이미 있는 항목을 걸러낸 수.
+                            # 화면 판정과 별개로 최종 방어선이 동작한 결과다.
+                            "skipped_db": _skipped_db,
                         }
                         # 다시 분석해 방금 등재한 항목이 ✅로 바뀌게 한다.
                         st.session_state.pop("catalog_result_key", None)
@@ -1833,6 +1877,29 @@ if st.session_state.app_mode == "Glossary 추출":
                             help="Team = 모두가 사용 · Personal = 본인만",
                         )
 
+                    # 목록에 없는 제품이면 여기서 바로 만든다. 설정 파일을
+                    # 열러 가지 않아도 되게.
+                    with st.expander("➕ 새 제품 추가"):
+                        _np1, _np2 = st.columns([3, 1])
+                        _new_name = _np1.text_input(
+                            "새 제품 이름", key="catalog_new_product",
+                            placeholder="예: Fireside", label_visibility="collapsed",
+                        )
+                        if _np2.button("추가", use_container_width=True,
+                                       key="catalog_add_product"):
+                            _ok, _m = add_product(_new_name)
+                            if _ok:
+                                # 새로 만든 제품을 바로 선택 상태로
+                                st.session_state.catalog_product = _new_name.strip()
+                                st.session_state.pop("catalog_new_product", None)
+                                st.toast(_m, icon="✅")
+                                st.rerun()
+                            else:
+                                st.warning(_m, icon="⚠️")
+                        st.caption(
+                            "추가하면 Localize의 제품 목록에도 함께 나타납니다."
+                        )
+
                     if _n_t + _n_p:
                         # 고른 것 중 이미 등재된 건 건너뛴다 — 묻지 않는다.
                         _same = _dupe = 0
@@ -1889,6 +1956,21 @@ if st.session_state.app_mode == "Glossary 추출":
                             "각 탭에서 등재할 항목을 고르세요. "
                             "용어와 패턴을 함께 골라 한 번에 검수·등재할 수 있습니다."
                         )
+
+            # 등재 여부와 상관없이, 지금 고른 제품으로 바로 번역하러 갈 수
+            # 있게 한다. 추출만 하고 등재는 나중에 하는 경우도 있다.
+            st.markdown("---")
+            _gl1, _gl2 = st.columns([3, 1])
+            _gl1.caption(
+                f"`{_extract_product}` 글로서리로 문서를 번역하려면 "
+                "오른쪽 버튼으로 이동하세요."
+            )
+            if _gl2.button("Localize 하기 →", use_container_width=True,
+                           key="catalog_go_localize"):
+                _try_navigate({
+                    "app_mode": "Localize", "step": 1,
+                    "selected_product": _extract_product,
+                })
 
             # ── 표기가 갈리는 항목 ────────────────────────────────────
             # 표로 두면 안 된다. Streamlit의 SelectboxColumn은 컬럼 전체에

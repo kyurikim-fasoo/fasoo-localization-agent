@@ -22,6 +22,7 @@ SUITES = [
     ("카탈로그 추출", "test_catalog.py"),
     ("앱 UI", "test_app_ui.py"),
     ("산출물 검증(마커·저장 후 대조)", "test_output_check.py"),
+    ("글로서리 중복 삽입 방지", "test_glossary_dupe.py"),
 ]
 
 
