@@ -2265,16 +2265,37 @@ if st.session_state.app_mode == "Glossary 추출":
                         st.caption("각 항목에서 쓸 표기를 클릭하면 등재 대상이 됩니다.")
 
             st.markdown("---")
-            st.download_button(
-                "엑셀로 내려받기",
-                data=catalog.to_excel(
-                    _result.terms, _result.patterns, product=_extract_product
-                ),
-                file_name=f"glossary_extracted_{_extract_product}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                help="[Glossary 관리]의 마스터 엑셀 업로드에 그대로 넣을 수 있는 형식입니다.",
-            )
+            _XLSX = ("application/vnd.openxmlformats-officedocument"
+                     ".spreadsheetml.sheet")
+            _d1, _d2 = st.columns(2)
+            with _d1:
+                st.download_button(
+                    "엑셀로 내려받기",
+                    data=catalog.to_excel(
+                        _result.terms, _result.patterns, product=_extract_product
+                    ),
+                    file_name=f"glossary_extracted_{_extract_product}.xlsx",
+                    mime=_XLSX,
+                    use_container_width=True,
+                    help="[Glossary 관리]의 마스터 엑셀 업로드에 "
+                         "그대로 넣을 수 있는 형식입니다.",
+                )
+            with _d2:
+                # 고객 전달용. 번역 결과가 아니라 **고객 카탈로그 자체의
+                # 품질**을 보여주는 자료라, 번역 이야기를 꺼내기 전에
+                # 건넬 수 있다.
+                st.download_button(
+                    "진단 리포트 내려받기",
+                    data=catalog.report_excel(
+                        _result,
+                        st.session_state.get("catalog_target_name"),
+                    ),
+                    file_name=f"catalog_report_{_extract_product}.xlsx",
+                    mime=_XLSX,
+                    use_container_width=True,
+                    help="같은 국문에 영문이 갈리는 항목과, 번역 대상 문서에 "
+                         "실제로 쓰이는 용어를 정리한 고객 전달용 자료입니다.",
+                )
 
     st.stop()
 

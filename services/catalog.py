@@ -1425,3 +1425,72 @@ def to_excel(terms: pd.DataFrame, patterns: pd.DataFrame, product: str = "ALL") 
         t.to_excel(writer, sheet_name="glossary", index=False)
         p.to_excel(writer, sheet_name="pattern", index=False)
     return buf.getvalue()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 고객 전달용 진단 리포트
+#
+# 번역을 시작하기 전에 카탈로그 자체를 훑어 두 가지를 낸다.
+#   ① 표기 불일치 — 같은 국문에 영문이 여럿인 항목. 제품 UI가 이미 흔들리고
+#      있다는 뜻이라, 번역 이전에 고객이 알아야 할 정보다.
+#   ② 문서 적중 — 번역할 문서에 실제로 쓰이는 라벨. 이번 번역에서 고정해야
+#      할 용어 목록이 곧 이것이다.
+# ──────────────────────────────────────────────────────────────────────
+
+def report_frames(res: "ExtractResult", doc_name: Optional[str] = None):
+    """진단 리포트의 세 표 — (요약, 표기 불일치, 문서 적중)."""
+    labels = res.labels
+    has_doc = not labels.empty and "문서빈도" in labels.columns
+
+    incons = labels[labels["후보수"] > 1].copy() if not labels.empty else labels.copy()
+    if not incons.empty:
+        incons = incons.rename(columns={"EN 후보": "영문 표기들", "후보수": "표기 수"})
+        cols = ["KO", "표기 수", "영문 표기들", "문맥(key)", "출현"]
+        if has_doc:
+            cols.insert(1, "문서빈도")
+        incons = incons[[c for c in cols if c in incons.columns]]
+        incons = incons.sort_values(
+            ["문서빈도", "표기 수"] if has_doc else ["표기 수", "출현"],
+            ascending=False,
+        ).reset_index(drop=True)
+
+    hits = None
+    if has_doc:
+        hits = labels[labels["문서빈도"] > 0].copy()
+        hits = hits[hits["KO"].str.len() >= DOC_TERM_MIN_CHARS]
+        hits["검수 필요"] = hits["후보수"].map(
+            lambda n: "예 (표기 충돌)" if n > 1 else "")
+        cols = ["KO", "문서빈도", "EN", "EN 후보", "검수 필요", "문서 용례",
+                "문맥(key)"]
+        hits = hits[[c for c in cols if c in hits.columns]]
+        hits = hits.sort_values("문서빈도", ascending=False).reset_index(drop=True)
+
+    st_ = res.stats
+    uniq = max(int(st_.get("라벨 고유KO", 0)), 1)
+    rows = [
+        ("카탈로그 전체 키", st_.get("공통키", 0)),
+        ("고유 국문 라벨", st_.get("라벨 고유KO", 0)),
+        ("표기가 흔들리는 라벨", len(incons)),
+        ("표기 불일치 비율", f"{len(incons) / uniq * 100:.1f}%"),
+        ("문장형(패턴) 원본", st_.get("패턴풀", 0)),
+    ]
+    if hits is not None:
+        rows += [
+            ("번역 대상 문서", doc_name or "(이름 없음)"),
+            ("문서에 나오는 카탈로그 라벨", len(hits)),
+            ("그중 표기 충돌", int((hits["검수 필요"] != "").sum())),
+        ]
+    summary = pd.DataFrame(rows, columns=["항목", "값"])
+    return summary, incons, hits
+
+
+def report_excel(res: "ExtractResult", doc_name: Optional[str] = None) -> bytes:
+    """진단 리포트 xlsx 바이트."""
+    summary, incons, hits = report_frames(res, doc_name)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        summary.to_excel(writer, sheet_name="요약", index=False)
+        incons.to_excel(writer, sheet_name="표기 불일치", index=False)
+        if hits is not None:
+            hits.to_excel(writer, sheet_name="문서 적중 용어", index=False)
+    return buf.getvalue()

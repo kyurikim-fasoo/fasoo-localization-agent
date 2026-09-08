@@ -648,6 +648,31 @@ _o3 = ct.review_entries(_c3, [("파일 찾아보기", "Search File")], kind="ter
 check("제안이 대소문자를 유지", _o3.get(0, {}).get("suggest") == "Search Files",
       str(_o3))
 
+print("[20] 고객 전달용 진단 리포트")
+_sum, _inc, _hit = ct.report_frames(_res2, "z.mdx")
+check("요약에 번역 대상 문서", "z.mdx" in list(_sum["값"].astype(str)),
+      str(list(_sum["값"])))
+check("표기 불일치에 압축 파일", "압축 파일" in list(_inc["KO"]), str(list(_inc["KO"])))
+check("불일치 표에 영문 표기들", "영문 표기들" in _inc.columns, str(list(_inc.columns)))
+check("문서 적중 표 존재", _hit is not None and len(_hit) >= 1)
+if _hit is not None:
+    check("검수 필요 표시", "예 (표기 충돌)" in list(_hit["검수 필요"]),
+          str(list(_hit["검수 필요"])))
+    check("용례 컬럼 포함", "문서 용례" in _hit.columns, str(list(_hit.columns)))
+
+_xl = ct.report_excel(_res2, "z.mdx")
+check("xlsx 바이트", _xl[:2] == b"PK" and len(_xl) > 2000, str(len(_xl)))
+import pandas as _pd  # noqa: E402
+check("시트 3개", _pd.ExcelFile(io.BytesIO(_xl)).sheet_names
+      == ["요약", "표기 불일치", "문서 적중 용어"],
+      str(_pd.ExcelFile(io.BytesIO(_xl)).sheet_names))
+
+# 번역 대상 문서 없이도 리포트가 나온다 (표기 불일치만)
+_res_nodoc = ct.analyze(_pick2)
+_s2, _i2, _h2 = ct.report_frames(_res_nodoc)
+check("문서 없으면 적중 표는 없다", _h2 is None)
+check("그래도 불일치는 나온다", len(_i2) >= 1, str(len(_i2)))
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")
