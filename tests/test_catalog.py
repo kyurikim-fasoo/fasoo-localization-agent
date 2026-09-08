@@ -673,6 +673,48 @@ _s2, _i2, _h2 = ct.report_frames(_res_nodoc)
 check("문서 없으면 적중 표는 없다", _h2 is None)
 check("그래도 불일치는 나온다", len(_i2) >= 1, str(len(_i2)))
 
+print("[21] 입력 자료 진단")
+# 같은 국문에 영문이 갈리고(압축 파일), 서로 다른 국문이 한 영문을 쓰고
+# (기록/이력 → history), 문서 라벨이 카탈로그에 없는 상황을 만든다.
+_dko = [
+    {"key": "a.zip", "ko": "압축 파일"}, {"key": "b.zip", "ko": "압축 파일"},
+    {"key": "c.rec", "ko": "기록"}, {"key": "d.his", "ko": "이력"},
+]
+_den = [
+    {"key": "a.zip", "en": "Zip File"}, {"key": "b.zip", "en": "Zipped file"},
+    {"key": "c.rec", "en": "History"}, {"key": "d.his", "en": "History"},
+]
+_dpick = ct.pick_languages([ct.parse_json("d-ko.json", _dko),
+                            ct.parse_json("d-en.json", _den)])
+_dres = ct.analyze(_dpick, term_limit=10 ** 9, pattern_limit=10 ** 9,
+                   target_texts=["압축 파일을 분석하고 기록 버튼을 누르세요."])
+_f = ct.diagnose(_dres, "d.mdx", ["압축 파일", "기록", "이벤트 클립보드"])
+_keys = [x["키"] for x in _f]
+check("표기 불일치 진단", "표기 불일치" in _keys, str(_keys))
+check("뜻 뭉개짐 진단", "뜻 뭉개짐" in _keys, str(_keys))
+check("카탈로그 미수록 진단", "카탈로그 미수록" in _keys, str(_keys))
+
+_merge = next(x for x in _f if x["키"] == "뜻 뭉개짐")
+check("기록/이력이 한 영문에 묶인 것을 잡는다",
+      any("기록" in str(v) and "이력" in str(v)
+          for v in _merge["표"]["이 영문을 쓰는 국문"]),
+      _merge["표"].to_string())
+
+_miss = next(x for x in _f if x["키"] == "카탈로그 미수록")
+check("카탈로그에 없는 라벨만 나열",
+      list(_miss["표"]["카탈로그에 없는 라벨"]) == ["이벤트 클립보드"],
+      str(list(_miss["표"]["카탈로그에 없는 라벨"])))
+
+check("위험이 앞에 온다", _f[0]["심각도"] == "위험", str([x["심각도"] for x in _f]))
+for _x in _f:
+    check(f"권고가 있다 — {_x['키']}", bool(_x.get("권고")))
+
+_md = ct.diagnosis_markdown(_f, "d.mdx")
+check("글에 제목", "# 입력 자료 진단" in _md)
+check("글에 대상 문서", "d.mdx" in _md)
+check("글에 표", "| 영문 |" in _md, _md[:200])
+check("글에 할 일", "무엇을 하면 되는가" in _md)
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

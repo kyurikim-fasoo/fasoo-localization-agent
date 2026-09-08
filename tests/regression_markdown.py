@@ -57,6 +57,23 @@ print(f"[0] 번역 단위 {metrics['paragraphs_translated']}개")
 check("38개 유닛 번역", metrics["paragraphs_translated"] == 38,
       str(metrics["paragraphs_translated"]))
 
+print("[0-b] 무엇을 통일했는지 기록된다")
+# 산출물만 받아서는 이 도구가 한 일을 알 수 없다. 글로서리·UI 매핑이
+# 어디에 몇 번 적용됐는지가 결과에 남아야 화면에 보여줄 수 있다.
+_ap = {a["KO"]: a for a in metrics.get("applied", [])}
+check("적용 내역 존재", bool(_ap), str(metrics.get("applied"))[:200])
+check("글로서리 항목 기록", _ap.get("이벤트 클립보드", {}).get("출처") == "글로서리",
+      str(_ap.get("이벤트 클립보드")))
+check("UI 매핑 항목 기록", _ap.get("저장", {}).get("출처") == "UI 매핑",
+      str(_ap.get("저장")))
+check("적용 횟수가 원문 출현과 맞는다",
+      _ap.get("이벤트 클립보드", {}).get("적용") == src.count("이벤트 클립보드"),
+      f"{_ap.get('이벤트 클립보드', {}).get('적용')} vs {src.count('이벤트 클립보드')}")
+check("고정된 영문이 실린다", _ap.get("이벤트 클립보드", {}).get("EN")
+      == "Event Clipboard", str(_ap.get("이벤트 클립보드")))
+check("산출물 예문이 붙는다", bool(_ap.get("이벤트 클립보드", {}).get("예문")),
+      str(_ap.get("이벤트 클립보드")))
+
 print("[1] 마커 누출 없음")
 leaked = re.findall(r"⟦[^⟧]*⟧", out)
 check("출력에 ⟦…⟧ 없음", not leaked, str(leaked[:5]))

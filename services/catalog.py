@@ -1437,6 +1437,188 @@ def to_excel(terms: pd.DataFrame, patterns: pd.DataFrame, product: str = "ALL") 
 #      할 용어 목록이 곧 이것이다.
 # ──────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────
+# 입력 자료 진단
+#
+# 엑셀 덤프는 "여기 데이터 있습니다"에서 끝난다. 사람이 알고 싶은 건 **무엇이
+# 문제고 무엇을 하면 되는가**다. 그래서 발견 하나하나를 근거 수치 · 왜 문제인지
+# · 다음에 할 일로 묶어서 돌려준다.
+#
+# 실제로 이 진단은 사고를 예측한다. Sparrow 카탈로그에서 'history'에 국문이
+# 「기록」과 「이력」 둘 다 달려 있다는 것이 잡히는데, 바로 그 자리에서
+# '기록'(녹화 버튼)이 History로 잘못 번역되는 사고가 났다.
+# ──────────────────────────────────────────────────────────────────────
+
+def diagnose(res: "ExtractResult",
+             doc_name: Optional[str] = None,
+             doc_labels: Optional[List[str]] = None) -> List[dict]:
+    """
+    입력 카탈로그의 문제와 권고를 찾는다.
+
+    각 항목: {키, 심각도, 제목, 수치, 설명, 권고, 표(DataFrame|None)}
+    심각도 — "위험"(지금 고쳐야) · "주의"(등재 전에 확인) · "정보"
+    """
+    out: List[dict] = []
+    labels = res.labels
+    if labels is None or labels.empty:
+        return out
+
+    has_doc = "문서빈도" in labels.columns
+    n_labels = len(labels)
+    hit = labels[labels["문서빈도"] > 0] if has_doc else None
+
+    # ① 같은 국문에 영문이 여럿 — 제품 UI가 이미 흔들린다
+    inc = labels[labels["후보수"] > 1]
+    inc_doc = inc[inc["문서빈도"] > 0] if has_doc else inc
+    if len(inc):
+        tbl = (inc_doc if len(inc_doc) else inc).copy()
+        cols = ["KO", "EN 후보", "후보수"] + (["문서빈도"] if has_doc else [])
+        tbl = tbl[[c for c in cols if c in tbl.columns]].rename(
+            columns={"EN 후보": "영문 표기들", "후보수": "가짓수"})
+        out.append({
+            "키": "표기 불일치",
+            "심각도": "위험" if len(inc_doc) else "주의",
+            "제목": "같은 국문이 여러 영문으로 쓰이고 있습니다",
+            "수치": (f"라벨 {n_labels:,}건 중 {len(inc)}건"
+                   + (f" · 이번 문서에 쓰이는 것 {len(inc_doc)}건"
+                      if has_doc else "")),
+            "설명": "제품 화면에서 같은 항목이 화면마다 다른 영문으로 나온다는 "
+                  "뜻입니다. 매뉴얼을 아무리 잘 번역해도 화면과 어긋납니다.",
+            "권고": ("이번 문서에 쓰이는 것부터 정하세요. 등재 검수 화면에서 "
+                   "표기들이 선택지로 뜨므로, 고르기만 하면 문서 전체에 "
+                   "그 표기로 고정됩니다."
+                   if len(inc_doc) else
+                   "번역 대상 문서를 함께 올리면 그중 지금 필요한 것만 "
+                   "추려 드립니다."),
+            "표": tbl.head(60),
+        })
+
+    # ② 같은 영문에 국문이 여럿 — 서로 다른 개념이 한 단어로 뭉개진다
+    rev: Dict[str, set] = defaultdict(set)
+    for _, r in labels.iterrows():
+        en = str(r.get("EN") or "").strip().lower()
+        if en:
+            rev[en].add(str(r["KO"]))
+    merged = {k: v for k, v in rev.items() if len(v) > 1}
+    if has_doc and merged:
+        _in_doc = set(hit["KO"]) if hit is not None else set()
+        merged_doc = {k: v for k, v in merged.items() if v & _in_doc}
+    else:
+        merged_doc = merged
+    if merged:
+        _src = merged_doc if merged_doc else merged
+        tbl = pd.DataFrame(
+            [{"영문": k, "이 영문을 쓰는 국문": " / ".join(sorted(v)),
+              "가짓수": len(v)}
+             for k, v in sorted(_src.items(), key=lambda x: -len(x[1]))]
+        )
+        out.append({
+            "키": "뜻 뭉개짐",
+            "심각도": "위험" if merged_doc else "주의",
+            "제목": "서로 다른 국문이 같은 영문을 쓰고 있습니다",
+            "수치": (f"영문 {len(merged)}개가 여러 국문에 걸침"
+                   + (f" · 이번 문서 관련 {len(merged_doc)}개"
+                      if has_doc else "")),
+            "설명": "번역할 때 어느 쪽 뜻인지 기계가 고를 수 없습니다. 실제로 "
+                  "이 형태의 항목에서 오역이 납니다 — 녹화 버튼 「기록」에 "
+                  "이력 화면의 영문이 붙는 식입니다.",
+            "권고": "이 목록은 등재 대상이 아니라 **확인 대상**입니다. 뜻이 "
+                  "정말 같으면 그대로 두고, 다르면 등재 검수에서 문서 용례를 "
+                  "보고 이 문서에 맞는 쪽을 고르세요.",
+            "표": tbl.head(60),
+        })
+
+    # ③ 문서의 UI 라벨 중 카탈로그에 없는 것 — 카탈로그로는 못 덮는 부분
+    if doc_labels:
+        known = set(labels["KO"])
+        missing = [b for b in dict.fromkeys(doc_labels) if b not in known]
+        if missing:
+            out.append({
+                "키": "카탈로그 미수록",
+                "심각도": "주의",
+                "제목": "문서의 화면 라벨 일부가 카탈로그에 없습니다",
+                "수치": f"문서 라벨 {len(set(doc_labels))}개 중 {len(missing)}개",
+                "설명": "카탈로그에 없으면 고정할 근거가 없어, 문단마다 다르게 "
+                      "번역될 수 있습니다.",
+                "권고": "Localize의 [UI 텍스트 매핑]에서 이 항목들의 영문을 "
+                      "직접 지정하세요. 한 번 지정하면 로그에 남아 다음 "
+                      "문서에서 재사용됩니다.",
+                "표": pd.DataFrame({"카탈로그에 없는 라벨": missing}),
+            })
+
+    # ④ 등재하면 위험한 한 글자 라벨
+    if has_doc:
+        tiny = labels[(labels["KO"].str.len() < DOC_TERM_MIN_CHARS)
+                      & (labels["문서빈도"] > 0)]
+        if len(tiny):
+            out.append({
+                "키": "짧은 라벨",
+                "심각도": "정보",
+                "제목": "한 글자 라벨은 등재 후보에서 제외했습니다",
+                "수치": f"{len(tiny)}건",
+                "설명": "「하」→Low 같은 한 글자 항목은 한국어 문장 어디에나 "
+                      "박혀 있어, 등재하면 엉뚱한 자리까지 바뀝니다.",
+                "권고": "그대로 두시면 됩니다. 꼭 필요하면 「하」가 아니라 "
+                      "「위험도 하」처럼 문맥을 붙여 등재하세요.",
+                "표": pd.DataFrame({"제외된 라벨": list(tiny["KO"]),
+                                   "영문": list(tiny["EN"])}),
+            })
+
+    # ⑤ 영문 칸에 한글이 남은 항목 — 번역 누락
+    untr = labels[labels["EN"].map(lambda e: bool(_KOREAN_RE.search(str(e))))]
+    if len(untr):
+        out.append({
+            "키": "미번역",
+            "심각도": "위험",
+            "제목": "영문 칸에 한국어가 그대로 남은 항목이 있습니다",
+            "수치": f"{len(untr)}건",
+            "설명": "영문 카탈로그가 아직 채워지지 않은 자리입니다. 이대로 "
+                  "등재하면 산출물에 한국어가 그대로 나갑니다.",
+            "권고": "등재 대상에서 빼거나, 영문을 채운 카탈로그를 다시 받으세요.",
+            "표": untr[["KO", "EN"]].head(60),
+        })
+
+    # ⑥ 이번 문서 커버리지 — 잘 되고 있다는 것도 알려준다
+    if has_doc and hit is not None:
+        out.append({
+            "키": "커버리지",
+            "심각도": "정보",
+            "제목": "이번 문서에 적용 가능한 용어",
+            "수치": f"카탈로그 {n_labels:,}건 중 {len(hit)}건이 이 문서에 등장",
+            "설명": f"나머지 {n_labels - len(hit):,}건은 이 문서와 무관하지만, "
+                  "한 번 등재해 두면 다음 문서부터 자동으로 쓰입니다.",
+            "권고": "문서가 늘수록 새로 등재할 양이 줄어듭니다.",
+            "표": None,
+        })
+
+    _ORDER = {"위험": 0, "주의": 1, "정보": 2}
+    out.sort(key=lambda f: _ORDER.get(f["심각도"], 9))
+    return out
+
+
+def diagnosis_markdown(findings: List[dict], doc_name: Optional[str] = None) -> str:
+    """진단 결과를 그대로 붙여 쓸 수 있는 글로. (Word 붙여넣기용)"""
+    lines = ["# 입력 자료 진단"]
+    if doc_name:
+        lines.append(f"\n번역 대상: {doc_name}")
+    for f in findings:
+        lines.append(f"\n## [{f['심각도']}] {f['제목']}")
+        lines.append(f"\n- 규모: {f['수치']}")
+        lines.append(f"- 무엇이 문제인가: {f['설명']}")
+        lines.append(f"- 무엇을 하면 되는가: {f['권고']}")
+        tbl = f.get("표")
+        if tbl is not None and len(tbl):
+            lines.append("")
+            lines.append("| " + " | ".join(str(c) for c in tbl.columns) + " |")
+            lines.append("|" + "---|" * len(tbl.columns))
+            for _, r in tbl.head(20).iterrows():
+                lines.append("| " + " | ".join(
+                    str(v).replace("|", "\\|") for v in r) + " |")
+            if len(tbl) > 20:
+                lines.append(f"\n… 외 {len(tbl) - 20}건")
+    return "\n".join(lines)
+
+
 def report_frames(res: "ExtractResult", doc_name: Optional[str] = None):
     """진단 리포트의 세 표 — (요약, 표기 불일치, 문서 적중)."""
     labels = res.labels

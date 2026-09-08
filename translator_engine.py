@@ -2712,6 +2712,19 @@ def make_adapter(in_path: str):
     return DocxAdapter(in_path)
 
 
+def _excerpt_around(text: str, needle: str, around: int = 42) -> str:
+    """산출물에서 그 표현이 쓰인 대목을 짧게 오려낸다."""
+    if not needle:
+        return ""
+    plain = strip_zero_width(ALL_MARKER_RE.sub("", text or "")).strip()
+    plain = re.sub(r"\s+", " ", plain)
+    i = plain.lower().find(needle.lower())
+    if i < 0:
+        return ""
+    a, b = max(0, i - around), min(len(plain), i + len(needle) + around)
+    return ("…" if a else "") + plain[a:b].strip() + ("…" if b < len(plain) else "")
+
+
 def extract_korean_paragraphs(in_path: str) -> List[str]:
     """
     번역 대상이 되는 한국어 문단만 모아 돌려준다.
@@ -2914,6 +2927,12 @@ def translate_document(
     # ── Pass 1: 번역 (쓰기는 미루고 메모리에 누적) ────────────────────
     pass1_results: List[Dict] = []
 
+    # 무엇을 몇 번 통일했는지. 캐시로 건너뛴 문단도 같은 치환을 거친 것이므로
+    # 원문별로 적용 내역을 따로 기억해 두었다가 그대로 센다.
+    applied_counts: Counter = Counter()
+    applied_example: Dict[tuple, str] = {}
+    applied_cache: Dict[str, list] = {}
+
     for idx, unit in enumerate(units):
         src = unit.src
         # heading 여부는 위에서 확정됨 — UI 매핑 적용 여부와 case-sensitive
@@ -2922,6 +2941,7 @@ def translate_document(
 
         if enable_cache and src in cache:
             translated = cache[src]
+            _applied = applied_cache.get(src, [])
         else:
             # 1) UI 텍스트 매핑을 **먼저** — 오직 굵은 구간, non-heading에서만.
             #    Heading은 무조건 sentence case로 정규화될 예정이므로 UI 매핑을
@@ -2940,6 +2960,18 @@ def translate_document(
             )
             if ui_map:
                 gl_map = {**ui_map, **gl_map}
+
+            # 이 문단에서 무엇이 몇 번 치환됐는가. 자리표시자를 세면 정확하다.
+            _applied = []
+            for _ph, _e in (gl_map or {}).items():
+                _n = gl_pre.count(_ph)
+                if _n:
+                    _applied.append((
+                        _e.ko, _e.en,
+                        "UI 매핑" if _ph in ui_map else "글로서리", _n,
+                    ))
+            if enable_cache:
+                applied_cache[src] = _applied
 
             # 원문 영문 봉인 — 여기부터 복원 전까지 AI/API/v2.1/K-Assistant는
             # ⟦X#⟧로 가려져 있어 모델도, 우리 후처리도 건드릴 수 없다.
@@ -3054,6 +3086,7 @@ def translate_document(
             "unit": unit,
             "src": src,
             "translated": translated,
+            "applied": _applied,
         })
 
         if progress_callback:
@@ -3154,6 +3187,15 @@ def translate_document(
             marker_failed += 1
         elif text != r["translated"]:
             marker_repaired += 1
+        # 실제로 문서에 나간 문장에서 예문을 딴다. 최종 후처리까지 끝난
+        # 텍스트라야 사용자가 산출물에서 그대로 확인할 수 있다.
+        for _ko, _en, _kind, _n in r.get("applied", ()):
+            _key = (_ko, _en, _kind)
+            applied_counts[_key] += _n
+            if _key not in applied_example:
+                _ex = _excerpt_around(text, _en)
+                if _ex:
+                    applied_example[_key] = _ex
         adapter.write(r["unit"], text)
 
     adapter.save(out_path)
@@ -3173,4 +3215,9 @@ def translate_document(
         "marker_repaired": marker_repaired,
         "marker_failed": marker_failed,
         "verification": verification,
+        "applied": [
+            {"KO": ko, "EN": en, "출처": kind, "적용": n,
+             "예문": applied_example.get((ko, en, kind), "")}
+            for (ko, en, kind), n in applied_counts.most_common()
+        ],
     }

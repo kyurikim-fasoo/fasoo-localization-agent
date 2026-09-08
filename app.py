@@ -1253,16 +1253,22 @@ if st.session_state.app_mode == "Glossary 추출":
                 st.session_state.catalog_target_texts = \
                     extract_korean_paragraphs(str(_tpath))
                 st.session_state.catalog_target_name = uploaded_target.name
+                # 굵게 = 화면 라벨. 카탈로그가 못 덮는 라벨을 찾는 데 쓴다.
+                st.session_state.catalog_target_labels = [
+                    t for t, _ctx in extract_bold_terms(str(_tpath))
+                ]
             except Exception as _e:
                 st.warning(f"번역 대상 문서를 읽지 못했습니다: {_e}")
                 st.session_state.catalog_target_texts = None
                 st.session_state.catalog_target_name = None
+                st.session_state.catalog_target_labels = None
             st.session_state.catalog_target_sig = _tsig
     elif st.session_state.get("catalog_target_sig") is not None:
         # 파일을 내리면 종전 방식으로 되돌린다
         st.session_state.catalog_target_sig = None
         st.session_state.catalog_target_texts = None
         st.session_state.catalog_target_name = None
+        st.session_state.catalog_target_labels = None
 
     _target_texts = st.session_state.get("catalog_target_texts") or None
     if _target_texts:
@@ -1581,6 +1587,54 @@ if st.session_state.app_mode == "Glossary 추출":
                     f"**{_stats['문서적중']:,}건**이 이 문서에 나옵니다. "
                     "아래 후보는 그중에서 고른 것입니다."
                 )
+
+            # ── 입력 자료 진단 ────────────────────────────────────────
+            # 후보 목록만 보여주면 "이 데이터가 쓸 만한가"를 알 수 없다.
+            # 무엇이 문제고 무엇을 하면 되는지를 글로 알려준다.
+            _findings = catalog.diagnose(
+                _result,
+                st.session_state.get("catalog_target_name"),
+                st.session_state.get("catalog_target_labels"),
+            )
+            if _findings:
+                _n_risk = sum(1 for f in _findings if f["심각도"] == "위험")
+                _n_warn = sum(1 for f in _findings if f["심각도"] == "주의")
+                _bits = []
+                if _n_risk:
+                    _bits.append(f"위험 {_n_risk}")
+                if _n_warn:
+                    _bits.append(f"주의 {_n_warn}")
+                with st.expander(
+                    "🔍 입력 자료 진단"
+                    + (f"  —  {' · '.join(_bits)}" if _bits else "  —  이상 없음"),
+                    expanded=bool(_n_risk),
+                ):
+                    _ICON = {"위험": "🔴", "주의": "🟡", "정보": "🔵"}
+                    for _fi, _f in enumerate(_findings):
+                        if _fi:
+                            st.markdown("---")
+                        st.markdown(
+                            f"**{_ICON.get(_f['심각도'], '•')} {_f['제목']}**"
+                        )
+                        st.caption(_f["수치"])
+                        st.markdown(_f["설명"])
+                        st.markdown(f"**할 일** — {_f['권고']}")
+                        _tbl = _f.get("표")
+                        if _tbl is not None and len(_tbl):
+                            st.dataframe(_tbl, use_container_width=True,
+                                         hide_index=True)
+                    st.markdown("---")
+                    st.download_button(
+                        "진단 결과를 글로 내려받기",
+                        data=catalog.diagnosis_markdown(
+                            _findings,
+                            st.session_state.get("catalog_target_name"),
+                        ).encode("utf-8"),
+                        file_name="입력자료_진단.md",
+                        mime="text/markdown",
+                        use_container_width=True,
+                        help="Word에 그대로 붙여넣어 고객 전달 자료로 쓸 수 있습니다.",
+                    )
 
             with st.expander(
                 "추출 개수 조정" + ("  ·  전체 보기 켜짐" if _show_all else "")
@@ -2265,37 +2319,18 @@ if st.session_state.app_mode == "Glossary 추출":
                         st.caption("각 항목에서 쓸 표기를 클릭하면 등재 대상이 됩니다.")
 
             st.markdown("---")
-            _XLSX = ("application/vnd.openxmlformats-officedocument"
-                     ".spreadsheetml.sheet")
-            _d1, _d2 = st.columns(2)
-            with _d1:
-                st.download_button(
-                    "엑셀로 내려받기",
-                    data=catalog.to_excel(
-                        _result.terms, _result.patterns, product=_extract_product
-                    ),
-                    file_name=f"glossary_extracted_{_extract_product}.xlsx",
-                    mime=_XLSX,
-                    use_container_width=True,
-                    help="[Glossary 관리]의 마스터 엑셀 업로드에 "
-                         "그대로 넣을 수 있는 형식입니다.",
-                )
-            with _d2:
-                # 고객 전달용. 번역 결과가 아니라 **고객 카탈로그 자체의
-                # 품질**을 보여주는 자료라, 번역 이야기를 꺼내기 전에
-                # 건넬 수 있다.
-                st.download_button(
-                    "진단 리포트 내려받기",
-                    data=catalog.report_excel(
-                        _result,
-                        st.session_state.get("catalog_target_name"),
-                    ),
-                    file_name=f"catalog_report_{_extract_product}.xlsx",
-                    mime=_XLSX,
-                    use_container_width=True,
-                    help="같은 국문에 영문이 갈리는 항목과, 번역 대상 문서에 "
-                         "실제로 쓰이는 용어를 정리한 고객 전달용 자료입니다.",
-                )
+            st.download_button(
+                "엑셀로 내려받기",
+                data=catalog.to_excel(
+                    _result.terms, _result.patterns, product=_extract_product
+                ),
+                file_name=f"glossary_extracted_{_extract_product}.xlsx",
+                mime=("application/vnd.openxmlformats-officedocument"
+                      ".spreadsheetml.sheet"),
+                use_container_width=True,
+                help="[Glossary 관리]의 마스터 엑셀 업로드에 "
+                     "그대로 넣을 수 있는 형식입니다.",
+            )
 
     st.stop()
 
@@ -2856,6 +2891,52 @@ elif st.session_state.step == 3:
             mime=mime_for(output_filename),
             type="primary",
             use_container_width=True,
+        )
+
+    # ── 무엇이 통일됐는가 ────────────────────────────────────────────
+    # 산출물만 받아서는 이 도구가 무슨 일을 했는지 알 수 없다. 글로서리와
+    # UI 매핑은 자리표시자로 치환되므로 "어떤 말을 어디에 몇 번 고정했는지"가
+    # 정확히 남는다. 그걸 그대로 보여준다 — 신뢰는 결과가 아니라 근거에서
+    # 나온다.
+    _applied = result.get("applied") or []
+    if _applied:
+        _n_terms = len(_applied)
+        _n_hits = sum(int(a.get("적용") or 0) for a in _applied)
+        st.markdown(" ")
+        with st.container(border=True):
+            st.markdown(
+                f"##### 🔤 이 문서에서 통일된 표현 — {_n_terms}개 표현 · "
+                f"{_n_hits:,}곳"
+            )
+            st.caption(
+                "글로서리와 UI 텍스트 매핑에 등록된 표현입니다. "
+                "본문 어디에 나오든 **같은 영문으로 고정**되었으므로, "
+                "문단마다 다르게 번역되는 일이 없습니다."
+            )
+            _adf = pd.DataFrame(_applied)
+            st.dataframe(
+                _adf, use_container_width=True, hide_index=True,
+                column_config={
+                    "KO": st.column_config.TextColumn("국문", width="small"),
+                    "EN": st.column_config.TextColumn("영문(고정)", width="small"),
+                    "출처": st.column_config.TextColumn("출처", width="small"),
+                    "적용": st.column_config.NumberColumn("적용", width="small"),
+                    "예문": st.column_config.TextColumn("산출물에서", width="large"),
+                },
+            )
+            _by_ui = sum(1 for a in _applied if a.get("출처") == "UI 매핑")
+            if _by_ui:
+                st.caption(
+                    f"이 중 {_by_ui}개는 Step 2에서 직접 지정하신 UI 텍스트이고, "
+                    f"나머지 {_n_terms - _by_ui}개는 Glossary에서 왔습니다."
+                )
+    else:
+        st.markdown(" ")
+        st.info(
+            "이번 문서에는 글로서리·UI 매핑에 등록된 표현이 하나도 걸리지 "
+            "않았습니다. [Glossary 추출]에서 이 문서 기준으로 용어를 등재하면 "
+            "반복되는 표현이 한 가지 영문으로 고정됩니다.",
+            icon="💡",
         )
 
     # ── 산출물 검증 ──────────────────────────────────────────────────
