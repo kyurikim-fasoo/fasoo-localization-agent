@@ -691,29 +691,47 @@ _dres = ct.analyze(_dpick, term_limit=10 ** 9, pattern_limit=10 ** 9,
 _f = ct.diagnose(_dres, "d.mdx", ["압축 파일", "기록", "이벤트 클립보드"])
 _keys = [x["키"] for x in _f]
 check("표기 불일치 진단", "표기 불일치" in _keys, str(_keys))
-check("뜻 뭉개짐 진단", "뜻 뭉개짐" in _keys, str(_keys))
-check("카탈로그 미수록 진단", "카탈로그 미수록" in _keys, str(_keys))
+check("중복 정의 진단", "중복 정의" in _keys, str(_keys))
+check("수록 범위 진단", "수록 범위" in _keys, str(_keys))
 
-_merge = next(x for x in _f if x["키"] == "뜻 뭉개짐")
+_merge = next(x for x in _f if x["키"] == "중복 정의")
 check("기록/이력이 한 영문에 묶인 것을 잡는다",
       any("기록" in str(v) and "이력" in str(v)
-          for v in _merge["표"]["이 영문을 쓰는 국문"]),
+          for v in _merge["표"]["중복 사용된 국문"]),
       _merge["표"].to_string())
 
-_miss = next(x for x in _f if x["키"] == "카탈로그 미수록")
+_miss = next(x for x in _f if x["키"] == "수록 범위")
 check("카탈로그에 없는 라벨만 나열",
-      list(_miss["표"]["카탈로그에 없는 라벨"]) == ["이벤트 클립보드"],
-      str(list(_miss["표"]["카탈로그에 없는 라벨"])))
+      list(_miss["표"]["미수록 라벨"]) == ["이벤트 클립보드"],
+      str(list(_miss["표"]["미수록 라벨"])))
 
-check("위험이 앞에 온다", _f[0]["심각도"] == "위험", str([x["심각도"] for x in _f]))
+check("조치 필요가 앞에 온다", _f[0]["심각도"] == "조치 필요",
+      str([x["심각도"] for x in _f]))
 for _x in _f:
-    check(f"권고가 있다 — {_x['키']}", bool(_x.get("권고")))
+    check(f"현황·권고가 있다 — {_x['키']}",
+          bool(_x.get("현황")) and bool(_x.get("권고")))
 
-_md = ct.diagnosis_markdown(_f, "d.mdx")
-check("글에 제목", "# 입력 자료 진단" in _md)
-check("글에 대상 문서", "d.mdx" in _md)
-check("글에 표", "| 영문 |" in _md, _md[:200])
-check("글에 할 일", "무엇을 하면 되는가" in _md)
+# 고객 제출용이라 말투를 고정한다. 구어체가 섞이면 그대로 나간다.
+_BANNED = ("하시면 됩니다만", "~", "!", "ㅎ", "우리가", "제가")
+for _x in _f:
+    _txt = _x["현황"] + _x.get("영향", "") + _x["권고"]
+    check(f"구어체 없음 — {_x['키']}",
+          not any(b in _txt for b in _BANNED), _txt[:80])
+
+print("[22] 진단 총평")
+_sm = ct.diagnosis_summary(_dres, _f)
+check("등급 존재", _sm["등급"] in ("양호", "보통", "개선 필요"), _sm["등급"])
+check("지표 4종", len(_sm["지표"]) == 4, str(_sm["지표"]))
+check("표기 일관성 지표", any(k == "표기 일관성" for k, _ in _sm["지표"]),
+      str(_sm["지표"]))
+check("총평 문장", len(_sm["총평"]) > 20, _sm["총평"])
+
+_md = ct.diagnosis_markdown(_f, "d.mdx", _sm)
+check("문서 제목", "# 용어 데이터베이스 진단 결과" in _md)
+check("총평 절", "## 총평" in _md)
+check("대상 문서", "d.mdx" in _md)
+check("현황/권고 구조", "현황:" in _md and "권고:" in _md)
+check("근거 표", "| 영문 |" in _md, _md[:200])
 
 print()
 if failures:

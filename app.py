@@ -1597,43 +1597,52 @@ if st.session_state.app_mode == "Glossary 추출":
                 st.session_state.get("catalog_target_labels"),
             )
             if _findings:
-                _n_risk = sum(1 for f in _findings if f["심각도"] == "위험")
-                _n_warn = sum(1 for f in _findings if f["심각도"] == "주의")
-                _bits = []
-                if _n_risk:
-                    _bits.append(f"위험 {_n_risk}")
-                if _n_warn:
-                    _bits.append(f"주의 {_n_warn}")
+                _dsum = catalog.diagnosis_summary(_result, _findings)
+                _n_act = sum(1 for f in _findings
+                             if f["심각도"] == "조치 필요")
+                # 등재가 이 화면의 본 목적이므로 진단은 항상 접어 둔다.
+                # 접힌 한 줄에도 등급과 조치 건수는 보이게 한다.
                 with st.expander(
-                    "🔍 입력 자료 진단"
-                    + (f"  —  {' · '.join(_bits)}" if _bits else "  —  이상 없음"),
-                    expanded=bool(_n_risk),
+                    f"용어 데이터베이스 진단  ·  {_dsum['등급']}"
+                    + (f"  ·  조치 필요 {_n_act}건" if _n_act else ""),
+                    expanded=False,
                 ):
-                    _ICON = {"위험": "🔴", "주의": "🟡", "정보": "🔵"}
+                    _mcols = st.columns(len(_dsum["지표"]))
+                    for _mc, (_mk, _mv) in zip(_mcols, _dsum["지표"]):
+                        _mc.metric(_mk, _mv)
+                    st.markdown(_dsum["총평"])
+                    st.markdown("---")
                     for _fi, _f in enumerate(_findings):
                         if _fi:
-                            st.markdown("---")
-                        st.markdown(
-                            f"**{_ICON.get(_f['심각도'], '•')} {_f['제목']}**"
-                        )
-                        st.caption(_f["수치"])
-                        st.markdown(_f["설명"])
-                        st.markdown(f"**할 일** — {_f['권고']}")
+                            st.markdown("")
+                        st.markdown(f"**{_f['제목']}**")
+                        st.caption(_f["심각도"])
+                        _body = _f["현황"]
+                        if _f.get("영향"):
+                            _body += " " + _f["영향"]
+                        st.markdown(_body)
+                        st.markdown(f"**권고.** {_f['권고']}")
                         _tbl = _f.get("표")
                         if _tbl is not None and len(_tbl):
-                            st.dataframe(_tbl, use_container_width=True,
+                            st.dataframe(_tbl.head(8), use_container_width=True,
                                          hide_index=True)
+                            if len(_tbl) > 8:
+                                st.caption(
+                                    f"외 {len(_tbl) - 8}건. 전체 내역은 "
+                                    "아래 문서에 포함됩니다."
+                                )
                     st.markdown("---")
                     st.download_button(
-                        "진단 결과를 글로 내려받기",
+                        "진단 결과 문서로 내려받기",
                         data=catalog.diagnosis_markdown(
                             _findings,
                             st.session_state.get("catalog_target_name"),
+                            _dsum,
                         ).encode("utf-8"),
-                        file_name="입력자료_진단.md",
+                        file_name="용어DB_진단결과.md",
                         mime="text/markdown",
                         use_container_width=True,
-                        help="Word에 그대로 붙여넣어 고객 전달 자료로 쓸 수 있습니다.",
+                        help="Word에 붙여넣어 고객 제출 자료로 사용하실 수 있습니다.",
                     )
 
             with st.expander(
