@@ -1357,6 +1357,9 @@ if st.session_state.app_mode == "Glossary 추출":
             ),
             term_limit=_t_limit,
             pattern_limit=_p_limit,
+            existing_patterns=catalog.existing_terms_index(
+                load_patterns(current_user=st.session_state.current_user)
+            ),
         )
         _relabel_sections(_res, st.session_state.get("catalog_align"),
                           st.session_state.catalog_pick)
@@ -1365,10 +1368,9 @@ if st.session_state.app_mode == "Glossary 추출":
         _STATE_ICON = {"신규": "🆕", "동일": "✅", "충돌(기존)": "⚠️"}
         # 행이 없어도 컬럼은 만들어 둔다 — 표가 참조하는 컬럼이
         # 상황에 따라 있다 없다 하면 렌더가 깨진다.
-        if _res.terms is not None and "기존대조" in _res.terms.columns:
-            _res.terms["상태"] = _res.terms["기존대조"].map(
-                lambda v: _STATE_ICON.get(v, "")
-            )
+        for _df_ in (_res.terms, _res.patterns):
+            if _df_ is not None and "기존대조" in _df_.columns:
+                _df_["상태"] = _df_["기존대조"].map(lambda v: _STATE_ICON.get(v, ""))
         st.session_state.catalog_result = _res
         st.session_state.catalog_result_key = _key
 
@@ -1885,8 +1887,8 @@ if st.session_state.app_mode == "Glossary 추출":
                 with _tab_patterns:
                     _sel_patterns = _render_table(
                         _result.patterns,
-                        ["문형 빈도", "KO", "EN", "문맥(key)"],
-                        "patterns", "pattern",
+                        ["상태", "문형 빈도", "KO", "EN", "문맥(key)"],
+                        "patterns", "pattern", hidden=("기존대조", "기존 EN"),
                     )
 
                 # ── 두 탭의 선택을 합쳐 한 번에 검수·등재 ──────────────
@@ -1946,10 +1948,12 @@ if st.session_state.app_mode == "Glossary 추출":
                     if _n_t + _n_p:
                         # 고른 것 중 이미 등재된 건 건너뛴다 — 묻지 않는다.
                         _same = _dupe = 0
-                        if "기존대조" in _sel_terms.columns:
-                            _same = int((_sel_terms["기존대조"] == "동일").sum())
-                            _dupe = int((_sel_terms["기존대조"] == "충돌(기존)").sum())
-                        _to_save = _n_t + _n_p - _same
+                        for _sdf in (_sel_terms, _sel_patterns):
+                            if "기존대조" in _sdf.columns:
+                                _same += int((_sdf["기존대조"] == "동일").sum())
+                                _dupe += int((_sdf["기존대조"] == "충돌(기존)").sum())
+                        _picked_n = _n_t + _n_p
+                        _to_save = _picked_n - _same
                         _picked = " + ".join(
                             f"{_KIND_KO[k]} {n:,}"
                             for k, n in (("term", _n_t), ("pattern", _n_p)) if n
@@ -1981,19 +1985,27 @@ if st.session_state.app_mode == "Glossary 추출":
                                     "고르게 됩니다."
                                 )
 
+                        # 총계를 밝힌다. 예전에는 "58건 검수 후 등재
+                        # (이미 등재 72건 제외)"처럼 나와, 58건 중 72건을
+                        # 뺀다는 말로 읽혔다.
+                        _label = (
+                            f"선택 {_picked_n:,}건 중 {_to_save:,}건 검수 후 등재"
+                            if _same else f"{_to_save:,}건 검수 후 등재"
+                        )
                         if st.button(
-                            f"{_to_save:,}건 검수 후 등재"
-                            + (f" (이미 등재 {_same}건 제외)" if _same else ""),
+                            _label,
                             type="primary", key="catalog_save_all",
                             use_container_width=True,
                             disabled=_to_save == 0,
                         ):
-                            _keep = _sel_terms
-                            if "기존대조" in _keep.columns:
-                                _keep = _keep[_keep["기존대조"] != "동일"]
-                            _start_review(
-                                [("term", _keep), ("pattern", _sel_patterns)]
-                            )
+                            def _drop_same(df):
+                                if "기존대조" in df.columns:
+                                    return df[df["기존대조"] != "동일"]
+                                return df
+                            _start_review([
+                                ("term", _drop_same(_sel_terms)),
+                                ("pattern", _drop_same(_sel_patterns)),
+                            ])
                     else:
                         st.caption(
                             "각 탭에서 등재할 항목을 고르세요. "

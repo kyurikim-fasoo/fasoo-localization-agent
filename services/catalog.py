@@ -668,11 +668,15 @@ class ExtractResult:
 def analyze(pick: LanguagePick,
             existing_terms: Optional[Dict[str, set]] = None,
             term_limit: int = DEFAULT_TERM_LIMIT,
-            pattern_limit: int = DEFAULT_PATTERN_LIMIT) -> ExtractResult:
+            pattern_limit: int = DEFAULT_PATTERN_LIMIT,
+            existing_patterns: Optional[Dict[str, set]] = None) -> ExtractResult:
     """
     KO/EN 맵을 라벨·용어·패턴 후보로 가른다.
 
-    existing_terms: {ko: {en_lower, ...}} — 기존 글로서리. 신규/충돌/동일 판정용.
+    existing_terms / existing_patterns: {ko: {en_lower, …}} — 이미 등재된 것.
+    신규/충돌/동일 판정에 쓴다. 패턴에는 이 판정이 아예 없었던 탓에, 화면은
+    "이미 등재" 개수를 용어만 세고 패턴은 조용히 저장 계층에서 걸러져
+    "58건 등재(72건 제외)"처럼 앞뒤가 안 맞는 숫자가 나왔다.
     """
     existing_terms = existing_terms or {}
     keys = set(pick.ko) & set(pick.en)
@@ -745,7 +749,16 @@ def analyze(pick: LanguagePick,
         if ko in seen_sent:
             continue
         seen_sent.add(ko)
-        pat_rows.append({"KO": ko, "EN": en, "문맥(key)": k.split(".")[0]})
+        _prev = (existing_patterns or {}).get(ko) or set()
+        _status = "신규"
+        if _prev:
+            _status = ("동일" if en.lower() in {str(p).lower() for p in _prev}
+                       else "충돌(기존)")
+        pat_rows.append({
+            "KO": ko, "EN": en, "문맥(key)": k.split(".")[0],
+            "기존 EN": " / ".join(sorted(_prev)) if _prev else "",
+            "기존대조": _status,
+        })
     pattern_pool = len(pat_rows)
     patterns = _pick_patterns(pat_rows, pattern_limit)
 
