@@ -605,6 +605,55 @@ def _looks_like_term(ko: str) -> bool:
     return TERM_MIN_WORDS <= len(_WORD_RE.findall(ko)) <= TERM_MAX_WORDS
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 번역 대상 문서로 후보 좁히기
+#
+# 고객사 카탈로그는 제품 전체의 UI 문자열이라 3만 건이 넘는데, 지금 번역할
+# 문서에 실제로 나오는 건 100건 남짓이다. 예전에는 카탈로그 **내부** 빈도로
+# 상위 N건을 잘랐다 — 그 기준은 번역할 문서와 아무 상관이 없다. 실제로
+# Sparrow 카탈로그에서 105건을 등재했더니 문서에 걸린 건 1건뿐이었다.
+#
+# 그래서 번역 대상 문서를 함께 받아 "이 문서에 나오는가"로 고른다.
+#
+# 단순 부분문자열로 세면 안 된다. '하'(->Low), '분'(->m), '수'(->We)처럼 한
+# 글자짜리 라벨이 한국어 문장 어디에나 박혀 있어 상위를 통째로 덮는다.
+# 어절로 쪼갠 뒤 마지막 어절의 조사를 떼고 맞춰야, '저장소를'이 '저장소'로
+# 잡히면서도 '하십시오'가 '하'로 잡히지 않는다.
+# ──────────────────────────────────────────────────────────────────────
+
+_DOC_WORD_RE = re.compile(r"[0-9A-Za-z가-힣]+")
+DOC_NGRAM_MAX_WORDS = 6          # UI 라벨이 이보다 길면 라벨이 아니라 문장이다
+DOC_TERM_MIN_CHARS = 2           # 한 글자 라벨은 등재 위험이 이득보다 크다
+
+
+def document_ngram_counts(texts: List[str],
+                          max_words: int = DOC_NGRAM_MAX_WORDS) -> Counter:
+    """번역 대상 문서의 어절 n-gram 빈도."""
+    counts: Counter = Counter()
+    for t in texts:
+        words = _DOC_WORD_RE.findall(t or "")
+        if not words:
+            continue
+        cores = [_strip_josa(w) for w in words]
+        for n in range(1, max_words + 1):
+            for i in range(len(words) - n + 1):
+                plain = " ".join(words[i:i + n])
+                counts[plain] += 1
+                # 마지막 어절만 조사를 뗀 형태도 같은 것으로 인정한다
+                tail = " ".join(words[i:i + n - 1] + [cores[i + n - 1]])
+                if tail != plain:
+                    counts[tail] += 1
+    return counts
+
+
+def _doc_substring_count(ko: str, texts: List[str]) -> int:
+    """문장형(패턴)용. 문장은 길어서 부분문자열로 세도 오탐이 없다."""
+    ko = (ko or "").strip()
+    if not ko:
+        return 0
+    return sum(t.count(ko) for t in texts)
+
+
 # 뽑아낼 최대 개수. 후보를 수천 개 쏟아내면 검토가 불가능하고, 글로서리는
 # 모든 문단에 전수 치환되므로 커질수록 오탐도 늘어난다. '많이'가 아니라
 # '핵심만'이 목표다.
@@ -669,9 +718,14 @@ def analyze(pick: LanguagePick,
             existing_terms: Optional[Dict[str, set]] = None,
             term_limit: int = DEFAULT_TERM_LIMIT,
             pattern_limit: int = DEFAULT_PATTERN_LIMIT,
-            existing_patterns: Optional[Dict[str, set]] = None) -> ExtractResult:
+            existing_patterns: Optional[Dict[str, set]] = None,
+            target_texts: Optional[List[str]] = None) -> ExtractResult:
     """
     KO/EN 맵을 라벨·용어·패턴 후보로 가른다.
+
+    target_texts: 번역 대상 문서의 한국어 문단. 주면 후보를 **그 문서에
+    나오는 것**으로 좁히고 문서 내 빈도순으로 세운다. 안 주면 종전대로
+    카탈로그 내부 빈도로 고른다.
 
     existing_terms / existing_patterns: {ko: {en_lower, …}} — 이미 등재된 것.
     신규/충돌/동일 판정에 쓴다. 패턴에는 이 판정이 아예 없었던 탓에, 화면은
@@ -718,27 +772,64 @@ def analyze(pick: LanguagePick,
         })
 
     labels = pd.DataFrame(label_rows)
+    doc_counts = document_ngram_counts(target_texts) if target_texts else None
     if not labels.empty:
-        labels = labels.sort_values(
-            ["후보수", "출현"], ascending=[False, False]
-        ).reset_index(drop=True)
-
-        # 용어 후보 — 1:1로 대응되고, 복합어이고, 문서 곳곳에 반복되는 것.
-        shortlist = labels[
-            (labels["후보수"] == 1) & labels["KO"].map(_looks_like_term)
-        ].copy()
-        if not shortlist.empty:
-            corpus = [v.strip() for v in pick.ko.values() if v.strip()]
-            inv = _build_word_index(corpus)
-            shortlist["빈도"] = shortlist["KO"].map(
-                lambda k: _corpus_freq(k, inv, corpus)
+        if doc_counts is not None:
+            labels["문서빈도"] = labels["KO"].map(
+                lambda k: doc_counts.get(str(k).strip(), 0)
             )
-            terms = shortlist[shortlist["빈도"] >= TERM_MIN_FREQ].copy()
-            terms = terms.sort_values("빈도", ascending=False).reset_index(drop=True)
+            # 문서에 나오는 것을 위로. 충돌(후보수>1)도 이 순서를 따르므로
+            # 검수 화면에서 '이 문서에 실제로 쓰이는 충돌'이 먼저 보인다.
+            labels = labels.sort_values(
+                ["문서빈도", "후보수", "출현"], ascending=False
+            ).reset_index(drop=True)
+        else:
+            labels = labels.sort_values(
+                ["후보수", "출현"], ascending=[False, False]
+            ).reset_index(drop=True)
+
+        if doc_counts is not None:
+            # 번역 대상 문서에 나오는 라벨만.
+            #
+            # 여기서는 _looks_like_term()도 TERM_MIN_FREQ도 걸지 않는다.
+            # 그 둘은 카탈로그 전체에서 핵심을 고르는 기준이라 '저장소',
+            # '기록', '설정하기'처럼 한 어절짜리 UI 라벨을 전부 떨어뜨리는데,
+            # 매뉴얼에서 정작 자주 쓰이는 게 바로 그것들이다. 문서에 실제로
+            # 나온다는 사실 자체가 이미 충분한 근거다.
+            shortlist = labels[
+                (labels["문서빈도"] > 0)
+                & (labels["KO"].str.len() >= DOC_TERM_MIN_CHARS)
+                & (labels["후보수"] == 1)
+            ].copy()
+            if shortlist.empty:
+                shortlist["빈도"] = pd.Series(dtype="int64")
+            else:
+                corpus = [v.strip() for v in pick.ko.values() if v.strip()]
+                inv = _build_word_index(corpus)
+                shortlist["빈도"] = shortlist["KO"].map(
+                    lambda k: _corpus_freq(k, inv, corpus)
+                )
+            terms = shortlist.reset_index(drop=True)
             term_pool = len(terms)
             terms = terms.head(term_limit).reset_index(drop=True)
         else:
-            terms, term_pool = shortlist, 0
+            # 용어 후보 — 1:1로 대응되고, 복합어이고, 문서 곳곳에 반복되는 것.
+            shortlist = labels[
+                (labels["후보수"] == 1) & labels["KO"].map(_looks_like_term)
+            ].copy()
+            if not shortlist.empty:
+                corpus = [v.strip() for v in pick.ko.values() if v.strip()]
+                inv = _build_word_index(corpus)
+                shortlist["빈도"] = shortlist["KO"].map(
+                    lambda k: _corpus_freq(k, inv, corpus)
+                )
+                terms = shortlist[shortlist["빈도"] >= TERM_MIN_FREQ].copy()
+                terms = terms.sort_values(
+                    "빈도", ascending=False).reset_index(drop=True)
+                term_pool = len(terms)
+                terms = terms.head(term_limit).reset_index(drop=True)
+            else:
+                terms, term_pool = shortlist, 0
     else:
         terms, term_pool = labels.copy(), 0
 
@@ -758,9 +849,17 @@ def analyze(pick: LanguagePick,
             "KO": ko, "EN": en, "문맥(key)": k.split(".")[0],
             "기존 EN": " / ".join(sorted(_prev)) if _prev else "",
             "기존대조": _status,
+            "문서빈도": (_doc_substring_count(ko, target_texts)
+                     if target_texts else 0),
         })
     pattern_pool = len(pat_rows)
+    if target_texts:
+        # 문서에 실제로 나오는 문형을 먼저 고르게 한다.
+        pat_rows.sort(key=lambda r: -r["문서빈도"])
     patterns = _pick_patterns(pat_rows, pattern_limit)
+    if target_texts and not patterns.empty and "문서빈도" in patterns.columns:
+        patterns = patterns.sort_values(
+            "문서빈도", ascending=False).reset_index(drop=True)
 
     stats = {
         "공통키": len(keys),
@@ -770,6 +869,8 @@ def analyze(pick: LanguagePick,
         "용어풀": term_pool,          # 상한을 걸기 전 개수
         "패턴후보": len(patterns),
         "패턴풀": pattern_pool,
+        "문서적중": (int((labels["문서빈도"] > 0).sum())
+                 if doc_counts is not None and not labels.empty else 0),
         "DNT후보": int(labels["DNT"].sum()) if not labels.empty else 0,
         "신규": int((labels["기존대조"] == "신규").sum()) if not labels.empty else 0,
         "기존충돌": int((labels["기존대조"] == "충돌(기존)").sum()) if not labels.empty else 0,

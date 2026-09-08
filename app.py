@@ -1231,6 +1231,46 @@ if st.session_state.app_mode == "Glossary 추출":
         ),
     )
 
+    # 번역 대상 문서 — 후보를 이 문서에 나오는 것으로 좁힌다.
+    #
+    # 카탈로그는 제품 전체의 UI 문자열이라 수만 건인데, 한 문서에 실제로
+    # 쓰이는 건 100건 남짓이다. 이걸 안 주면 카탈로그 내부 빈도로 자르게
+    # 되고, 그 기준은 번역할 문서와 무관하다 — 실제로 105건을 등재해서
+    # 문서에 걸린 게 1건뿐이었다.
+    uploaded_target = st.file_uploader(
+        "번역할 문서 (선택) — 넣으면 이 문서에 나오는 용어만 추립니다",
+        type=["docx", "md", "markdown", "mdx"],
+        key="catalog_target_uploader",
+        help="번역 대상 국문 문서를 함께 올리면, 카탈로그 수만 건 중 "
+             "이 문서에 실제로 쓰이는 용어만 골라 빈도순으로 보여줍니다.",
+    )
+
+    if uploaded_target is not None:
+        _tsig = f"{uploaded_target.name}::{uploaded_target.size}"
+        if st.session_state.get("catalog_target_sig") != _tsig:
+            try:
+                _tpath = save_uploaded_file(uploaded_target, UPLOAD_DIR)
+                st.session_state.catalog_target_texts = \
+                    extract_korean_paragraphs(str(_tpath))
+                st.session_state.catalog_target_name = uploaded_target.name
+            except Exception as _e:
+                st.warning(f"번역 대상 문서를 읽지 못했습니다: {_e}")
+                st.session_state.catalog_target_texts = None
+                st.session_state.catalog_target_name = None
+            st.session_state.catalog_target_sig = _tsig
+    elif st.session_state.get("catalog_target_sig") is not None:
+        # 파일을 내리면 종전 방식으로 되돌린다
+        st.session_state.catalog_target_sig = None
+        st.session_state.catalog_target_texts = None
+        st.session_state.catalog_target_name = None
+
+    _target_texts = st.session_state.get("catalog_target_texts") or None
+    if _target_texts:
+        st.caption(
+            f"📄 **{st.session_state.get('catalog_target_name')}** 기준으로 "
+            f"후보를 좁힙니다 (한국어 문단 {len(_target_texts):,}개)."
+        )
+
     if uploaded_catalogs:
         _sig = "|".join(f"{f.name}:{f.size}" for f in uploaded_catalogs)
         if st.session_state.get("catalog_sig") != _sig:
@@ -1343,7 +1383,7 @@ if st.session_state.app_mode == "Glossary 추출":
     _p_limit = _NO_LIMIT if _show_all else _p_raw
     # 제품이 바뀌면 "이미 등재됨" 판정이 달라지므로 다시 분석해야 한다.
     _key = (st.session_state.get("catalog_sig"), _t_limit, _p_limit,
-            _extract_product)
+            _extract_product, st.session_state.get("catalog_target_sig"))
     if st.session_state.get("catalog_pick") is not None and \
             st.session_state.get("catalog_result_key") != _key:
         _res = catalog.analyze(
@@ -1360,6 +1400,7 @@ if st.session_state.app_mode == "Glossary 추출":
             existing_patterns=catalog.existing_terms_index(
                 load_patterns(current_user=st.session_state.current_user)
             ),
+            target_texts=_target_texts,
         )
         _relabel_sections(_res, st.session_state.get("catalog_align"),
                           st.session_state.catalog_pick)
@@ -1534,6 +1575,12 @@ if st.session_state.app_mode == "Glossary 추출":
                             f"문형별 대표 {_stats['패턴후보']:,}개 "
                             f"(문장 {_stats['패턴풀']:,}개)"))
             c4.metric("표기 충돌", f"{len(_conf):,}")
+            if _stats.get("문서적중"):
+                st.caption(
+                    f"카탈로그 라벨 {_stats['라벨 고유KO']:,}건 중 "
+                    f"**{_stats['문서적중']:,}건**이 이 문서에 나옵니다. "
+                    "아래 후보는 그중에서 고른 것입니다."
+                )
 
             with st.expander(
                 "추출 개수 조정" + ("  ·  전체 보기 켜짐" if _show_all else "")
@@ -1879,15 +1926,24 @@ if st.session_state.app_mode == "Glossary 추출":
                     # '기존대조'는 표에서 뺐다. 보이는 행은 거의 전부 '신규'라
                     # 정보량이 없기 때문 — '동일'은 위 '등록된 항목 숨기기'가
                     # 걸러내고, '충돌(기존)'은 아래 경고에서 따로 다룬다.
+                    # 번역 대상 문서를 준 경우엔 카탈로그 내부 빈도(빈도)가
+                    # 아니라 그 문서에서 몇 번 쓰이는지(문서빈도)가 판단 근거다.
+                    _tcols = (
+                        ["상태", "문서빈도", "KO", "EN", "문맥(key)", "DNT"]
+                        if "문서빈도" in _result.terms.columns
+                        else ["상태", "빈도", "KO", "EN", "문맥(key)", "DNT"]
+                    )
                     _sel_terms = _render_table(
-                        _result.terms,
-                        ["상태", "빈도", "KO", "EN", "문맥(key)", "DNT"],
+                        _result.terms, _tcols,
                         "terms", "term", hidden=("기존대조", "기존 EN"),
                     )
                 with _tab_patterns:
+                    _pcols = ["상태", "문형 빈도", "KO", "EN", "문맥(key)"]
+                    if ("문서빈도" in _result.patterns.columns
+                            and _result.patterns["문서빈도"].max() > 0):
+                        _pcols.insert(1, "문서빈도")
                     _sel_patterns = _render_table(
-                        _result.patterns,
-                        ["상태", "문형 빈도", "KO", "EN", "문맥(key)"],
+                        _result.patterns, _pcols,
                         "patterns", "pattern", hidden=("기존대조", "기존 EN"),
                     )
 

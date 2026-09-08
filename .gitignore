@@ -17,3 +17,6 @@ outputs/
 /*.docx
 /*.mdx
 /watchtower-*.json
+
+# 고객 카탈로그 진단 리포트 (고객 데이터 포함)
+/catalog_report*.xlsx

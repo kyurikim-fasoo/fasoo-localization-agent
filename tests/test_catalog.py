@@ -534,6 +534,54 @@ check("QA 프롬프트에 다의어 규칙",
       __import__("translator_engine").qa_check_batch.__doc__ or True)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 번역 대상 문서 기준으로 후보 좁히기
+#
+# 고객사 카탈로그는 제품 전체라 수만 건인데 한 문서에 쓰이는 건 극히 일부다.
+# 카탈로그 내부 빈도로 자르면 정작 필요한 라벨이 전부 잘려나간다 — 실제
+# 고객 자료에서 공식 UI 라벨 12개 중 0개가 후보에 올랐다.
+# ──────────────────────────────────────────────────────────────────────
+
+print("[13] 문서 어절 n-gram 계수")
+cnt = ct.document_ngram_counts(["저장소를 선택하고 분석 옵션을 확인합니다."])
+check("조사를 뗀 형태로 잡힌다", cnt.get("저장소") == 1, dict(cnt))
+check("두 어절 라벨도 잡힌다", cnt.get("분석 옵션") == 1, dict(cnt))
+check("어절 중간은 잡히지 않는다", "하" not in cnt, dict(cnt))
+
+print("[14] target_texts 유무에 따른 후보 선별")
+_ko = [
+    {"key": "ui.repo", "ko": "저장소"},
+    {"key": "ui.opt", "ko": "분석 옵션"},
+    {"key": "ui.low", "ko": "하"},              # 한 글자 — 등재하면 재앙
+    {"key": "ui.unused", "ko": "결제 수단"},     # 문서에 없는 라벨
+]
+_en = [
+    {"key": "ui.repo", "en": "Repository"},
+    {"key": "ui.opt", "en": "Analysis Option"},
+    {"key": "ui.low", "en": "Low"},
+    {"key": "ui.unused", "en": "Payment Method"},
+]
+_pick = ct.pick_languages([ct.parse_json("t-ko.json", _ko),
+                           ct.parse_json("t-en.json", _en)])
+_doc = ["저장소를 선택합니다.", "분석 옵션에서 저장소를 다시 확인합니다."]
+
+res = ct.analyze(_pick, target_texts=_doc)
+_terms = list(res.terms["KO"])
+check("문서에 나오는 라벨이 후보로", "저장소" in _terms and "분석 옵션" in _terms,
+      str(_terms))
+check("문서에 없는 라벨은 제외", "결제 수단" not in _terms, str(_terms))
+check("한 글자 라벨은 제외", "하" not in _terms, str(_terms))
+check("문서빈도 순 정렬", _terms[0] == "저장소", str(_terms))
+check("문서빈도 컬럼", "문서빈도" in res.terms.columns)
+check("stats에 문서적중", res.stats.get("문서적중") == 2, res.stats)
+
+print("[15] target_texts를 안 주면 종전 동작 그대로")
+res0 = ct.analyze(_pick)
+check("문서빈도 컬럼 없음", "문서빈도" not in res0.labels.columns)
+check("문서적중 0", res0.stats.get("문서적중") == 0, res0.stats)
+check("한 어절 라벨은 종전대로 용어 후보가 아님",
+      "저장소" not in list(res0.terms["KO"]), str(list(res0.terms["KO"])))
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

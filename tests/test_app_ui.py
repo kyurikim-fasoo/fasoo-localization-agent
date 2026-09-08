@@ -142,7 +142,12 @@ at.session_state["current_user"] = "SmokeTest"
 at.session_state["app_mode"] = "Glossary 추출"
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
-check("업로더 렌더", len(at.get("file_uploader")) == 1)
+check("업로더 2개 — 카탈로그 + 번역 대상",
+      len(at.get("file_uploader")) == 2,
+      str([u.label for u in at.get("file_uploader")]))
+check("번역 대상 문서 업로더",
+      any("번역할 문서" in (u.label or "")
+          for u in at.get("file_uploader")))
 check("사이드바 메뉴 버튼 존재", "Glossary 추출" in [b.label for b in at.button])
 
 print("[8] Glossary 추출 — 분석 결과 화면과 등재 버튼")
