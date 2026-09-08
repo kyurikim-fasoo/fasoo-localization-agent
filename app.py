@@ -1271,25 +1271,49 @@ if st.session_state.app_mode == "Glossary 추출":
 
     # 상한이 바뀌면 파싱은 그대로 두고 집계만 다시 한다 (0.5초).
     # '전체 보기'는 상한을 사실상 없앤다 — head()/슬라이스에 큰 수를 주면 된다.
+    # 등재 대상 제품·공개 범위를 결과 표보다 **먼저** 읽는다 —
+    # "이미 등재됨" 판정이 이 제품 기준으로 이뤄져야 하기 때문.
+    # 기본값은 Localize에서 고른 제품 (매번 다시 고르지 않게).
+    if "catalog_product" not in st.session_state:
+        _sp = st.session_state.get("selected_product")
+        st.session_state.catalog_product = _sp if _sp in products else "ALL"
+    _extract_product = st.session_state.get("catalog_product", "ALL")
+    _extract_scope = st.session_state.get("catalog_scope", "Team")
+
     _NO_LIMIT = 10 ** 9
     _show_all = st.session_state.get("catalog_show_all", False)
     _t_raw = st.session_state.get("catalog_term_limit", catalog.DEFAULT_TERM_LIMIT)
     _p_raw = st.session_state.get("catalog_pattern_limit", catalog.DEFAULT_PATTERN_LIMIT)
     _t_limit = _NO_LIMIT if _show_all else _t_raw
     _p_limit = _NO_LIMIT if _show_all else _p_raw
-    _key = (st.session_state.get("catalog_sig"), _t_limit, _p_limit)
+    # 제품이 바뀌면 "이미 등재됨" 판정이 달라지므로 다시 분석해야 한다.
+    _key = (st.session_state.get("catalog_sig"), _t_limit, _p_limit,
+            _extract_product)
     if st.session_state.get("catalog_pick") is not None and \
             st.session_state.get("catalog_result_key") != _key:
         _res = catalog.analyze(
             st.session_state.catalog_pick,
+            # 대조는 **등재할 제품** 기준이어야 한다. 예전에는 제품 인자 없이
+            # 전 제품을 가져와서, 다른 제품에 같은 KO가 있으면 "이미 등재"로
+            # 잘못 뜨고 정작 같은 제품 안의 중복은 놓쳤다.
             catalog.existing_terms_index(
-                load_terms(current_user=st.session_state.current_user)
+                load_terms(product=_extract_product,
+                           current_user=st.session_state.current_user)
             ),
             term_limit=_t_limit,
             pattern_limit=_p_limit,
         )
         _relabel_sections(_res, st.session_state.get("catalog_align"),
                           st.session_state.catalog_pick)
+        # '기존대조'(신규/동일/충돌(기존))를 한 글자 아이콘으로. 표에서 폭을
+        # 거의 쓰지 않으면서 "이미 등재됐는가"를 즉시 알 수 있게 한다.
+        _STATE_ICON = {"신규": "🆕", "동일": "✅", "충돌(기존)": "⚠️"}
+        # 행이 없어도 컬럼은 만들어 둔다 — 표가 참조하는 컬럼이
+        # 상황에 따라 있다 없다 하면 렌더가 깨진다.
+        if _res.terms is not None and "기존대조" in _res.terms.columns:
+            _res.terms["상태"] = _res.terms["기존대조"].map(
+                lambda v: _STATE_ICON.get(v, "")
+            )
         st.session_state.catalog_result = _res
         st.session_state.catalog_result_key = _key
 
@@ -1346,6 +1370,19 @@ if st.session_state.app_mode == "Glossary 추출":
 
             # Word 매뉴얼은 '얼마나 잘 맞췄는가'를 먼저 보여준다. 정렬이 무너진
             # 채로 나온 후보를 그대로 등재하면 글로서리가 오염되기 때문이다.
+            # 방금 등재한 결과를 결과 화면 맨 위에 알린다. 등재 후 표에서
+            # 그 항목이 ✅로 바뀌어 남아 있으므로 "된 건지 안 된 건지"를
+            # 다시 확인하러 갈 필요가 없다.
+            _last = st.session_state.pop("catalog_last_save", None)
+            if _last:
+                st.success(
+                    f"{_last['msg']}를 `{_last['product']}` · `{_last['scope']}` 에 "
+                    "등재했습니다."
+                    + (f"  ·  제외 {_last['skipped']}건" if _last.get("skipped") else "")
+                    + "  —  아래 표에서 ✅ 로 표시됩니다.",
+                    icon="📖",
+                )
+
             _align = st.session_state.get("catalog_align")
             _align_on = _align is not None
             if _align is not None:
@@ -1451,17 +1488,8 @@ if st.session_state.app_mode == "Glossary 추출":
                         "빈도가 낮은 쪽에는 용어가 아닌 것도 섞입니다."
                     )
 
-            _rc1, _rc2 = st.columns(2)
-            with _rc1:
-                _extract_product = st.selectbox(
-                    "제품", options=["ALL"] + products, key="catalog_product",
-                    help="기존 용어와 섞이지 않도록 분리해두면 좋습니다.",
-                )
-            with _rc2:
-                _extract_scope = st.selectbox(
-                    "공개 범위", options=["Team", "Personal"], key="catalog_scope",
-                    help="Team = 모두가 사용 · Personal = 본인만",
-                )
+            # 제품·공개 범위 선택은 등재 버튼 바로 위로 옮겼다. 무엇이 어디로
+            # 가는지 모른 채 버튼을 누르는 일을 막기 위함.
             _source_name = " + ".join(pf.name for pf in st.session_state.catalog_parsed)
 
             # 편집기에 한 번에 올릴 최대 행 수. 수천 행을 체크박스로 뿌리면
@@ -1659,7 +1687,13 @@ if st.session_state.app_mode == "Glossary 추출":
                             counts = _register(pd.DataFrame(out), kind)
                             _msg.append(f"{_KIND_KO[kind]} {counts['inserted']}개")
                         st.session_state.pop("catalog_review", None)
-                        st.success(" · ".join(_msg) + "를 등재했습니다.")
+                        st.session_state["catalog_last_save"] = {
+                            "msg": " · ".join(_msg),
+                            "product": _extract_product,
+                            "scope": _extract_scope,
+                            "skipped": skipped,
+                        }
+                        # 다시 분석해 방금 등재한 항목이 ✅로 바뀌게 한다.
                         st.session_state.pop("catalog_result_key", None)
                     except Exception as e:
                         st.error(f"등재 오류: {e}")
@@ -1688,8 +1722,11 @@ if st.session_state.app_mode == "Glossary 추출":
                         label_visibility="collapsed",
                     )
                 with f3:
+                    # 기본값을 False로 둔다. True면 등재 직후 그 항목이 표에서
+                    # **사라져** 성공했는지 알 수 없다. 보이되 상태로 구분한다.
                     skip_dup = st.checkbox(
-                        "등록된 항목 숨기기", value=True, key=f"catalog_skip_{key}",
+                        "등록된 항목 숨기기", value=False, key=f"catalog_skip_{key}",
+                        help="이미 같은 표기로 등재된 항목(✅)을 목록에서 감춥니다.",
                     )
 
                 view = df
@@ -1728,6 +1765,12 @@ if st.session_state.app_mode == "Glossary 추출":
                     )
                 if "DNT" in cols:
                     col_cfg["DNT"] = st.column_config.CheckboxColumn("DNT", disabled=True)
+                if "상태" in cols:
+                    col_cfg["상태"] = st.column_config.TextColumn(
+                        "상태", disabled=True, width="small",
+                        help="🆕 신규 · ✅ 이미 등재(같은 제품·같은 표기) · "
+                             "⚠️ 표기 충돌(기존과 영문이 다름)",
+                    )
                 for _num in ("빈도", "후보수"):
                     if _num in cols:
                         col_cfg[_num] = st.column_config.NumberColumn(
@@ -1757,7 +1800,7 @@ if st.session_state.app_mode == "Glossary 추출":
                     # 걸러내고, '충돌(기존)'은 아래 경고에서 따로 다룬다.
                     _sel_terms = _render_table(
                         _result.terms,
-                        ["빈도", "KO", "EN", "문맥(key)", "DNT"],
+                        ["상태", "빈도", "KO", "EN", "문맥(key)", "DNT"],
                         "terms", "term", hidden=("기존대조", "기존 EN"),
                     )
                 with _tab_patterns:
@@ -1769,39 +1812,83 @@ if st.session_state.app_mode == "Glossary 추출":
 
                 # ── 두 탭의 선택을 합쳐 한 번에 검수·등재 ──────────────
                 _n_t, _n_p = len(_sel_terms), len(_sel_patterns)
-                if _n_t + _n_p:
-                    if "기존대조" in _sel_terms.columns:
-                        _dup = _sel_terms[_sel_terms["기존대조"] == "충돌(기존)"]
-                        if not _dup.empty:
-                            st.warning(
-                                f"기존 글로서리와 영어가 다른 항목 {len(_dup)}건 — "
-                                "다음 검수 단계에서 어느 쪽을 쓸지 고르게 됩니다.",
-                                icon="⚠️",
-                            )
-                            st.dataframe(
-                                _dup[["KO", "EN", "기존 EN"]].rename(
-                                    columns={"EN": "카탈로그", "기존 EN": "기존 글로서리"}
-                                ),
-                                use_container_width=True, hide_index=True,
-                            )
-                    _picked = " + ".join(
-                        f"{_KIND_KO[k]} {n:,}"
-                        for k, n in (("term", _n_t), ("pattern", _n_p)) if n
-                    )
-                    if st.button(
-                        f"{_picked} = {_n_t + _n_p:,}건 검수 후 등재"
-                        if _n_t and _n_p else f"{_picked}건 검수 후 등재",
-                        type="primary", key="catalog_save_all",
-                        use_container_width=True,
-                    ):
-                        _start_review(
-                            [("term", _sel_terms), ("pattern", _sel_patterns)]
+
+                # ── 등재 요약 ────────────────────────────────────────
+                # 제품·공개 범위 선택과 "무엇이 몇 건 어디로 가는가"를 버튼
+                # 바로 위에 모은다. 예전에는 이 선택지가 표 위쪽에 떨어져
+                # 있어서, 무엇이 어디로 가는지 모른 채 버튼을 눌렀다.
+                with st.container(border=True):
+                    st.markdown("##### 📥 등재 대상")
+                    _dc1, _dc2 = st.columns(2)
+                    with _dc1:
+                        st.selectbox(
+                            "제품", options=["ALL"] + products,
+                            key="catalog_product",
+                            help="이 제품 기준으로 중복을 판정하고 등재합니다.",
                         )
-                else:
-                    st.caption(
-                        "각 탭에서 등재할 항목을 고르세요. "
-                        "용어와 패턴을 함께 골라 한 번에 검수·등재할 수 있습니다."
-                    )
+                    with _dc2:
+                        st.selectbox(
+                            "공개 범위", options=["Team", "Personal"],
+                            key="catalog_scope",
+                            help="Team = 모두가 사용 · Personal = 본인만",
+                        )
+
+                    if _n_t + _n_p:
+                        # 고른 것 중 이미 등재된 건 건너뛴다 — 묻지 않는다.
+                        _same = _dupe = 0
+                        if "기존대조" in _sel_terms.columns:
+                            _same = int((_sel_terms["기존대조"] == "동일").sum())
+                            _dupe = int((_sel_terms["기존대조"] == "충돌(기존)").sum())
+                        _to_save = _n_t + _n_p - _same
+                        _picked = " + ".join(
+                            f"{_KIND_KO[k]} {n:,}"
+                            for k, n in (("term", _n_t), ("pattern", _n_p)) if n
+                        )
+                        st.markdown(
+                            f"**{_picked}** 을 "
+                            f"`{_extract_product}` · `{_extract_scope}` 에 등재합니다."
+                        )
+                        _bits = [f"🆕 신규 {_to_save - _dupe:,}"]
+                        if _same:
+                            _bits.append(f"✅ 이미 등재 {_same:,} (건너뜀)")
+                        if _dupe:
+                            _bits.append(f"⚠️ 표기 충돌 {_dupe:,} (검수에서 선택)")
+                        st.caption("   ·   ".join(_bits))
+
+                        if _dupe:
+                            with st.expander(f"⚠️ 표기가 다른 {_dupe}건 미리 보기"):
+                                st.dataframe(
+                                    _sel_terms[
+                                        _sel_terms["기존대조"] == "충돌(기존)"
+                                    ][["KO", "EN", "기존 EN"]].rename(
+                                        columns={"EN": "이번 후보",
+                                                 "기존 EN": "기존 글로서리"}
+                                    ),
+                                    use_container_width=True, hide_index=True,
+                                )
+                                st.caption(
+                                    "검수 단계에서 항목마다 어느 쪽을 쓸지 "
+                                    "고르게 됩니다."
+                                )
+
+                        if st.button(
+                            f"{_to_save:,}건 검수 후 등재"
+                            + (f" (이미 등재 {_same}건 제외)" if _same else ""),
+                            type="primary", key="catalog_save_all",
+                            use_container_width=True,
+                            disabled=_to_save == 0,
+                        ):
+                            _keep = _sel_terms
+                            if "기존대조" in _keep.columns:
+                                _keep = _keep[_keep["기존대조"] != "동일"]
+                            _start_review(
+                                [("term", _keep), ("pattern", _sel_patterns)]
+                            )
+                    else:
+                        st.caption(
+                            "각 탭에서 등재할 항목을 고르세요. "
+                            "용어와 패턴을 함께 골라 한 번에 검수·등재할 수 있습니다."
+                        )
 
             # ── 표기가 갈리는 항목 ────────────────────────────────────
             # 표로 두면 안 된다. Streamlit의 SelectboxColumn은 컬럼 전체에
