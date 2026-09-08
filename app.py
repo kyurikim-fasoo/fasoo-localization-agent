@@ -1301,7 +1301,17 @@ if st.session_state.app_mode == "Glossary 추출":
     # 등재 대상 제품·공개 범위를 결과 표보다 **먼저** 읽는다 —
     # "이미 등재됨" 판정이 이 제품 기준으로 이뤄져야 하기 때문.
     # 기본값은 Localize에서 고른 제품 (매번 다시 고르지 않게).
-    if "catalog_product" not in st.session_state:
+    # 새로 추가한 제품을 여기서 반영한다.
+    #
+    # 위젯 키(catalog_product)는 그 위젯이 만들어진 **뒤에는** 대입할 수 없다
+    # (StreamlitWidgetAlreadyInstantiatedError). 제품 추가 버튼은 selectbox보다
+    # 아래에서 눌리므로, 거기서 바로 넣으면 터진다. 그래서 버튼은 대기 값만
+    # 남기고, 위젯이 만들어지기 전인 여기서 옮겨 담는다.
+    _pending_product = st.session_state.pop("catalog_product_pending", None)
+    if _pending_product:
+        st.session_state.catalog_product = _pending_product
+        st.session_state.catalog_new_product = ""     # 입력칸 비우기
+    elif "catalog_product" not in st.session_state:
         _sp = st.session_state.get("selected_product")
         st.session_state.catalog_product = _sp if _sp in products else "ALL"
     _extract_product = st.session_state.get("catalog_product", "ALL")
@@ -1889,9 +1899,11 @@ if st.session_state.app_mode == "Glossary 추출":
                                        key="catalog_add_product"):
                             _ok, _m = add_product(_new_name)
                             if _ok:
-                                # 새로 만든 제품을 바로 선택 상태로
-                                st.session_state.catalog_product = _new_name.strip()
-                                st.session_state.pop("catalog_new_product", None)
+                                # 여기서 catalog_product에 바로 대입하면
+                                # 위젯이 이미 만들어진 뒤라 예외가 난다.
+                                # 대기 값만 남기고, 다음 실행 초입에서 반영한다.
+                                st.session_state["catalog_product_pending"] = \
+                                    _new_name.strip()
                                 st.toast(_m, icon="✅")
                                 st.rerun()
                             else:

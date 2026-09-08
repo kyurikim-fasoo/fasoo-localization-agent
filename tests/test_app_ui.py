@@ -454,6 +454,57 @@ check("안내 문구", any("등재하지 않습니다" in str(c.value) for c in 
       str([str(c.value)[:30] for c in at2.caption]))
 
 
+print("[17] 새 제품 추가 — 위젯 키 대입 사고 방지")
+# 위젯 키(catalog_product)는 그 위젯이 만들어진 뒤에는 대입할 수 없다.
+# 추가 버튼이 selectbox보다 아래에 있어 실제로 여기서 터졌었다
+# (StreamlitWidgetAlreadyInstantiatedError). 설정 파일은 백업 후 복원한다.
+import shutil as _sh
+_CFG = ROOT / "product_config.json"
+_BAK = _CFG.with_suffix(".json.uitestbak")
+_sh.copy(_CFG, _BAK)
+try:
+    _ko = {"a.1": "접근 정책", "a.2": "접근 정책 설정",
+           "a.3": "접근 정책 목록", "a.4": "접근 정책 삭제"}
+    _en = {"a.1": "access policy", "a.2": "access policy settings",
+           "a.3": "access policy list", "a.4": "delete access policy"}
+    import services.catalog as _ct
+    _pk = _ct.pick_languages([_ct.parse_json("ko.json", _ko),
+                              _ct.parse_json("en.json", _en)])
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["current_user"] = "SmokeTest"
+    at.session_state["app_mode"] = "Glossary 추출"
+    at.session_state["catalog_sig"] = "addprod"
+    at.session_state["catalog_parsed"] = [_ct.parse_json("ko.json", _ko)]
+    at.session_state["catalog_pick"] = _pk
+    at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+    at.run()
+
+    _ti = [t for t in at.text_input if t.label == "새 제품 이름"]
+    check("새 제품 입력칸", bool(_ti), str([t.label for t in at.text_input]))
+    at2 = _ti[0].set_value("UI테스트제품").run()
+    at3 = [b for b in at2.button if b.label == "추가"][0].click().run()
+    check("추가 시 예외 없음", not at3.exception,
+          str(at3.exception[0].value)[:160] if at3.exception else "")
+    _sel = [x for x in at3.selectbox if x.label == "제품"]
+    check("새 제품이 선택 상태", _sel and _sel[0].value == "UI테스트제품",
+          _sel[0].value if _sel else "없음")
+    check("옵션에도 포함", _sel and "UI테스트제품" in _sel[0].options)
+    _ti2 = [t for t in at3.text_input if t.label == "새 제품 이름"]
+    check("입력칸 비워짐", _ti2 and _ti2[0].value == "",
+          repr(_ti2[0].value) if _ti2 else "")
+
+    at4 = _ti2[0].set_value("UI테스트제품").run()
+    at5 = [b for b in at4.button if b.label == "추가"][0].click().run()
+    check("중복 추가도 예외 없음", not at5.exception,
+          str(at5.exception[0].value)[:160] if at5.exception else "")
+    check("중복 경고 표시",
+          any("이미 있습니다" in str(w.value) for w in at5.warning),
+          str([str(w.value)[:40] for w in at5.warning]))
+finally:
+    _sh.copy(_BAK, _CFG)
+    _BAK.unlink()
+
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")
