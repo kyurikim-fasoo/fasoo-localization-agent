@@ -1,0 +1,7 @@
+# glossary.db 는 SQLite 바이너리다. git이 병합할 수 없어서 두 사람이 각자
+# 용어를 등재하면 매번 충돌이 났고, --ours / --theirs 로 해소하면 반대쪽
+# 작업이 통째로 사라졌다 (그 사실이 눈에 보이지도 않는다).
+#
+# 아래 드라이버가 두 쪽을 합쳐준다. 등록은 각자 한 번:
+#     python scripts/setup_merge_driver.py
+data/glossary.db merge=glossarydb

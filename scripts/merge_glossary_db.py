@@ -73,13 +73,19 @@ def _key(cols: list[str], row: tuple, keys: tuple[str, ...]) -> tuple:
     )
 
 
-def merge_dbs(ours: Path, theirs: Path, out: Path) -> dict:
+def merge_dbs(ours: Path, theirs: Path, out: Path,
+              base: Path | None = None) -> dict:
     """
     ours를 바탕으로 theirs에만 있는 행을 얹고, 남은 중복을 정리한다.
 
     "같은 항목"의 기준은 TABLES에 적힌 컬럼 조합이다. id는 양쪽이 서로 다르게
     매기므로 비교에 쓰지 않는다 — id로 비교하면 같은 용어가 서로 다른 항목으로
     보여 중복이 쌓인다.
+
+    base(공통 조상)를 주면 **삭제도 존중한다.** base에 있었는데 한쪽에서
+    사라진 항목은 그쪽이 일부러 지운 것이므로 되살리지 않는다. base가 없으면
+    단순 합집합이라, 한쪽에서 지운 항목이 반대쪽에서 되살아난다 — 중복 정리
+    커밋이 통째로 무효가 되는 일이 실제로 일어날 수 있다.
     """
     shutil.copy(ours, out)
     con = sqlite3.connect(out)
@@ -90,11 +96,19 @@ def merge_dbs(ours: Path, theirs: Path, out: Path) -> dict:
         idx = {c: i for i, c in enumerate(cols)}
         insert_cols = [c for c in cols if c != "id"]
 
-        seen = {_key(cols, r, keys) for r in ours_rows}
+        ours_keys = {_key(cols, r, keys) for r in ours_rows}
+        their_keys = {_key(cols, r, keys) for r in their_rows}
+        deleted: set = set()
+        if base is not None:
+            base_keys = {_key(cols, r, keys) for r in _rows(base, table)[1]}
+            # 한쪽에서 지운 것 = base에 있었는데 그쪽에 없는 것
+            deleted = (base_keys - ours_keys) | (base_keys - their_keys)
+
+        seen = set(ours_keys)
         added = 0
         for r in their_rows:
             k = _key(cols, r, keys)
-            if k in seen:
+            if k in seen or k in deleted:
                 continue
             seen.add(k)
             con.execute(
@@ -103,6 +117,14 @@ def merge_dbs(ours: Path, theirs: Path, out: Path) -> dict:
                 tuple(r[idx[c]] for c in insert_cols),
             )
             added += 1
+
+        # theirs가 지운 것이 ours에 남아 있으면 그것도 반영한다
+        removed = 0
+        if deleted:
+            for r in _rows(out, table)[1]:
+                if _key(cols, r, keys) in deleted:
+                    con.execute(f"DELETE FROM {table} WHERE id=?", (r[idx["id"]],))
+                    removed += 1
         con.commit()
 
         # ours 쪽에 이미 중복이 있었다면 그것도 정리한다
@@ -115,14 +137,53 @@ def merge_dbs(ours: Path, theirs: Path, out: Path) -> dict:
 
         report[table] = {
             "ours": len(ours_rows), "theirs": len(their_rows),
-            "added": added, "dupes": len(dupes),
+            "added": added, "removed": removed, "dupes": len(dupes),
             "after": con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
         }
     con.close()
     return report
 
 
+def run_as_git_driver(base: str, ours: str, theirs: str) -> int:
+    """
+    git 병합 드라이버로 호출됐을 때. 결과를 %A(ours 경로)에 써야 한다.
+
+    등록:
+        .gitattributes 에  data/glossary.db merge=glossarydb
+        git config merge.glossarydb.name "glossary db union merge"
+        git config merge.glossarydb.driver \
+            "python scripts/merge_glossary_db.py --driver %O %A %B"
+
+    이렇게 해두면 git pull 때 충돌이 아예 나지 않는다. 사람이 매번 어느
+    쪽을 고를지 판단할 필요가 없고, 무엇보다 **한쪽을 고르다 상대의 용어를
+    통째로 잃는 사고**가 구조적으로 사라진다.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="glossary_driver_"))
+    try:
+        out = tmp / "merged.db"
+        base_path = Path(base) if base and Path(base).stat().st_size else None
+        report = merge_dbs(Path(ours), Path(theirs), out, base=base_path)
+        shutil.copy(out, ours)          # %A 에 결과를 쓴다
+        for table, st_ in report.items():
+            print(f"[glossary-merge] {table}: +{st_['added']} "
+                  f"-{st_['removed']} 중복 {st_['dupes']} → {st_['after']}",
+                  file=sys.stderr)
+        return 0                        # 0 = 충돌 없이 병합됨
+    except Exception as e:
+        print(f"[glossary-merge] 실패: {e}", file=sys.stderr)
+        return 1                        # git이 충돌로 표시하고 사람에게 넘긴다
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main(argv: list[str]) -> int:
+    if "--driver" in argv:
+        rest = argv[argv.index("--driver") + 1:]
+        if len(rest) < 3:
+            print("사용: --driver %O %A %B", file=sys.stderr)
+            return 1
+        return run_as_git_driver(rest[0], rest[1], rest[2])
+
     dry = "--dry-run" in argv
     tmp = Path(tempfile.mkdtemp(prefix="glossary_merge_"))
     try:
@@ -131,10 +192,14 @@ def main(argv: list[str]) -> int:
             print("충돌 상태가 아닙니다. 머지 도중에 실행하세요.")
             return 2
 
-        report = merge_dbs(ours, theirs, tmp / "merged.db")
+        base = tmp / "base.db"
+        has_base = _stage(1, base)
+        report = merge_dbs(ours, theirs, tmp / "merged.db",
+                           base=base if has_base else None)
         for table, st_ in report.items():
             print(f"  {table:<9} ours {st_['ours']:>5} + theirs 신규 {st_['added']:>4}"
-                  f" - 중복 {st_['dupes']:>3}  →  {st_['after']:>5}")
+                  f" - 삭제반영 {st_['removed']:>3} - 중복 {st_['dupes']:>3}"
+                  f"  →  {st_['after']:>5}")
 
         if dry:
             print("\n--dry-run: 파일을 바꾸지 않았습니다.")
