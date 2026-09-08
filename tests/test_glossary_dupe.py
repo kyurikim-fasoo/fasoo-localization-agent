@@ -74,17 +74,26 @@ check("2회차 0건 삽입", c2["inserted"] == 0, str(c2))
 check("2회차 2건 건너뜀", c2.get("skipped") == 2, str(c2))
 check("총 2행 유지", len(g.load_patterns(current_user="u")) == 2)
 
-print("[3] 제품·소유자가 다르면 별개 항목")
+print("[3] 제품·공개범위가 달라도 KO·EN이 같으면 중복")
+# 같은 국문이 같은 영문으로 번역된다면 어느 제품·범위에 있든 새로 넣을 이유가
+# 없다. 제품별로 갈라야 하는 것은 영문이 다른 경우뿐이다.
 d = g.save_terms_from_dataframe(_rows("term", product="Fireside"),
                                 view_ids=set(), current_user="u")
-check("제품이 다르면 새로 들어간다", d["inserted"] == 2, str(d))
-check("총 4행", len(g.load_terms(current_user="u")) == 4,
+check("제품이 달라도 중복으로 본다", d["inserted"] == 0 and d["skipped"] == 2, str(d))
+check("총 2행 유지", len(g.load_terms(current_user="u")) == 2,
       len(g.load_terms(current_user="u")))
 
 _mine = _rows("term")
 _mine["Scope"] = ["Personal", "Personal"]
 e = g.save_terms_from_dataframe(_mine, view_ids=set(), current_user="u")
-check("소유자가 다르면 새로 들어간다", e["inserted"] == 2, str(e))
+check("공개 범위가 달라도 중복으로 본다",
+      e["inserted"] == 0 and e["skipped"] == 2, str(e))
+
+# 영문이 다르면 제품별로 따로 남아야 한다 (검출: FDR=detection / FSM=Detection)
+_diff = _rows("term", product="FSM")
+_diff["EN"] = ["Access Policy", "User Group"]
+f2 = g.save_terms_from_dataframe(_diff, view_ids=set(), current_user="u")
+check("영문이 다르면 새로 들어간다", f2["inserted"] == 2, str(f2))
 
 print("[4] 한 번의 호출 안에서 같은 행이 두 번 와도")
 # 아직 DB에 없는 값으로 — 같은 배치 안에 같은 행이 두 번 든 경우

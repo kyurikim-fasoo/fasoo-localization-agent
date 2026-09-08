@@ -219,16 +219,20 @@ def save_terms_from_dataframe(
         # 권한 체크를 위해 id → owner 매핑을 미리 조회
         owner_by_id = {r["id"]: r["owner"] for r in conn.execute("SELECT id, owner FROM terms")}
         existing_ids = set(owner_by_id)
-        # 이미 있는 (KO, EN, 제품, 소유자) 조합. 새 행을 넣기 전에 여기 걸리면
-        # 건너뛴다.
+        # 이미 있는 (KO, EN) 조합. 새 행을 넣기 전에 여기 걸리면 건너뛴다.
+        #
+        # 제품과 공개 범위는 **일부러 보지 않는다.** 같은 국문이 같은 영문으로
+        # 번역된다면 ALL에 있든 특정 제품에 있든, Team이든 Personal이든 새로
+        # 넣을 이유가 없다. 제품별로 갈라야 하는 것은 영문이 다른 경우인데
+        # (검출: FDR=detection / FSM=Detection) 그건 EN이 달라 여기 안 걸린다.
         #
         # 화면에서 "이미 등재됨"을 보여주는 것만으로는 중복을 막지 못한다.
         # 다른 화면에서 부르거나, 화면이 보여주는 기준(제품 등)이 저장 기준과
         # 어긋나면 그대로 또 들어간다. 실제로 같은 문장이 10번까지 쌓였다.
         # 최종 방어선은 저장 계층이어야 한다.
         existing_keys = {
-            (r["ko"], r["en"], (r["product"] or "").lower(), r["owner"] or "")
-            for r in conn.execute("SELECT ko, en, product, owner FROM terms")
+            (r["ko"], r["en"])
+            for r in conn.execute("SELECT ko, en FROM terms")
         }
 
         edited_ids: set[int] = set()
@@ -267,8 +271,8 @@ def save_terms_from_dataframe(
                 # 신규 row: Scope 지정 없으면 current_user (Personal) 기본값
                 if not scope:
                     target_owner = current_user
-                # 같은 (KO, EN, 제품, 소유자)가 이미 있으면 넣지 않는다.
-                key = (ko, en, (product or '').lower(), target_owner or '')
+                # 같은 (KO, EN)이면 제품·공개 범위와 무관하게 넣지 않는다.
+                key = (ko, en)
                 if key in existing_keys:
                     counts['skipped'] += 1
                     continue
@@ -309,10 +313,11 @@ def save_patterns_from_dataframe(
     with db_session() as conn:
         owner_by_id = {r["id"]: r["owner"] for r in conn.execute("SELECT id, owner FROM patterns")}
         existing_ids = set(owner_by_id)
-        # terms와 같은 이유 — 패턴에는 화면 단계의 중복 표시조차 없었다.
+        # terms와 같은 이유. 여기도 공개 범위는 보지 않는다 —
+        # 패턴에는 화면 단계의 중복 표시조차 없었다.
         existing_keys = {
-            (r["ko"], r["en"], r["owner"] or "")
-            for r in conn.execute("SELECT ko, en, owner FROM patterns")
+            (r["ko"], r["en"])
+            for r in conn.execute("SELECT ko, en FROM patterns")
         }
 
         edited_ids: set[int] = set()
@@ -345,8 +350,8 @@ def save_patterns_from_dataframe(
             else:
                 if not scope:
                     target_owner = current_user
-                # 같은 (KO, EN, 소유자)가 이미 있으면 넣지 않는다.
-                key = (ko, en, target_owner or '')
+                # 같은 (KO, EN)이면 제품·공개 범위와 무관하게 넣지 않는다.
+                key = (ko, en)
                 if key in existing_keys:
                     counts['skipped'] += 1
                     continue

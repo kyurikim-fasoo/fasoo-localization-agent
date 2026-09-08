@@ -33,9 +33,14 @@ DB = ROOT / "data" / "glossary.db"
 BACKUPS = ROOT / "data" / "backups"
 
 # (테이블, 같은 항목으로 볼 컬럼)
+#
+# 제품·공개 범위는 보지 않는다. 같은 국문이 같은 영문으로 번역된다면 어느
+# 제품·범위에 있든 같은 항목이다. 제품별로 갈라야 하는 것은 영문이 다른
+# 경우뿐인데(검출: FDR=detection / FSM=Detection) 그건 EN이 달라 안 걸린다.
+# 저장 계층(services/glossary.py)의 중복 판정과 같은 기준을 쓴다.
 TABLES = (
-    ("terms", ("ko", "en", "product", "owner")),
-    ("patterns", ("ko", "en", "owner")),
+    ("terms", ("ko", "en")),
+    ("patterns", ("ko", "en")),
 )
 
 

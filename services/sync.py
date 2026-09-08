@@ -109,6 +109,20 @@ def sync_db(commit_message: str = "Auto-update glossary DB") -> None:
     push_file_to_github(DB_PATH, "data/glossary.db", commit_message)
 
 
+def sync_products(commit_message: str = "Auto-update product list") -> None:
+    """
+    product_config.json을 GitHub에 올린다.
+
+    Cloud의 컨테이너 디스크는 재부팅마다 git 체크아웃으로 되돌아간다. 그래서
+    화면에서 추가한 제품이 파일에만 쓰이면 다음 재부팅에 사라진다 — 실제로
+    "새 제품을 추가했는데 Localize 목록에 없다"는 증상이 이것이었다.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    push_file_to_github(root / "product_config.json",
+                        "product_config.json", commit_message)
+
+
 def sync_users(commit_message: str = "Auto-update users list") -> None:
     """Push the users.json registry to GitHub."""
     from services.users import USERS_PATH

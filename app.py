@@ -108,6 +108,13 @@ def add_product(name: str) -> tuple[bool, str]:
     cfg[name] = {"default_glossaries": [], "default_patterns": []}
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+    # Cloud에서는 파일만 쓰면 재부팅 때 사라진다. 글로서리 DB와 같은 방식으로
+    # GitHub에 올려둬야 다음 콜드스타트에서도 남는다.
+    try:
+        from services.sync import sync_products
+        sync_products(f"product: + {name}")
+    except Exception:
+        pass          # 동기화 실패가 제품 추가 자체를 막지는 않는다
     return True, f"제품 «{name}» 을(를) 추가했습니다."
 
 

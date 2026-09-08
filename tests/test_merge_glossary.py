@@ -91,14 +91,21 @@ check("공통 항목이 두 번 들어가지 않음", len(mt) == 3 and len(mp) =
 check("신규 건수 보고", r["terms"]["added"] == 1 and r["patterns"]["added"] == 1,
       str(r))
 
-print("[2] 같은 KO라도 제품·소유자가 다르면 별개")
+print("[2] 제품·소유자가 달라도 KO·EN이 같으면 한 항목")
 ours2 = make(TMP / "o2.db", [("설정", "settings", "FED", "")], [])
 theirs2 = make(TMP / "t2.db",
                [("설정", "settings", "Fireside", ""),
                 ("설정", "settings", "FED", "kyuri")], [])
 merge_dbs(ours2, theirs2, TMP / "m2.db")
 mt2, _ = keys(TMP / "m2.db")
-check("제품이 다르면 따로 남는다", len(mt2) == 3, str(mt2))
+check("제품·범위가 달라도 하나로", len(mt2) == 1, str(mt2))
+
+# 영문이 다르면 제품별로 따로 남아야 한다
+ours2b = make(TMP / "o2b.db", [("검출", "detection", "FDR", "")], [])
+theirs2b = make(TMP / "t2b.db", [("검출", "Detection", "FSM", "")], [])
+merge_dbs(ours2b, theirs2b, TMP / "m2b.db")
+mt2b, _ = keys(TMP / "m2b.db")
+check("영문이 다르면 둘 다 남는다", len(mt2b) == 2, str(mt2b))
 
 print("[3] 한쪽에 이미 중복이 있어도 정리된다")
 ours3 = make(TMP / "o3.db",
