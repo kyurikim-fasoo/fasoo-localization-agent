@@ -505,6 +505,78 @@ finally:
     _BAK.unlink()
 
 
+print("[18] 제품 추가 → 등재 → Localize 이동 전체 흐름")
+# 실제로 세 군데가 동시에 깨져 있던 경로다.
+#  · 제품 선택을 위젯 키에 담아, 검수 화면이 뜨는 동안 값이 사라졌다
+#  · 등재 후 rerun이 없어 결과 배너와 갱신된 표가 안 보였다
+#  · 배너 상태를 그리면서 pop 해, 배너 안 버튼의 클릭이 무시됐다
+import shutil as _sh2, json as _json2
+_CFG2 = ROOT / "product_config.json"
+_B2 = _CFG2.with_suffix(".json.flowbak")
+_DB2 = ROOT / "data" / "glossary.db"
+_DBB2 = ROOT / "data" / "glossary.db.flowbak"
+_sh2.copy(_CFG2, _B2); _sh2.copy(_DB2, _DBB2)
+try:
+    import services.catalog as _ct2
+    _orig_review = _ct2.review_entries
+    _ct2.review_entries = lambda *a, **k: {}      # LLM 검수 스텁
+    _NAME2 = "흐름테스트제품"
+    _ko2 = {"a.1": "접근 정책", "a.2": "접근 정책 설정",
+            "a.3": "접근 정책 목록", "a.4": "접근 정책 삭제"}
+    _en2 = {"a.1": "access policy", "a.2": "access policy settings",
+            "a.3": "access policy list", "a.4": "delete access policy"}
+    _pk2 = _ct2.pick_languages([_ct2.parse_json("ko.json", _ko2),
+                                _ct2.parse_json("en.json", _en2)])
+    at = AppTest.from_file(APP, default_timeout=180)
+    at.session_state["current_user"] = "SmokeTest"
+    at.session_state["app_mode"] = "Glossary 추출"
+    at.session_state["catalog_sig"] = "flow"
+    at.session_state["catalog_parsed"] = [_ct2.parse_json("ko.json", _ko2)]
+    at.session_state["catalog_pick"] = _pk2
+    at.session_state["catalog_pick_labels"] = ("ko.json", "en.json", [])
+    at.run()
+
+    at = [t for t in at.text_input if t.label == "새 제품 이름"][0]         .set_value(_NAME2).run()
+    at = [b for b in at.button if b.label == "추가"][0].click().run()
+    check("제품이 설정에 추가됨",
+          _NAME2 in _json2.loads(_CFG2.read_text(encoding="utf-8")))
+
+    at = [c for c in at.checkbox if "전체 선택" in str(c.label)][0].check().run()
+    _save = [b for b in at.button if "검수 후 등재" in b.label]
+    check("등재 버튼", bool(_save), str([b.label for b in at.button]))
+    at = _save[0].click().run()
+    at = [b for b in at.button if "확정하고" in b.label][0].click().run()
+    check("등재 후 예외 없음", not at.exception,
+          str(at.exception[0].value)[:160] if at.exception else "")
+
+    check("등재 후 결과 배너",
+          any(_NAME2 in str(x.value) for x in at.success),
+          str([str(x.value)[:60] for x in at.success]))
+    check("등재 후 등재 대상 카드 복귀",
+          any("등재 대상" in str(m.value) for m in at.markdown))
+    _sel = [x for x in at.selectbox if x.label == "제품"]
+    check("제품 선택이 유지됨", _sel and _sel[0].value == _NAME2,
+          _sel[0].value if _sel else "selectbox 없음")
+
+    _go = [b for b in at.button if "이 글로서리로 Localize" in b.label]
+    check("배너에 이동 버튼", bool(_go), str([b.label for b in at.button]))
+    at = _go[0].click().run()
+    check("Localize로 이동", at.session_state["app_mode"] == "Localize",
+          at.session_state["app_mode"])
+    check("제품이 함께 넘어감",
+          at.session_state["selected_product"] == _NAME2,
+          repr(at.session_state["selected_product"]))
+    _lp = [x for x in at.selectbox if x.label == "제품"]
+    check("Localize 옵션에 새 제품", _lp and _NAME2 in _lp[0].options,
+          str(_lp[0].options[:4]) if _lp else "없음")
+    check("Localize에서 그 제품이 선택됨", _lp and _lp[0].value == _NAME2,
+          _lp[0].value if _lp else "없음")
+finally:
+    _ct2.review_entries = _orig_review
+    _sh2.copy(_B2, _CFG2); _B2.unlink()
+    _sh2.copy(_DBB2, _DB2); _DBB2.unlink()
+
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

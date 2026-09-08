@@ -1272,6 +1272,7 @@ if st.session_state.app_mode == "Glossary 추출":
                 st.session_state.pop("catalog_result_key", None)
                 st.session_state.pop("catalog_resolved", None)
                 st.session_state.pop("catalog_error", None)
+                st.session_state.pop("catalog_last_save", None)
             except Exception as e:
                 st.session_state.catalog_error = str(e)
                 st.session_state.catalog_sig = _sig
@@ -1308,21 +1309,31 @@ if st.session_state.app_mode == "Glossary 추출":
     # 등재 대상 제품·공개 범위를 결과 표보다 **먼저** 읽는다 —
     # "이미 등재됨" 판정이 이 제품 기준으로 이뤄져야 하기 때문.
     # 기본값은 Localize에서 고른 제품 (매번 다시 고르지 않게).
-    # 새로 추가한 제품을 여기서 반영한다.
+    # 등재 대상 제품·공개 범위.
     #
-    # 위젯 키(catalog_product)는 그 위젯이 만들어진 **뒤에는** 대입할 수 없다
-    # (StreamlitWidgetAlreadyInstantiatedError). 제품 추가 버튼은 selectbox보다
-    # 아래에서 눌리므로, 거기서 바로 넣으면 터진다. 그래서 버튼은 대기 값만
-    # 남기고, 위젯이 만들어지기 전인 여기서 옮겨 담는다.
-    _pending_product = st.session_state.pop("catalog_product_pending", None)
-    if _pending_product:
-        st.session_state.catalog_product = _pending_product
-        st.session_state.catalog_new_product = ""     # 입력칸 비우기
-    elif "catalog_product" not in st.session_state:
+    # **위젯 키가 아니라 일반 키에 담는다.** Streamlit은 어떤 실행에서 위젯이
+    # 렌더되지 않으면 그 위젯 키를 session_state에서 지운다. 검수 화면은
+    # 등재 대상 카드를 통째로 대체하므로, 그동안 제품 선택이 사라지고 등재
+    # 직후에는 기본값(ALL)으로 돌아가 있었다 — "새로 추가한 제품이 Localize에
+    # 안 보인다"의 정체가 이것이다.
+    #
+    # 일반 키는 렌더 여부와 무관하게 남는다. 제품 추가 버튼도 여기에 바로
+    # 쓰면 되므로 "다음 실행에 반영" 같은 우회가 필요 없다.
+    if "catalog_product_value" not in st.session_state:
         _sp = st.session_state.get("selected_product")
-        st.session_state.catalog_product = _sp if _sp in products else "ALL"
-    _extract_product = st.session_state.get("catalog_product", "ALL")
-    _extract_scope = st.session_state.get("catalog_scope", "Team")
+        st.session_state.catalog_product_value = _sp if _sp in products else "ALL"
+    st.session_state.setdefault("catalog_scope_value", "Team")
+    # 제품을 추가한 직후 입력칸을 비운다. 텍스트 입력은 위젯 키라
+    # 위젯이 만들어진 뒤에는 대입할 수 없으므로, 버튼은 깃발만 올리고
+    # 위젯보다 앞인 여기서 지운다.
+    if st.session_state.pop("catalog_clear_new_product", False):
+        st.session_state.catalog_new_product = ""
+
+    _extract_product = st.session_state.catalog_product_value
+    if _extract_product not in (["ALL"] + products):
+        _extract_product = "ALL"          # 제품이 사라진 경우 방어
+        st.session_state.catalog_product_value = "ALL"
+    _extract_scope = st.session_state.catalog_scope_value
 
     _NO_LIMIT = 10 ** 9
     _show_all = st.session_state.get("catalog_show_all", False)
@@ -1417,7 +1428,11 @@ if st.session_state.app_mode == "Glossary 추출":
             # 방금 등재한 결과를 결과 화면 맨 위에 알린다. 등재 후 표에서
             # 그 항목이 ✅로 바뀌어 남아 있으므로 "된 건지 안 된 건지"를
             # 다시 확인하러 갈 필요가 없다.
-            _last = st.session_state.pop("catalog_last_save", None)
+            # pop 하면 안 된다. 이 배너 안에 버튼이 있는데, 그리면서 상태를
+            # 지우면 클릭이 처리되는 다음 실행에는 버튼이 존재하지 않아
+            # 클릭이 통째로 무시된다. 새 등재나 새 파일 업로드 때 덮어쓰거나
+            # 지운다.
+            _last = st.session_state.get("catalog_last_save")
             if _last:
                 st.success(
                     f"{_last['msg']}를 `{_last['product']}` · `{_last['scope']}` 에 "
@@ -1756,6 +1771,9 @@ if st.session_state.app_mode == "Glossary 추출":
                         }
                         # 다시 분석해 방금 등재한 항목이 ✅로 바뀌게 한다.
                         st.session_state.pop("catalog_result_key", None)
+                        # 이 실행은 이미 검수 화면을 그린 뒤다. 다시 돌려야
+                        # 결과 배너와 갱신된 표(✅ 표시)가 보인다.
+                        st.rerun()
                     except Exception as e:
                         st.error(f"등재 오류: {e}")
 
@@ -1881,18 +1899,25 @@ if st.session_state.app_mode == "Glossary 추출":
                 with st.container(border=True):
                     st.markdown("##### 📥 등재 대상")
                     _dc1, _dc2 = st.columns(2)
+                    # key= 를 쓰지 않는다 — 위에서 설명한 이유로 위젯 키는
+                    # 화면이 바뀌면 사라진다. index로 현재 값을 보여주고,
+                    # 고른 값은 일반 키에 되돌려 담는다.
                     with _dc1:
-                        st.selectbox(
-                            "제품", options=["ALL"] + products,
-                            key="catalog_product",
+                        _p_opts = ["ALL"] + products
+                        _extract_product = st.selectbox(
+                            "제품", options=_p_opts,
+                            index=_p_opts.index(_extract_product),
                             help="이 제품 기준으로 중복을 판정하고 등재합니다.",
                         )
+                        st.session_state.catalog_product_value = _extract_product
                     with _dc2:
-                        st.selectbox(
-                            "공개 범위", options=["Team", "Personal"],
-                            key="catalog_scope",
+                        _s_opts = ["Team", "Personal"]
+                        _extract_scope = st.selectbox(
+                            "공개 범위", options=_s_opts,
+                            index=_s_opts.index(_extract_scope),
                             help="Team = 모두가 사용 · Personal = 본인만",
                         )
+                        st.session_state.catalog_scope_value = _extract_scope
 
                     # 목록에 없는 제품이면 여기서 바로 만든다. 설정 파일을
                     # 열러 가지 않아도 되게.
@@ -1906,11 +1931,10 @@ if st.session_state.app_mode == "Glossary 추출":
                                        key="catalog_add_product"):
                             _ok, _m = add_product(_new_name)
                             if _ok:
-                                # 여기서 catalog_product에 바로 대입하면
-                                # 위젯이 이미 만들어진 뒤라 예외가 난다.
-                                # 대기 값만 남기고, 다음 실행 초입에서 반영한다.
-                                st.session_state["catalog_product_pending"] = \
+                                # 일반 키라 위젯 생성 이후에도 자유롭게 쓴다.
+                                st.session_state.catalog_product_value = \
                                     _new_name.strip()
+                                st.session_state["catalog_clear_new_product"] = True
                                 st.toast(_m, icon="✅")
                                 st.rerun()
                             else:
