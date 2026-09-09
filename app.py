@@ -2877,10 +2877,36 @@ elif st.session_state.step == 3:
     output_path = st.session_state.last_output_path
     output_filename = st.session_state.last_output_filename
 
+    # 세션이 비었으면 앱이 재시작된 것이다. 조용히 첫 화면으로 되돌리면
+    # 사용자는 "다운로드를 눌렀더니 화면이 튕겼다"로만 인식한다.
     if not result or not output_path:
-        st.error("번역 결과를 찾을 수 없습니다.")
-        st.session_state.step = 1
-        st.rerun()
+        st.warning(
+            "앱이 다시 시작되어 이전 번역 결과가 사라졌습니다. "
+            "배포나 재시작이 있으면 세션이 초기화됩니다. "
+            "실행 기록은 **로그** 메뉴에 남아 있습니다.",
+            icon="⚠️",
+        )
+        _c1, _c2 = st.columns(2)
+        if _c1.button("처음으로", type="primary", use_container_width=True,
+                      key="step3_restart"):
+            st.session_state.step = 1
+            st.rerun()
+        if _c2.button("로그 보기", use_container_width=True, key="step3_logs"):
+            _try_navigate({"app_mode": "로그"})
+        st.stop()
+
+    # 파일 자체가 사라진 경우도 같다 — 클라우드는 재시작하면 임시 파일을
+    # 잃는다. 여기서 걸러야 open()에서 예외로 터지지 않는다.
+    if not Path(output_path).exists():
+        st.warning(
+            "산출물 파일을 찾을 수 없습니다. 앱이 재시작되면서 임시 파일이 "
+            "정리된 것으로 보입니다. 다시 번역해 주세요.",
+            icon="⚠️",
+        )
+        if st.button("처음으로", type="primary", key="step3_restart_missing"):
+            st.session_state.step = 1
+            st.rerun()
+        st.stop()
 
     # input/output 토큰 분리 비용 계산
     estimated_cost = estimate_cost_usd(

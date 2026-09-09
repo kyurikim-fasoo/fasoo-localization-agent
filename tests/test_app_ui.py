@@ -136,6 +136,41 @@ check("예외 없음", not at.exception, str(at.exception))
 check("다운로드 버튼 렌더", len(at.get("download_button")) == 1)
 tmp_out.unlink(missing_ok=True)
 
+print("[6-b] Step 3 — 세션이 날아가도 조용히 튕기지 않는다")
+# 앱이 재배포·재시작되면 세션이 비는데, 예전에는 곧바로 step=1로 되돌려
+# "다운로드를 눌렀더니 화면이 튕겼다"로만 보였다.
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Localize"
+at.session_state["step"] = 3
+at.session_state["last_result"] = None
+at.session_state["last_output_path"] = None
+at.session_state["last_output_filename"] = None
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+check("첫 화면으로 튕기지 않음", at.session_state["step"] == 3,
+      str(at.session_state["step"]))
+check("재시작 안내", any("다시 시작" in str(w.value) for w in at.warning),
+      str([str(w.value)[:40] for w in at.warning]))
+check("복구 경로 제공",
+      {"처음으로", "로그 보기"} <= {b.label for b in at.button},
+      str([b.label for b in at.button]))
+
+# 산출물 파일만 사라진 경우도 예외 없이 안내한다
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Localize"
+at.session_state["step"] = 3
+at.session_state["last_result"] = {"input_tokens": 1, "output_tokens": 1,
+                                   "verification": [], "applied": []}
+at.session_state["last_output_path"] = "outputs/_definitely_missing.mdx"
+at.session_state["last_output_filename"] = "x.mdx"
+at.run()
+check("파일 소실도 예외 없음", not at.exception, str(at.exception))
+check("파일 소실 안내", any("찾을 수 없습니다" in str(w.value) for w in at.warning),
+      str([str(w.value)[:40] for w in at.warning]))
+
+
 print("[7] Glossary 추출 메뉴")
 at = AppTest.from_file(APP, default_timeout=60)
 at.session_state["current_user"] = "SmokeTest"
