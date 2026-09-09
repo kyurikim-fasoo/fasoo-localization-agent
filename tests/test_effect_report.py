@@ -81,14 +81,25 @@ check("front matter 제거 · 제목 기호 제거",
 print("[8] 총평")
 _ap = [{"KO": "분석", "EN": "analysis", "출처": "글로서리", "적용": 10},
        {"KO": "저장", "EN": "Save", "출처": "UI 매핑", "적용": 1}]
-a = er.assess(_ap, n_body=10, n_marked=6)
-check("등급 산출", a["등급"] == "충분", a["등급"])
-check("지표 4종", len(a["지표"]) == 4, str(a["지표"]))
-check("고정 효과 = 반복분", ("표기 고정 효과", "9곳") in a["지표"], str(a["지표"]))
-check("총평 문장", "58" not in a["총평"] and "11곳" in a["총평"], a["총평"])
-check("상세 문단", "9곳" in a["상세"], a["상세"])
+a = er.assess(_ap)
+check("지표 2종", len(a["지표"]) == 2, str(a["지표"]))
+check("적용 표현", ("적용 표현", "2건") in a["지표"], str(a["지표"]))
+check("적용 지점", ("적용 지점", "11곳") in a["지표"], str(a["지표"]))
 
-_a0 = er.assess([], n_body=10, n_marked=0)
+# 추정에 기댄 수치는 고객 문서에 싣지 않는다. 문단 커버리지는 문단을 어떻게
+# 세느냐에 따라 달라지고, '고정 효과 N곳'은 고정이 없었다면 표기가 갈렸으리라는
+# 가정이 들어간다.
+check("커버리지 지표 없음",
+      not any("커버리지" in k for k, _ in a["지표"]), str(a["지표"]))
+check("고정 효과 지표 없음",
+      not any("고정 효과" in k for k, _ in a["지표"]), str(a["지표"]))
+check("본문에도 추정 수치 없음",
+      "%" not in a["총평"] and "%" not in a["상세"], a["총평"] + a["상세"])
+check("총평에 실제 건수", "11곳" in a["총평"], a["총평"])
+check("반복 고정 서술", "1건이 문서 전체" in a["상세"], a["상세"])
+check("등급 없음", a["등급"] == "", a["등급"])
+
+_a0 = er.assess([])
 check("미적용 등급", _a0["등급"] == "미적용", _a0["등급"])
 check("미적용 안내에 다음 행동", "Glossary" in _a0["총평"], _a0["총평"])
 
@@ -105,6 +116,9 @@ md = er.build(applied, str(body), "runAnalysis.mdx", "Sparrow")
 check("마크다운 문자열", isinstance(md, str) and md.startswith("# 로컬라이즈"),
       md[:60])
 check("총평 절", "## 총평" in md)
+check("종합 평가 줄 없음", "종합 평가" not in md, md[:400])
+check("커버리지 문구 없음", "커버리지" not in md and "고정 효과" not in md,
+      md[:400])
 check("적용 표현 표", "| 용어 | 영문 | 출처 | 적용 |" in md)
 check("본문 절", "## 본문 적용 지점" in md)
 check("범례", "【 】는 Glossary" in md)

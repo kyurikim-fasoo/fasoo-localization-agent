@@ -151,69 +151,57 @@ def mark_line(text: str, terms: List[Tuple[str, str]]) -> Tuple[str, int]:
     return "".join(buf), n
 
 
-def assess(applied: List[dict], n_body: int, n_marked: int) -> dict:
+def assess(applied: List[dict]) -> dict:
     """
     적용 결과 총평.
 
-    "몇 건 적용했습니다"로 끝내면 그래서 좋아졌다는 것인지 알 수 없다.
-    고정하지 않았다면 흔들릴 수 있었던 자리가 몇 곳인지를 말해 준다 —
-    같은 용어가 반복 등장할 때마다 표기가 갈리는 것이 이 작업의 본래 위험이다.
+    지표는 실제로 일어난 일만 싣는다. 문단 커버리지는 문단을 어떻게 세느냐에
+    따라 달라지고, '고정 효과 N곳'은 고정하지 않았다면 표기가 갈렸으리라는
+    가정이 들어간다. 고객에게 나가는 문서에 넣기에는 근거가 약하다.
     """
     n_terms = len(applied)
     n_hits = sum(int(a.get("적용") or 0) for a in applied)
     n_ui = sum(1 for a in applied if a.get("출처") == "UI 매핑")
     repeated = [a for a in applied if int(a.get("적용") or 0) >= 2]
-    # 반복 등장분 — 고정이 없었다면 표기가 갈릴 수 있었던 자리
-    exposure = sum(int(a.get("적용") or 0) - 1 for a in repeated)
-    coverage = (n_marked / n_body * 100) if n_body else 0.0
 
     if not n_terms:
-        grade = "미적용"
-    elif coverage >= 50:
-        grade = "충분"
-    elif coverage >= 20:
-        grade = "보통"
-    else:
-        grade = "제한적"
+        return {
+            "등급": "미적용",
+            "총평": (
+                "이번 번역에는 등록된 용어가 적용되지 않았습니다. 문서에 반복 "
+                "등장하는 표현이 문단마다 다르게 번역될 수 있으므로, Glossary "
+                "추출에서 이 문서를 기준으로 용어를 등재하신 후 재실행을 "
+                "권고드립니다."
+            ),
+            "상세": "",
+            "지표": [("적용 표현", "0건"), ("적용 지점", "0곳")],
+        }
 
-    if not n_terms:
-        summary = (
-            "이번 번역에는 등록된 용어가 적용되지 않았습니다. 문서에 반복 "
-            "등장하는 표현이 문단마다 다르게 번역될 수 있으므로, Glossary "
-            "추출에서 이 문서를 기준으로 용어를 등재하신 후 재실행을 "
-            "권고드립니다."
+    summary = (
+        f"등록된 표현 {n_terms}건이 본문 {n_hits:,}곳에 동일한 영문으로 "
+        f"적용되었습니다. 이 중 {n_ui}건은 UI 텍스트 매핑에서 직접 지정한 "
+        f"항목이며, 나머지 {n_terms - n_ui}건은 Glossary에서 적용되었습니다."
+    )
+    if repeated:
+        detail = (
+            f"반복 등장하는 표현 {len(repeated)}건이 문서 전체에서 하나의 "
+            f"표기로 고정되었습니다. 용어 고정이 없을 경우 이 표현들은 "
+            f"문단마다 다른 영문으로 번역될 수 있으나, 이번 번역에서는 모두 "
+            f"단일 표기로 처리되었습니다."
         )
-        detail = ""
     else:
-        summary = (
-            f"등록된 표현 {n_terms}건이 본문 {n_hits:,}곳에 동일한 영문으로 "
-            f"적용되었습니다. 전체 {n_body:,}개 문단 중 {n_marked:,}개 문단"
-            f"({coverage:.0f}%)에 적용 지점이 포함되어 있으며, 이 중 "
-            f"{n_ui}건은 UI 텍스트 매핑에서 직접 지정한 항목입니다."
+        detail = (
+            "적용된 표현이 모두 1회씩만 등장하여, 표기 흔들림 위험은 낮은 "
+            "문서입니다."
         )
-        if repeated:
-            detail = (
-                f"반복 등장하는 표현 {len(repeated)}건이 문서 전체에서 하나의 "
-                f"표기로 고정되었습니다. 용어 고정이 없을 경우 이 표현들은 "
-                f"문단마다 다른 영문으로 번역될 수 있으며, 해당 위험에 "
-                f"노출되었던 지점은 {exposure:,}곳입니다. 이번 번역에서는 "
-                f"모두 단일 표기로 처리되었습니다."
-            )
-        else:
-            detail = (
-                "적용된 표현이 모두 1회씩만 등장하여, 표기 흔들림 위험은 "
-                "낮은 문서입니다."
-            )
 
     return {
-        "등급": grade,
+        "등급": "",
         "총평": summary,
         "상세": detail,
         "지표": [
             ("적용 표현", f"{n_terms}건"),
             ("적용 지점", f"{n_hits:,}곳"),
-            ("문단 커버리지", f"{coverage:.0f}%"),
-            ("표기 고정 효과", f"{exposure:,}곳"),
         ],
     }
 
@@ -237,7 +225,7 @@ def build(applied: List[dict], out_path: str,
         if n:
             marked.append(shown)
 
-    a = assess(applied, len(lines), len(marked))
+    a = assess(applied)
 
     md: List[str] = ["# 로컬라이즈 적용 내역"]
     meta = []
@@ -250,7 +238,9 @@ def build(applied: List[dict], out_path: str,
 
     md += ["", "## 총평", ""]
     md += [f"- {k}: {v}" for k, v in a["지표"]]
-    md += ["", f"종합 평가: {a['등급']}", "", a["총평"]]
+    if a["등급"]:
+        md += ["", f"종합 평가: {a['등급']}"]
+    md += ["", a["총평"]]
     if a["상세"]:
         md += ["", a["상세"]]
 
