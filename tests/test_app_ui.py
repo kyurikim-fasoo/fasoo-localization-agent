@@ -186,10 +186,17 @@ check("업로드 없이도 결과 화면이 뜸", len(at.metric) >= 4,
       f"metric {len(at.metric)}개")
 check("탭 2개(용어·패턴) 렌더", len(at.tabs) == 2, f"tabs {len(at.tabs)}개")
 _caps = " ".join(str(c.value) for c in at.caption)
-check("선택 안내 노출", "등재할 항목을 고르세요" in _caps, _caps[:120])
+check("선택 안내 노출", "등재할 항목을 선택" in _caps, _caps[:120])
 check("용어·패턴 통합 등재 안내", "함께 골라" in _caps, _caps[:160])
-check("등재 버튼은 선택 후에만", not any("등재" in b.label for b in at.button),
+# 선택 전에도 버튼은 자리에 있어야 한다. 통째로 사라지면 기능이 없어진
+# 것처럼 보이고, 무엇을 해야 다음으로 넘어가는지도 알 수 없다.
+_save_btns = [b for b in at.button if "등재" in b.label]
+check("선택 전에도 등재 버튼이 보인다", len(_save_btns) == 1,
       str([b.label for b in at.button]))
+check("선택 전에는 비활성", all(b.disabled for b in _save_btns),
+      str([(b.label, b.disabled) for b in _save_btns]))
+check("선택 안내 문구", any("전체 선택" in str(c.value) for c in at.caption),
+      str([str(c.value)[:50] for c in at.caption]))
 
 print("[9] 표기 충돌 — 후보를 클릭으로 고르는 카드 UI")
 _conf_pick = ct.pick_languages([

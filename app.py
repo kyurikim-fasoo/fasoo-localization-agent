@@ -2162,9 +2162,23 @@ if st.session_state.app_mode == "Glossary 추출":
                                 ("pattern", _drop_same(_sel_patterns)),
                             ])
                     else:
+                        # 고른 것이 없어도 버튼을 남긴다. 통째로 사라지면
+                        # 기능이 없어진 것처럼 보이고, 무엇을 해야 다음으로
+                        # 넘어가는지도 알 수 없다.
+                        st.markdown(
+                            f"등재 대상: `{_extract_product}` · "
+                            f"`{_extract_scope}`"
+                        )
+                        st.button(
+                            "검수 후 등재", type="primary",
+                            key="catalog_save_all", use_container_width=True,
+                            disabled=True,
+                        )
                         st.caption(
-                            "각 탭에서 등재할 항목을 고르세요. "
-                            "용어와 패턴을 함께 골라 한 번에 검수·등재할 수 있습니다."
+                            "위 표의 **적용** 열에서 등재할 항목을 선택하면 "
+                            "버튼이 켜집니다. 표 위의 **전체 선택**으로 한 번에 "
+                            "고를 수 있고, 용어와 패턴을 함께 골라 한 번에 "
+                            "검수·등재할 수 있습니다."
                         )
 
             # 등재 여부와 상관없이, 지금 고른 제품으로 바로 번역하러 갈 수
