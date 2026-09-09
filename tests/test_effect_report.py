@@ -133,6 +133,50 @@ check("빈 입력도 생성", md0.startswith("# 로컬라이즈"), md0[:60])
 check("미적용 안내 포함", "적용되지 않았습니다" in md0, md0[:400])
 check("표 절은 생략", "## 적용 표현" not in md0)
 
+print("[11] HTML 표시 — 원문 서식은 살리고 적용 지점만 색")
+_line = ("See [the analysis guide](/guide/analysis/setting) and "
+         "**bold analysis** and `analysis` here.")
+_h, _n = er.mark_line_html(_line, [("analysis", "글로서리")])
+check("본문 2곳만 색", _n == 2, f"{_n} / {_h}")
+check("링크 주소는 색칠 안 함", 'href="/guide/analysis/setting"' in _h, _h)
+check("링크 서식 유지", "<a href=" in _h, _h)
+check("굵게 서식 유지", "<strong>" in _h, _h)
+check("인라인 코드는 리터럴", "<code>analysis</code>" in _h, _h)
+check("Glossary 색 클래스", 'class="gl"' in _h, _h)
+
+_h2, _ = er.mark_line_html("Click Save now", [("Save", "UI 매핑")])
+check("UI 매핑 색 클래스", 'class="ui"' in _h2, _h2)
+
+print("[12] HTML 이스케이프")
+_h3, _ = er.mark_line_html("a < b & c analysis", [("analysis", "글로서리")])
+check("꺾쇠 이스케이프", "&lt;" in _h3, _h3)
+check("앰퍼샌드 이스케이프", "&amp;" in _h3, _h3)
+
+print("[13] HTML 리포트 생성")
+tmp2 = Path(tempfile.mkdtemp(prefix="effect_html_"))
+body2 = tmp2 / "body.mdx"
+body2.write_text(
+    "---\ntitle: T\n---\n\n# Head {#h}\n\nRun the **analysis**.\n\n"
+    "Click Save to finish.\n\nNothing here.\n", encoding="utf-8")
+_hdoc = er.build_html(applied, str(body2), "runAnalysis.mdx", "Sparrow")
+
+check("HTML 문서", _hdoc.startswith("<!doctype html>"), _hdoc[:40])
+check("스타일 포함(자체 완결)", "<style>" in _hdoc)
+check("두 색이 정의됨",
+      "mark.gl" in _hdoc and "mark.ui" in _hdoc)
+check("범례", "Glossary" in _hdoc and "UI 텍스트 매핑" in _hdoc)
+check("총평 절", "총평" in _hdoc)
+check("적용 표현 표", "<table>" in _hdoc)
+check("본문에 색 표시", 'class="gl"' in _hdoc and 'class="ui"' in _hdoc,
+      _hdoc[-600:])
+check("적용 없는 문단 제외", "Nothing here." not in _hdoc)
+check("front matter 미포함", "title: T" not in _hdoc)
+
+_h0 = er.build_html([], str(body2), "x.mdx", None)
+check("빈 입력도 HTML", _h0.startswith("<!doctype html>"), _h0[:40])
+check("미적용 안내", "적용되지 않았습니다" in _h0)
+
+shutil.rmtree(tmp2, ignore_errors=True)
 shutil.rmtree(tmp, ignore_errors=True)
 
 print()

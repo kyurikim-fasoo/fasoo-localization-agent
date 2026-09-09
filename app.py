@@ -2961,7 +2961,7 @@ elif st.session_state.step == 3:
             _rep_key = f"effect_report::{output_path}"
             if _rep_key not in st.session_state:
                 try:
-                    st.session_state[_rep_key] = effect_report.build(
+                    st.session_state[_rep_key] = effect_report.build_html(
                         _applied, str(output_path), output_filename,
                         st.session_state.get("selected_product"),
                     )
@@ -2973,11 +2973,12 @@ elif st.session_state.step == 3:
                 st.download_button(
                     "적용 내역 리포트 내려받기",
                     data=_rep.encode("utf-8"),
-                    file_name=f"{Path(output_filename).stem}_적용내역.md",
-                    mime="text/markdown",
+                    file_name=f"{Path(output_filename).stem}_적용내역.html",
+                    mime="text/html",
                     use_container_width=True,
-                    help="총평과 함께 본문에서 적용된 자리를 표시한 문서입니다. "
-                         "【 】는 Glossary, 〔 〕는 UI 텍스트 매핑입니다.",
+                    help="브라우저에서 열면 적용된 자리가 색으로 표시됩니다. "
+                         "노란색은 Glossary, 보라색은 UI 텍스트 매핑입니다. "
+                         "인쇄에서 PDF로 저장하거나 Word에 붙여넣을 수 있습니다.",
                 )
     else:
         st.markdown(" ")

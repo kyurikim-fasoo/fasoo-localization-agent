@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import html
 import io
 import os
 import re
@@ -204,6 +205,163 @@ def assess(applied: List[dict]) -> dict:
             ("적용 지점", f"{n_hits:,}곳"),
         ],
     }
+
+
+# ── HTML 리포트 ───────────────────────────────────────────────────
+#
+# 표시 색. 원문 링크(파랑)와 겹치지 않는 색을 골랐다 — 겹치면 무엇이 원문
+# 서식이고 무엇이 이 도구가 손댄 자리인지 구분이 안 된다.
+_MARK_CSS = {
+    "글로서리": ("gl", "#FFE9A8"),      # 연노랑
+    "UI 매핑": ("ui", "#DCC9FF"),       # 연보라
+}
+
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_MD_CODE_RE = re.compile(r"`([^`]+)`")
+_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def _inline_md_to_html(text: str) -> str:
+    """원문 서식을 그대로 살린다. 굵게·링크·인라인 코드만."""
+    s = html.escape(text)
+    s = _MD_CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", s)
+    s = _MD_LINK_RE.sub(
+        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', s)
+    s = _MD_BOLD_RE.sub(lambda m: f"<strong>{m.group(1)}</strong>", s)
+    return s
+
+
+def mark_line_html(text: str, terms: List[Tuple[str, str]]) -> Tuple[str, int]:
+    """
+    한 줄을 HTML로. 적용 지점만 색을 입힌다.
+
+    마크다운을 먼저 HTML로 바꾼 뒤 표시를 찾는다. 태그 안(<a href="...">)은
+    보호 구간으로 넘겨 주소까지 색칠되지 않게 한다.
+    """
+    s = _inline_md_to_html(text)
+    protect = [m.span() for m in _TAG_RE.finditer(s)]
+    # 인라인 코드 안은 리터럴이라 표시 대상이 아니다
+    protect += [m.span(1) for m in re.finditer(r"<code>(.*?)</code>", s)]
+    spans = split_spans(s, terms, protect)
+    n = 0
+    buf = []
+    for chunk, kind in spans:
+        if kind:
+            cls = _MARK_CSS.get(kind, _MARK_CSS["글로서리"])[0]
+            buf.append(f'<mark class="{cls}">{chunk}</mark>')
+            n += 1
+        else:
+            buf.append(chunk)
+    return "".join(buf), n
+
+
+_STYLE = """
+:root { color-scheme: light; }
+body { margin: 0; padding: 40px 32px; background: #fff; color: #1a1a1a;
+       font-family: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR",
+                    system-ui, -apple-system, sans-serif;
+       font-size: 14px; line-height: 1.75; }
+.wrap { max-width: 900px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -.01em; }
+h2 { font-size: 15px; margin: 32px 0 12px; padding-bottom: 6px;
+     border-bottom: 1px solid #e3e3e3; letter-spacing: -.01em; }
+.meta { color: #666; font-size: 13px; margin-bottom: 24px; }
+.kpis { display: flex; gap: 28px; flex-wrap: wrap; margin: 0 0 18px;
+        padding: 14px 18px; background: #f7f8fa; border-radius: 6px; }
+.kpi .k { color: #666; font-size: 12px; }
+.kpi .v { font-size: 19px; font-weight: 600; }
+p { margin: 0 0 12px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { border: 1px solid #e3e3e3; padding: 7px 10px; text-align: left; }
+th { background: #f7f8fa; font-weight: 600; }
+td.num { text-align: right; }
+mark.gl { background: #FFE9A8; padding: 0 2px; border-radius: 2px; }
+mark.ui { background: #DCC9FF; padding: 0 2px; border-radius: 2px; }
+.legend { display: flex; gap: 18px; align-items: center; margin: 0 0 14px;
+          font-size: 13px; color: #444; }
+.legend span.sw { padding: 1px 8px; border-radius: 2px; margin-right: 6px; }
+ol.body { padding-left: 22px; }
+ol.body li { margin: 0 0 10px; }
+.note { color: #666; font-size: 12px; margin-top: 14px; }
+a { color: #1558d6; }
+code { background: #f2f3f5; padding: 0 4px; border-radius: 3px;
+       font-size: 12px; }
+"""
+
+
+def build_html(applied: List[dict], out_path: str,
+               doc_name: Optional[str] = None,
+               product: Optional[str] = None) -> str:
+    """적용 내역 리포트(HTML). 브라우저에서 열거나 PDF로 인쇄한다."""
+    terms = [(str(a.get("EN") or ""), str(a.get("출처") or "글로서리"))
+             for a in applied if a.get("EN")]
+
+    lines = body_lines(read_output_paragraphs(out_path))
+    marked: List[str] = []
+    for ln in lines:
+        shown, n = mark_line_html(ln, terms)
+        if n:
+            marked.append(shown)
+
+    a = assess(applied)
+    esc = html.escape
+
+    h: List[str] = [
+        "<!doctype html><html lang='ko'><head><meta charset='utf-8'>",
+        "<title>로컬라이즈 적용 내역</title>",
+        f"<style>{_STYLE}</style></head><body><div class='wrap'>",
+        "<h1>로컬라이즈 적용 내역</h1>",
+    ]
+    meta = []
+    if doc_name:
+        meta.append(f"문서: {esc(doc_name)}")
+    if product:
+        meta.append(f"제품: {esc(product)}")
+    if meta:
+        h.append(f"<div class='meta'>{'  ·  '.join(meta)}</div>")
+
+    h.append("<h2>총평</h2><div class='kpis'>")
+    for k, v in a["지표"]:
+        h.append(f"<div class='kpi'><div class='k'>{esc(k)}</div>"
+                 f"<div class='v'>{esc(v)}</div></div>")
+    h.append("</div>")
+    if a["등급"]:
+        h.append(f"<p><strong>종합 평가: {esc(a['등급'])}</strong></p>")
+    h.append(f"<p>{esc(a['총평'])}</p>")
+    if a["상세"]:
+        h.append(f"<p>{esc(a['상세'])}</p>")
+
+    if applied:
+        h.append("<h2>적용 표현</h2><table><tr><th>용어</th><th>영문</th>"
+                 "<th>출처</th><th>적용</th></tr>")
+        for it in applied:
+            kind = str(it.get("출처") or "글로서리")
+            cls = _MARK_CSS.get(kind, _MARK_CSS["글로서리"])[0]
+            h.append(
+                f"<tr><td>{esc(str(it.get('KO','')))}</td>"
+                f"<td><mark class='{cls}'>{esc(str(it.get('EN','')))}</mark></td>"
+                f"<td>{esc(kind)}</td>"
+                f"<td class='num'>{esc(str(it.get('적용','')))}</td></tr>"
+            )
+        h.append("</table>")
+
+        h.append("<h2>본문 적용 지점</h2><div class='legend'>")
+        for kind, (cls, _c) in _MARK_CSS.items():
+            label = "Glossary" if kind == "글로서리" else "UI 텍스트 매핑"
+            h.append(f"<div><span class='sw {cls}' "
+                     f"style='background:{_MARK_CSS[kind][1]}'>&nbsp;&nbsp;</span>"
+                     f"{label}</div>")
+        h.append("</div><ol class='body'>")
+        for ln in marked:
+            h.append(f"<li>{ln}</li>")
+        h.append("</ol>")
+        if len(marked) < len(lines):
+            h.append(f"<div class='note'>전체 {len(lines):,}개 문단 중 적용 "
+                     f"지점이 있는 {len(marked):,}개 문단만 수록했습니다.</div>")
+
+    h.append("</div></body></html>")
+    return "\n".join(h)
 
 
 def build(applied: List[dict], out_path: str,
