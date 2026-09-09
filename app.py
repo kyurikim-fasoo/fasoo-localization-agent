@@ -2941,8 +2941,8 @@ elif st.session_state.step == 3:
                     f"나머지 {_n_terms - _by_ui}개는 Glossary에서 왔습니다."
                 )
 
-            # 적용 지점을 형광펜으로 얹은 리포트. 산출물 자체는 건드리지
-            # 않는다 — 배포용 문서에 형광펜이 남으면 안 되므로 별도 파일이다.
+            # 적용 지점을 표시한 리포트. 산출물 자체는 건드리지 않는다 —
+            # 배포용 문서에 표시가 남으면 안 되므로 별도 파일이다.
             # rerun마다 다시 만들지 않도록 산출물 경로로 캐시한다.
             _rep_key = f"effect_report::{output_path}"
             if _rep_key not in st.session_state:
@@ -2957,14 +2957,13 @@ elif st.session_state.step == 3:
             _rep = st.session_state.get(_rep_key)
             if _rep:
                 st.download_button(
-                    "적용 내역 리포트 내려받기 (Word)",
-                    data=_rep,
-                    file_name=f"{Path(output_filename).stem}_적용내역.docx",
-                    mime=("application/vnd.openxmlformats-officedocument"
-                          ".wordprocessingml.document"),
+                    "적용 내역 리포트 내려받기",
+                    data=_rep.encode("utf-8"),
+                    file_name=f"{Path(output_filename).stem}_적용내역.md",
+                    mime="text/markdown",
                     use_container_width=True,
-                    help="본문에서 적용된 자리를 형광펜으로 표시한 문서입니다. "
-                         "노란색은 Glossary, 초록색은 UI 텍스트 매핑입니다.",
+                    help="총평과 함께 본문에서 적용된 자리를 표시한 문서입니다. "
+                         "【 】는 Glossary, 〔 〕는 UI 텍스트 매핑입니다.",
                 )
     else:
         st.markdown(" ")

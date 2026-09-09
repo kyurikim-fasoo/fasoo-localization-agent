@@ -3,22 +3,20 @@
 
 사용자가 이 리포트로 확인하려는 것은 하나다 — "에이전트가 정말 일관되게
 바꿨는가". 그러려면 표시가 **정확한 자리에만** 찍혀야 한다. 'set'이
-'settings' 안에서 잡히거나, 긴 표현이 짧은 표현에 부서지면 리포트가
-오히려 신뢰를 깎는다.
+'settings' 안에서 잡히거나, 링크 주소까지 표시되면 리포트가 오히려
+신뢰를 깎는다.
 
     python tests/test_effect_report.py
 """
 from __future__ import annotations
 
-import io
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-from docx import Document
 
 from services import effect_report as er
 
@@ -58,55 +56,69 @@ marked = [t for t, k in sp if k]
 check("둘 다 잡는다", len(marked) == 2, str(marked))
 check("원문 표기 그대로", marked == ["analysis", "Analysis"], str(marked))
 
-print("[5] 출처가 조각에 실린다")
-sp = er.split_spans("Save and analysis",
-                    [("Save", "UI 매핑"), ("analysis", "글로서리")])
-kinds = {t: k for t, k in sp if k}
-check("UI 매핑 구분", kinds.get("Save") == "UI 매핑", str(kinds))
-check("글로서리 구분", kinds.get("analysis") == "글로서리", str(kinds))
+print("[5] 링크 주소·코드는 건드리지 않는다")
+line = ("See [the analysis guide](/guide/analysis/setting) and `analysis` "
+        "and https://x.io/analysis now analysis here.")
+out, n = er.mark_line(line, [("analysis", "글로서리")])
+check("본문 2곳만 표시", n == 2, f"{n} / {out}")
+check("링크 주소 보존", "/guide/analysis/setting" in out, out)
+check("인라인 코드 보존", "`analysis`" in out, out)
+check("맨 URL 보존", "https://x.io/analysis" in out, out)
 
-print("[6] 산출물 읽기 — 마크다운")
+print("[6] 출처별 표시 기호")
+out, _ = er.mark_line("Save and analysis",
+                      [("Save", "UI 매핑"), ("analysis", "글로서리")])
+check("UI 매핑은 〔〕", "〔Save〕" in out, out)
+check("글로서리는 【】", "【analysis】" in out, out)
+
+print("[7] 본문 정리 — front matter·제목 기호·앵커")
+paras = ["---", "title: Analyze", "description: Run it.", "---",
+         "# Analyze {#분석하기}", "Body text."]
+check("front matter 제거 · 제목 기호 제거",
+      er.body_lines(paras) == ["Analyze", "Body text."],
+      str(er.body_lines(paras)))
+
+print("[8] 총평")
+_ap = [{"KO": "분석", "EN": "analysis", "출처": "글로서리", "적용": 10},
+       {"KO": "저장", "EN": "Save", "출처": "UI 매핑", "적용": 1}]
+a = er.assess(_ap, n_body=10, n_marked=6)
+check("등급 산출", a["등급"] == "충분", a["등급"])
+check("지표 4종", len(a["지표"]) == 4, str(a["지표"]))
+check("고정 효과 = 반복분", ("표기 고정 효과", "9곳") in a["지표"], str(a["지표"]))
+check("총평 문장", "58" not in a["총평"] and "11곳" in a["총평"], a["총평"])
+check("상세 문단", "9곳" in a["상세"], a["상세"])
+
+_a0 = er.assess([], n_body=10, n_marked=0)
+check("미적용 등급", _a0["등급"] == "미적용", _a0["등급"])
+check("미적용 안내에 다음 행동", "Glossary" in _a0["총평"], _a0["총평"])
+
+print("[9] 리포트 생성")
 tmp = Path(tempfile.mkdtemp(prefix="effect_"))
-md = tmp / "out.mdx"
-md.write_text("# Title\n\nFirst line.\n\nSecond line.\n", encoding="utf-8")
-paras = er.read_output_paragraphs(str(md))
-check("빈 줄 제외", paras == ["# Title", "First line.", "Second line."], str(paras))
-
-print("[7] 리포트 생성")
-applied = [
-    {"KO": "분석", "EN": "analysis", "출처": "글로서리", "적용": 2, "예문": ""},
-    {"KO": "저장", "EN": "Save", "출처": "UI 매핑", "적용": 1, "예문": ""},
-]
 body = tmp / "body.mdx"
-body.write_text("Run the analysis.\n\nClick Save to finish.\n\nNothing here.\n",
-                encoding="utf-8")
-data = er.build(applied, str(body), "runAnalysis.mdx", "Sparrow")
-check("docx 바이트", data[:2] == b"PK" and len(data) > 5000, str(len(data)))
+body.write_text(
+    "---\ntitle: T\n---\n\n# Head {#h}\n\nRun the analysis.\n\n"
+    "Click Save to finish.\n\nNothing here.\n", encoding="utf-8")
+applied = [{"KO": "분석", "EN": "analysis", "출처": "글로서리", "적용": 2},
+           {"KO": "저장", "EN": "Save", "출처": "UI 매핑", "적용": 1}]
+md = er.build(applied, str(body), "runAnalysis.mdx", "Sparrow")
 
-doc = Document(io.BytesIO(data))
-check("표 1개", len(doc.tables) == 1, str(len(doc.tables)))
-check("표에 머리행 + 2건", len(doc.tables[0].rows) == 3,
-      str(len(doc.tables[0].rows)))
+check("마크다운 문자열", isinstance(md, str) and md.startswith("# 로컬라이즈"),
+      md[:60])
+check("총평 절", "## 총평" in md)
+check("적용 표현 표", "| 용어 | 영문 | 출처 | 적용 |" in md)
+check("본문 절", "## 본문 적용 지점" in md)
+check("범례", "【 】는 Glossary" in md)
+check("본문에 표시", "【analysis】" in md and "〔Save〕" in md, md[-400:])
+check("적용 없는 문단 제외", "Nothing here." not in md)
+check("생략 안내", "문단만 수록" in md, md[-200:])
+check("front matter 미포함", "title: T" not in md)
 
-hl = [(r.text, str(r.font.highlight_color))
-      for p in doc.paragraphs for r in p.runs if r.font.highlight_color]
-texts = [t for t, _ in hl]
-check("본문 표현이 표시된다", "analysis" in texts and "Save" in texts, str(texts))
-check("Glossary는 노란색",
-      any(t == "analysis" and "YELLOW" in c for t, c in hl), str(hl))
-check("UI 매핑은 초록색",
-      any(t == "Save" and "BRIGHT_GREEN" in c for t, c in hl), str(hl))
+print("[10] 적용 내역이 비어도 죽지 않는다")
+md0 = er.build([], str(body), "x.mdx", None)
+check("빈 입력도 생성", md0.startswith("# 로컬라이즈"), md0[:60])
+check("미적용 안내 포함", "적용되지 않았습니다" in md0, md0[:400])
+check("표 절은 생략", "## 적용 표현" not in md0)
 
-_all = "\n".join(p.text for p in doc.paragraphs)
-check("적용 없는 문단은 빠진다", "Nothing here." not in _all)
-check("생략 안내", "3개 문단 중" in _all or "문단만 수록" in _all, _all[-160:])
-check("요약 문장", "2건이 본문" in _all, _all[:400])
-
-print("[8] 적용 내역이 비어도 죽지 않는다")
-data0 = er.build([], str(body), "x.mdx", None)
-check("빈 입력도 문서 생성", data0[:2] == b"PK", str(len(data0)))
-
-import shutil  # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)
 
 print()
