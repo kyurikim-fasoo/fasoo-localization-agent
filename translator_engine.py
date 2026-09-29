@@ -14,6 +14,30 @@ from openai import OpenAI
 
 import markdown_format
 
+
+# ──────────────────────────────────────────────────────────────────────
+# OpenAI 클라이언트
+#
+# 반드시 이 함수로 만든다. OpenAI SDK의 기본 max_retries는 2회인데, 긴
+# 문서는 문단마다 한 번씩 호출하므로(500문단 = 500호출) 그 중 한 번이
+# 429/503("Our server is currently overloaded")에 연속으로 걸리면 예외가
+# 스레드로 새어 잡 전체가 죽는다. 사용자에게는 몇 분 기다린 끝에 영문
+# 오류 한 줄만 남고, 번역은 처음부터 다시 해야 한다.
+#
+# 백오프 간격과 Retry-After 준수는 SDK가 처리한다. 재시도 대상은
+# 429/5xx·연결 오류뿐이고 4xx(잘못된 키·요청)는 즉시 올라오므로, 횟수를
+# 늘려도 실패가 늦어지는 것은 일시적 오류에 한정된다.
+#
+# timeout은 일부러 건드리지 않는다(SDK 기본값). 낮추면 오래 걸리는 긴
+# 문단에서 없던 실패가 새로 생긴다.
+_MAX_RETRIES = 8
+
+
+def make_client(api_key: str) -> OpenAI:
+    """재시도 정책이 붙은 OpenAI 클라이언트. OpenAI()를 직접 쓰지 말 것."""
+    return OpenAI(api_key=api_key, max_retries=_MAX_RETRIES)
+
+
 # OOXML namespace constants
 _W        = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _XML_SPACE = "http://www.w3.org/XML/1998/namespace"
@@ -2868,7 +2892,7 @@ def translate_document(
     # QA prompt엔 UI 매핑도 참고용으로 함께 (일관성 유지 위해)
     glossary_pairs_for_qa = [(e.ko, e.en) for e in glossary_entries] + list(ui_overrides_clean.items())
 
-    client = OpenAI(api_key=api_key)
+    client = make_client(api_key)
     adapter = make_adapter(in_path)
     adapter.load()
     cache: Dict[str, str] = {}

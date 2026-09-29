@@ -1718,9 +1718,9 @@ if st.session_state.app_mode == "Glossary 추출":
                 프롬프트), 화면은 하나로 합친다. 두 번 고르고 두 번 확인하는
                 수고를 없애기 위함.
                 """
-                from openai import OpenAI  # 이 화면에서만 필요
+                from translator_engine import make_client  # 이 화면에서만 필요
 
-                client = OpenAI(api_key=OPENAI_API_KEY)
+                client = make_client(OPENAI_API_KEY)
                 state = {}
                 with st.spinner("검수 중"):
                     for kind, sel_df in selections:
@@ -2214,12 +2214,12 @@ if st.session_state.app_mode == "Glossary 추출":
                     _render_review("conflicts")
                 elif not _resolved:
                     if st.button(f"{len(_conf):,}건 분류", key="catalog_resolve"):
-                        from openai import OpenAI  # 이 화면에서만 필요
+                        from translator_engine import make_client  # 이 화면에서만 필요
 
                         with st.spinner("분류 중"):
                             try:
                                 st.session_state.catalog_resolved = catalog.resolve_conflicts(
-                                    OpenAI(api_key=OPENAI_API_KEY), _conf
+                                    make_client(OPENAI_API_KEY), _conf
                                 )
                                 st.rerun()
                             except Exception as e:
