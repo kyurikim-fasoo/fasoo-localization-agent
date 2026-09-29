@@ -5,3 +5,14 @@
 # 아래 드라이버가 두 쪽을 합쳐준다. 등록은 각자 한 번:
 #     python scripts/setup_merge_driver.py
 data/glossary.db merge=glossarydb
+
+# 테스트 픽스처는 개행 자체가 검증 대상이다 (read_text가 원본 개행을 그대로
+# 감지·보존하는지 본다). core.autocrlf=true인 Windows에서 새로 체크아웃하면
+# git이 이 파일들을 CRLF로 바꿔놓아, 그 검사가 새 클론에서만 실패했다.
+# eol=lf는 autocrlf보다 우선한다.
+#
+# 디렉터리 전체(tests/fixtures/**)로 걸지 않는 이유 — 나중에 진짜 .docx를
+# 픽스처로 넣으면 text 속성이 바이너리를 망가뜨린다. 확장자로 못 박는다.
+tests/fixtures/*.md   text eol=lf
+tests/fixtures/*.mdx  text eol=lf
+tests/fixtures/*.txt  text eol=lf

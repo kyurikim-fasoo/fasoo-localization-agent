@@ -6,6 +6,7 @@ app.py UI 스모크 테스트 — 실제 Streamlit 세션으로 스크립트를 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -13,6 +14,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# app.py는 OPENAI_API_KEY가 없으면 첫 화면에서 st.stop()으로 멈춘다. 키를
+# 개발자 로컬 .env에만 의존하면(.env는 gitignore 대상) 새로 클론한 곳 — CI,
+# 새 워크트리 — 에서는 앱이 아무것도 그리지 못해 이 파일의 검사가 전부
+# 무너진다. 원인은 "버튼이 없다"로만 보여서 진단도 어렵다.
+#
+# 스모크 테스트는 실제 API를 부르지 않으므로 더미 키를 박아 둔다. 덮어쓰는
+# 이유는 결정성 — 진짜 키가 환경에 있어도 테스트가 그것을 쓰지 않게 한다.
+# app.py의 load_dotenv()는 이미 있는 환경변수를 덮어쓰지 않으므로 이 값이 이긴다.
+os.environ["OPENAI_API_KEY"] = "sk-smoke-test"
 
 from streamlit.testing.v1 import AppTest
 
@@ -360,15 +371,20 @@ check("1페이지에 12건", len(at.radio) == 12, f"radio {len(at.radio)}개")
 check("1/2 표시", any("1 / 2" in str(m.value) for m in at.markdown),
       str([str(m.value)[:20] for m in at.markdown if "/" in str(m.value)]))
 _p1 = {r.label for r in at.radio}   # 클릭 전에 잡아둔다 — at는 run()으로 갱신된다
-_next = [b for b in at.button if b.label == "▶"][0]
-check("다음 버튼 활성", not _next.disabled)
-at2 = _next.click().run()
-check("2페이지로 이동", at2.session_state["catalog_conf_page"] == 2,
-      str(at2.session_state["catalog_conf_page"]))
-_p2 = {r.label for r in at2.radio}
-# AppTest는 st.rerun() 전후 요소를 함께 담을 때가 있어 개수 대신 목록 변화를 본다
-check("2페이지에 새 항목이 나옴", bool(_p2 - _p1), f"p1={len(_p1)} p2={len(_p2)}")
-check("이전 버튼 활성", not [b for b in at2.button if b.label == "◀"][0].disabled)
+# [0] 으로 바로 집으면 버튼이 없을 때 IndexError로 스위트가 중단돼 나머지
+# 결과를 못 본다. FAIL로 보고하고 넘어간다.
+_next = next((b for b in at.button if b.label == "▶"), None)
+check("다음 버튼 렌더", _next is not None, str([b.label for b in at.button]))
+if _next is not None:
+    check("다음 버튼 활성", not _next.disabled)
+    at2 = _next.click().run()
+    check("2페이지로 이동", at2.session_state["catalog_conf_page"] == 2,
+          str(at2.session_state["catalog_conf_page"]))
+    _p2 = {r.label for r in at2.radio}
+    # AppTest는 st.rerun() 전후 요소를 함께 담을 때가 있어 개수 대신 목록 변화를 본다
+    check("2페이지에 새 항목이 나옴", bool(_p2 - _p1), f"p1={len(_p1)} p2={len(_p2)}")
+    _prev = next((b for b in at2.button if b.label == "◀"), None)
+    check("이전 버튼 활성", _prev is not None and not _prev.disabled)
 
 print("[11] 표기 충돌 — 기본은 아무것도 선택되지 않는다")
 at = AppTest.from_file(APP, default_timeout=60)
