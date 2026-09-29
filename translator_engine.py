@@ -75,7 +75,7 @@ H_CLOSE_RE   = re.compile(r"⟦/H(\d+)⟧")
 HL_OPEN_RE   = re.compile(r"⟦HL:([a-zA-Z]+)⟧")
 HL_CLOSE     = "⟦/HL⟧"
 BR_MARKER_RE = re.compile(re.escape(BR_MARKER))
-ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧|⟦X\d+⟧)")
+ALL_MARKER_RE = re.compile(r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧|⟦X\d+⟧|⟦T\d+⟧)")
 # ⟦LB⟧ / ⟦TB⟧ 는 run 내부에서 <w:br/> · <w:tab/> 요소로 되살려야 하므로
 # _make_run에서 텍스트를 이 마커 기준으로 쪼갠다.
 LAYOUT_MARKER_SPLIT_RE = re.compile(
@@ -87,7 +87,7 @@ MARKER_SPLIT_RE = re.compile(rf"({re.escape(B_OPEN)}|{re.escape(B_CLOSE)}|⟦G\d
 # 잡혀 "⟦Hl:yellow⟧ / ⟦/hl⟧"로 훼손되고, 이후 ALL_MARKER_RE 토크나이저가 인식하지
 # 못해 마커가 문서에 그대로 찍힌다.
 ANY_MARKER_SPLIT_RE = re.compile(
-    r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦G\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧|⟦X\d+⟧)"
+    r"(⟦B⟧|⟦/B⟧|⟦I⟧|⟦/I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦G\d+⟧|⟦H\d+⟧|⟦/H\d+⟧|⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦LB⟧|⟦TB⟧|⟦X\d+⟧|⟦T\d+⟧)"
 )
 
 # 안전장치용 정규식 — LLM이 ⟦LB⟧를 파괴적으로 응답해서 "⟦L⟧B⟧" 같은 잔해나
@@ -1431,6 +1431,7 @@ _ID_MARKER_KINDS = (
     ("원문 영문 봉인 ⟦X#⟧", re.compile(r"⟦X\d+⟧")),
     ("이미지 ⟦D#⟧", re.compile(r"⟦D\d+⟧")),
     ("주석 ⟦C#⟧", re.compile(r"⟦C\d+⟧")),
+    ("붙임 봉인 ⟦T#⟧", re.compile(r"⟦T\d+⟧")),
     ("하이퍼링크 열기 ⟦H#⟧", re.compile(r"⟦H\d+⟧")),
     ("하이퍼링크 닫기 ⟦/H#⟧", re.compile(r"⟦/H\d+⟧")),
 )
@@ -1447,7 +1448,7 @@ _PAIR_MARKER_KINDS = (
 # 우리가 아는 정상 마커 전부. ⟦HL:…⟧을 ⟦H\d+⟧보다 앞에 둘 필요는 없다
 # (H 뒤에 숫자를 요구하므로 겹치지 않는다) — 그래도 읽기 좋게 앞에 둔다.
 _KNOWN_MARKER_RE = re.compile(
-    r"⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦/?B⟧|⟦/?I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦G\d+⟧|⟦X\d+⟧|"
+    r"⟦HL:[a-zA-Z]+⟧|⟦/HL⟧|⟦/?B⟧|⟦/?I⟧|⟦C\d+⟧|⟦D\d+⟧|⟦G\d+⟧|⟦X\d+⟧|⟦T\d+⟧|"
     r"⟦/?H\d+⟧|⟦LB⟧|⟦TB⟧"
 )
 
@@ -2152,11 +2153,14 @@ def translate_paragraph_with_patterns(
 Translate Korean to natural, professional English. Produce a draft, then revise it so a native English speaker would not flag awkwardness, grammar errors, or literal-translation tells.
 
 Rules:
-- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦I⟧, ⟦/I⟧, ⟦C#⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦TB⟧.
+- Preserve markers EXACTLY: ⟦G#⟧, ⟦B⟧, ⟦/B⟧, ⟦I⟧, ⟦/I⟧, ⟦C#⟧, ⟦T#⟧, ⟦D#⟧, ⟦H#⟧/⟦/H#⟧, ⟦HL:colour⟧/⟦/HL⟧, ⟦TB⟧.
 {tab_rule}- ⟦G#⟧ placeholders are FIXED glossary terms. Output them BYTE-FOR-BYTE unchanged.
   NEVER translate, paraphrase, expand, or substitute a ⟦G#⟧ placeholder with any word.
 - ⟦C#⟧ = a sealed literal (inline code, an escaped character, a URL). Output it
   BYTE-FOR-BYTE unchanged and keep it at the same position in the sentence.
+- ⟦T#⟧ = a sealed literal that is GLUED to what touches it (an HTML tag such as
+  <sup>, a code-span delimiter). Output it BYTE-FOR-BYTE unchanged and do NOT
+  add or remove whitespace next to it.
 - ⟦I⟧…⟦/I⟧ = italic span — translate the text inside, keep the pair around it.
 - ⟦D#⟧ = inline icon/image — keep it where it naturally fits in the sentence.
 - ⟦H#⟧…⟦/H#⟧ = hyperlink span — translate the text inside, keep the markers around it.

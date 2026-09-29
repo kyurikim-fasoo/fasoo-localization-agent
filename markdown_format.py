@@ -35,6 +35,12 @@ I_OPEN = "⟦I⟧"       # 기울임 — 마크다운 전용(Word 경로에는 �
 I_CLOSE = "⟦/I⟧"
 D_PREFIX = "⟦D"      # 이미지 — 문장 안에서 위치만 유지
 C_PREFIX = "⟦C"      # 리터럴 봉인 — 인라인 코드, 백슬래시 이스케이프, autolink
+T_PREFIX = "⟦T"      # '붙임' 봉인 — 앞뒤 낱말에 딱 붙어 있어야 하는 리터럴.
+#                      인라인 HTML 태그와 백틱 구분자가 여기 온다. ⟦C#⟧는
+#                      engine이 '낱말'로 보고 경계에 공백을 넣어주는데
+#                      (normalize_marker_boundary_spaces), 태그·구분자에
+#                      그러면 `이메일<sup>*</sup>`이 `이메일 <sup>*</sup>`,
+#                      `` `문장` ``이 `` ` 문장` ``이 된다. 그래서 종류를 나눈다.
 SUFFIX = "⟧"
 
 _KOREAN_RE = re.compile(r"[가-힣]")
@@ -43,13 +49,17 @@ _KOREAN_RE = re.compile(r"[가-힣]")
 # 건드리지 않는다(keywords, sidebar_custom_props 등).
 FRONT_MATTER_KEYS = ("title", "description", "sidebar_label")
 
-_FENCE_RE = re.compile(r"^\s{0,3}(```+|~~~+)")
+_FENCE_RE = re.compile(r"^\s{0,3}(```+|~~~+)[ \t]*([^\s`]*)")
 _HEADING_RE = re.compile(r"^(\s{0,3}#{1,6}[ \t]+)(.*?)[ \t]*$")
 _EXPLICIT_ID_RE = re.compile(r"\s*\{#[^}]+\}\s*$")
 _LIST_RE = re.compile(r"^(\s*(?:[-*+]|\d+[.)])[ \t]+)(.*)$")
 _QUOTE_RE = re.compile(r"^(\s{0,3}(?:>[ \t]?)+)(.*)$")
 _DEF_RE = re.compile(r"^(:[ \t]+)(.*)$")          # pandoc definition list
 _TABLE_RE = re.compile(r"^\s*\|")
+# 표 정렬 줄(`| --- | :-: |`)의 칸. 이 줄은 번역 대상이 아니다.
+_TABLE_DELIM_CELL_RE = re.compile(r"^:?-+:?$")
+# 칸에 번역할 것이 있는가 — 빈 칸과 `-` 같은 자리표시자를 걸러낸다.
+_WORDISH_RE = re.compile(r"\w", re.UNICODE)
 _HTML_RE = re.compile(r"^\s{0,3}<[A-Za-z/!]")
 # MDX 전용 — 여러 줄에 걸친 JSX 속성과 import/export 문.
 #   <Tabs
@@ -69,17 +79,43 @@ class MdUnit:
     start: int
     end: int
     is_heading: bool = False
-    kind: str = "para"             # para | heading | list | quote | def | frontmatter
+    kind: str = "para"             # para | heading | list | quote | def
+                                   # | frontmatter | table | mermaid
     seals: Dict[str, str] = field(default_factory=dict)
     link_urls: Dict[str, str] = field(default_factory=dict)
     heading_slug: str = ""
     heading_has_id: bool = False
     fm_quote: bool = False         # front matter 값이면 재출력 시 따옴표 필요
+    mermaid_quoted: bool = False   # mermaid 라벨이 원래 "..." 안에 있었나
 
 
 # ──────────────────────────────────────────────────────────────────────
 # 인라인 봉인 / 복원
 # ──────────────────────────────────────────────────────────────────────
+
+# 인라인 코드 안쪽이 '코드'임을 드러내는 신호. 경로 구분자·꺾쇠·중괄호가
+# 있거나 `#앵커`/`.확장자`로 시작하면 번역 대상이 아니다.
+_CODEISH_RE = re.compile(
+    r"[/\\<>{}]|^[#.]|\.(?:png|jpe?g|gif|svg|webp|md|mdx|py|js|ts|json|ya?ml|xml|txt)$",
+    re.IGNORECASE,
+)
+
+
+def _is_korean_prose(s: str) -> bool:
+    """
+    인라인 코드 안쪽이 '번역해야 할 문장'인가.
+
+    한국어가 있고, 띄어 쓴 문장 형태이며, 경로/앵커/식별자 신호가 없을 때만
+    참. 애매하면 봉인(= 원문 유지) 쪽으로 기운다 — 문장 하나를 놓치는 것이
+    링크를 깨뜨리는 것보다 낫다.
+    """
+    t = s.strip()
+    if not t or not _KOREAN_RE.search(t):
+        return False
+    if " " not in t:
+        return False          # `변수명`, `#앵커-이름` 처럼 한 낱말이면 코드로 본다
+    return not _CODEISH_RE.search(t)
+
 
 def seal_inline(text: str) -> Tuple[str, Dict[str, str], Dict[str, str]]:
     """
@@ -94,18 +130,29 @@ def seal_inline(text: str) -> Tuple[str, Dict[str, str], Dict[str, str]]:
     """
     seals: Dict[str, str] = {}
     link_urls: Dict[str, str] = {}
-    counter = {"c": 0, "d": 0, "h": 0}
+    counter = {"c": 0, "d": 0, "h": 0, "t": 0}
+    _prefix = {"c": C_PREFIX, "d": D_PREFIX, "t": T_PREFIX}
 
     def _seal(raw: str, kind: str) -> str:
         i = counter[kind]
         counter[kind] += 1
-        token = f"{C_PREFIX if kind == 'c' else D_PREFIX}{i}{SUFFIX}"
+        token = f"{_prefix[kind]}{i}{SUFFIX}"
         seals[token] = raw
         return token
 
-    # 1) 인라인 코드 — 백틱 개수를 맞춰서 잡는다
-    text = re.sub(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)",
-                  lambda m: _seal(m.group(0), "c"), text, flags=re.DOTALL)
+    # 1) 인라인 코드 — 백틱 개수를 맞춰서 잡는다.
+    #    안쪽이 '한국어 산문'이면 백틱만 봉인하고 본문은 번역 대상으로 남긴다.
+    #    이 문서 관습에서 백틱은 코드뿐 아니라 참고 문구(callout)로도 쓰이는데,
+    #    통째로 봉인하면 그 줄이 번역에서 통째로 빠진다. 반대로
+    #    `#소스코드-저장소-설정하기` 같은 앵커나 `/img/분석.png` 같은 경로는
+    #    한국어가 들어 있어도 번역하면 링크가 깨지므로 계속 봉인한다.
+    def _code(m: re.Match) -> str:
+        ticks, inner = m.group(1), m.group(2)
+        if _is_korean_prose(inner):
+            return f"{_seal(ticks, 't')}{inner}{_seal(ticks, 't')}"
+        return _seal(m.group(0), "c")
+
+    text = re.sub(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", _code, text, flags=re.DOTALL)
 
     # 2) 이미지 — alt는 번역하지 않는다(대부분 파일명이거나 비어 있다)
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", lambda m: _seal(m.group(0), "d"), text)
@@ -121,6 +168,13 @@ def seal_inline(text: str) -> Tuple[str, Dict[str, str], Dict[str, str]]:
 
     # 4) autolink / 원시 URL
     text = re.sub(r"<(?:https?|mailto):[^>]+>", lambda m: _seal(m.group(0), "c"), text)
+
+    # 4-b) 인라인 HTML/JSX 태그 — 속성값(색상·경로·id)이 번역되면 안 된다.
+    #      `이메일<font color="#0C121D">*</font>` 처럼 표 안에서 자주 나온다.
+    #      태그 사이의 본문은 봉인하지 않으므로 계속 번역된다.
+    #      autolink(4)를 먼저 처리해야 `<https://…>`를 태그로 오인하지 않는다.
+    text = re.sub(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*?)?/?>",
+                  lambda m: _seal(m.group(0), "t"), text)
 
     # 5) 백슬래시 이스케이프 — `\&` 를 모델이 `&`나 "and"로 바꾸는 걸 막는다
     text = re.sub(r"\\[^\sA-Za-z0-9]", lambda m: _seal(m.group(0), "c"), text)
@@ -270,12 +324,123 @@ def _inner_span(line_start: int, line: str, prefix_len: int) -> Tuple[int, int, 
     return s, s + len(inner), inner
 
 
+def _split_table_cells(line: str, line_start: int) -> List[Tuple[int, int, str]]:
+    """
+    표 한 줄 → 칸별 (start, end, inner) 목록.
+
+    `\|` 이스케이프와 인라인 코드(`` `a|b` ``) 안의 파이프는 칸 구분자가
+    아니다. 이걸 놓치면 칸 경계가 밀려 표가 깨진다.
+    """
+    bars: List[int] = []
+    i, n = 0, len(line)
+    tick = ""                       # 열려 있는 백틱 런
+    while i < n:
+        ch = line[i]
+        if ch == "\\" and not tick:
+            i += 2                  # 이스케이프된 다음 글자는 통째로 건너뛴다
+            continue
+        if ch == "`":
+            j = i
+            while j < n and line[j] == "`":
+                j += 1
+            run = line[i:j]
+            if not tick:
+                tick = run
+            elif tick == run:
+                tick = ""
+            i = j
+            continue
+        if ch == "|" and not tick:
+            bars.append(i)
+        i += 1
+
+    cells: List[Tuple[int, int, str]] = []
+    for k, bar in enumerate(bars):
+        seg_start = bar + 1
+        seg_end = bars[k + 1] if k + 1 < len(bars) else n
+        seg = line[seg_start:seg_end]
+        if k + 1 == len(bars) and not seg.strip():
+            continue                # 닫는 파이프 뒤의 꼬리는 칸이 아니다
+        lead = len(seg) - len(seg.lstrip())
+        inner = seg.strip()
+        start = line_start + seg_start + lead
+        cells.append((start, start + len(inner), inner))
+    return cells
+
+
+def _is_table_delimiter(cells: List[Tuple[int, int, str]]) -> bool:
+    """`| --- | :-: |` 정렬 줄인가. 이 줄을 번역하면 표가 표가 아니게 된다."""
+    texts = [c[2] for c in cells if c[2]]
+    return bool(texts) and all(_TABLE_DELIM_CELL_RE.match(t) for t in texts)
+
+
+# mermaid 라벨 추출용. 구조 문자로 끊고, '라벨 여는 기호' 뒤에 오는 조각만
+# 번역 대상으로 삼는다.
+_MERMAID_STRUCT = '"[](){}|<>-=;:,&%'
+_MERMAID_LABEL_OPEN = '"[({|'
+_MERMAID_FRAG_RE = re.compile("[^" + re.escape(_MERMAID_STRUCT) + "]+")
+_MERMAID_QUOTED_RE = re.compile(r'"([^"\n]*)"')
+# 따옴표 없는 라벨에 들어오면 mermaid 문법이 깨지는 글자. 원문 조각에는 절대
+# 없는 것들만 골랐다(모두 _MERMAID_STRUCT에 속한다) — 그래야 왕복이 깨지지 않는다.
+_MERMAID_NEEDS_QUOTE_RE = re.compile(r"[\[\](){}|:;,]|--|->")
+
+
+def _mermaid_label_units(line: str, line_start: int) -> List[MdUnit]:
+    """
+    mermaid 블록 안의 노드/엣지 **라벨만** 번역 단위로 만든다.
+
+    코드펜스는 원칙적으로 건드리지 않지만 mermaid는 코드가 아니라 그림이고,
+    라벨은 화면에 그대로 보이는 본문이다. 그래서 여기만 예외를 둔다.
+
+    다만 노드 **id**까지 번역하면 안 된다. `워크그룹 --> 파일` 처럼 한국어를
+    id로 쓴 그래프에서 같은 id가 자리마다 다르게 번역되면 노드가 쪼개져
+    그림이 달라진다. 그래서 바로 앞 글자가 라벨 여는 기호("[({|)인 조각만
+    대상으로 삼는다 — `A["워크그룹"]`의 라벨은 잡고 id는 건드리지 않는다.
+    """
+    out: List[MdUnit] = []
+
+    def _add(text: str, at: int, quoted: bool) -> None:
+        lead = len(text) - len(text.lstrip())
+        inner = text.strip()
+        if not inner:
+            return
+        start = line_start + at + lead
+        marked, seals, urls = seal_inline(inner)
+        out.append(MdUnit(
+            src=marked, start=start, end=start + len(inner), kind="mermaid",
+            seals=seals, link_urls=urls, mermaid_quoted=quoted,
+        ))
+
+    # 1) "…" 라벨은 통째로 한 단위. 조각으로 쪼개면 `["올리는 순간 (자동) 보안"]`
+    #    처럼 괄호가 든 라벨에서 괄호 뒤가 번역에서 빠진다.
+    covered: List[Tuple[int, int]] = []
+    for m in _MERMAID_QUOTED_RE.finditer(line):
+        covered.append((m.start(), m.end()))
+        if _KOREAN_RE.search(m.group(1)):
+            _add(m.group(1), m.start(1), True)
+
+    # 2) 따옴표가 없는 라벨 — 구조 문자로 끊긴 조각 중 '라벨 자리'인 것만.
+    for m in _MERMAID_FRAG_RE.finditer(line):
+        if any(a <= m.start() < b for a, b in covered):
+            continue                      # 이미 1)에서 다룬 따옴표 라벨 안쪽
+        frag = m.group(0)
+        if not _KOREAN_RE.search(frag):
+            continue
+        before = line[: m.start()].rstrip()
+        if not before or before[-1] not in _MERMAID_LABEL_OPEN:
+            continue
+        _add(frag, m.start(), False)
+
+    return out
+
+
 def parse_markdown(text: str) -> List[MdUnit]:
     """마크다운 원문을 번역 단위 목록으로 분해한다."""
     spans = _line_spans(text)
     units, i = _parse_front_matter(text, spans)
 
     in_fence: Optional[str] = None
+    fence_lang = ""
     n = len(spans)
 
     while i < n:
@@ -287,10 +452,14 @@ def parse_markdown(text: str) -> List[MdUnit]:
         if in_fence:
             if fence and fence.group(1)[0] == in_fence[0] and len(fence.group(1)) >= len(in_fence):
                 in_fence = None
+                fence_lang = ""
+            elif fence_lang == "mermaid":
+                units.extend(_mermaid_label_units(line, start))
             i += 1
             continue
         if fence:
             in_fence = fence.group(1)
+            fence_lang = (fence.group(2) or "").strip().lower()
             i += 1
             continue
 
@@ -298,8 +467,21 @@ def parse_markdown(text: str) -> List[MdUnit]:
             i += 1
             continue
 
-        # 표는 v1 미지원 — 손대지 않고 그대로 둔다
+        # 표 — 칸 하나가 번역 단위다. 칸 구분자(|)와 정렬 줄은 유닛 밖에
+        # 남으므로 모델이 표 구조를 깨뜨릴 수 없다(헤딩·목록 접두와 같은 원리).
+        # 칸 너비를 맞춰둔 여백은 그대로 두므로 번역 후 소스 정렬은 어긋나지만,
+        # 렌더 결과는 동일하고 손대지 않은 부분의 diff가 없다(설계 원칙 2).
         if _TABLE_RE.match(line):
+            cells = _split_table_cells(line, start)
+            if not _is_table_delimiter(cells):
+                for c_start, c_end, ctext in cells:
+                    if not ctext or not _WORDISH_RE.search(ctext):
+                        continue     # 빈 칸과 `-` 같은 자리표시자
+                    marked, seals, urls = seal_inline(ctext)
+                    units.append(MdUnit(
+                        src=marked, start=c_start, end=c_end, kind="table",
+                        seals=seals, link_urls=urls,
+                    ))
             i += 1
             continue
 
@@ -436,9 +618,30 @@ def _needs_quote(value: str) -> bool:
     return False
 
 
+# 표 칸과 mermaid 라벨은 '한 줄'이라는 제약이 있다. 번역문이 줄을 넘어가거나
+# 구분자를 품고 오면 구조가 깨지므로 되돌리기 전에 막는다.
+_ONE_LINE_RE = re.compile(r"[ \t]*\n[ \t]*")
+_RAW_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+
 def render_unit(unit: MdUnit, translated_marked: str, keep_anchor: bool = True) -> str:
     """번역된 마크드 텍스트를 원문에 다시 넣을 문자열로 만든다."""
-    out = unseal_inline(translated_marked, unit.seals, unit.link_urls)
+    marked = translated_marked
+    if unit.kind in ("table", "mermaid"):
+        # 봉인 복원 **전에** 처리한다 — 그래야 원문에 있던 `a|b` 처럼 코드
+        # 안쪽의 기호를 건드리지 않는다(봉인된 동안은 ⟦C#⟧ 토큰이므로).
+        marked = _ONE_LINE_RE.sub("<br/>", marked.strip())
+        if unit.kind == "table":
+            marked = _RAW_PIPE_RE.sub(lambda _m: "\\|", marked)
+        else:
+            # mermaid 라벨에 따옴표가 섞이면 파서가 깨진다
+            marked = marked.replace('"', "'")
+            # 따옴표가 없던 라벨은 구조 문자를 품을 수 없다. 번역문이 괄호나
+            # 콜론을 들고 오면 그때만 감싼다 — 평소에는 원문 모양을 유지한다.
+            if not unit.mermaid_quoted and _MERMAID_NEEDS_QUOTE_RE.search(marked):
+                marked = f'"{marked}"'
+
+    out = unseal_inline(marked, unit.seals, unit.link_urls)
     out = out.strip()
 
     if unit.kind == "frontmatter":

@@ -105,6 +105,31 @@ check("평범한 값은 그대로",
       mf.render_unit(fm, "Running an analysis") == "Running an analysis",
       mf.render_unit(fm, "Running an analysis"))
 
+print("[9] 표 / mermaid — 구간 계산이 정확한가 (왕복 = 원문 동일)")
+TABLE_DOC = (
+    '| **구분** | 설명          | 비고 |\n'
+    '| ------ | ----------- | -- |\n'
+    '| 정의     | 내 조직의 임직원   | -  |\n'
+    '| 로그인 ID | 이메일<font color="#0C121D">*</font> | `a.cfg` |\n'
+    '\n'
+    '```mermaid\n'
+    'flowchart LR\n'
+    '    A["업로드<br/>(자동 보안)"] --> B[멤버 초대] --> 끝노드\n'
+    '```\n'
+)
+check("왕복 동일", mf.roundtrip_is_identity(TABLE_DOC))
+tu = mf.parse_markdown(TABLE_DOC)
+cells = [u.src for u in tu if u.kind == "table"]
+labels = [u.src for u in tu if u.kind == "mermaid"]
+check("정렬 줄은 유닛이 아니다", not any(set(c) <= set("-:") for c in cells), str(cells))
+check("자리표시자 - 는 유닛이 아니다", "-" not in cells, str(cells))
+check("굵은 칸은 마커로 감싸인다", any(c.startswith(mf.B_OPEN) for c in cells), str(cells))
+check("칸 안 인라인 HTML은 ⟦T#⟧로 봉인", any(mf.T_PREFIX in c for c in cells), str(cells))
+check("칸 안 인라인 코드는 ⟦C#⟧로 봉인", any(mf.C_PREFIX in c for c in cells), str(cells))
+check("따옴표 라벨은 통째로 한 단위", "업로드⟦T0⟧(자동 보안)" in labels, str(labels))
+check("따옴표 없는 라벨도 잡는다", "멤버 초대" in labels, str(labels))
+check("노드 id는 유닛이 아니다", "끝노드" not in labels, str(labels))
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

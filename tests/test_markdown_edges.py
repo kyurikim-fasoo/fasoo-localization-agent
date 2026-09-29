@@ -79,8 +79,31 @@ print("\n[의도된 동작] JSX 태그 사이 본문은 번역한다")
 check("Admonition 본문 번역됨", "JSX 블록 안쪽 본문입니다." not in out)
 check("Tabs 본문 번역됨", "여러 줄 속성 뒤의 본문입니다." not in out)
 
+print("\n[표] 칸마다 번역하고 구조는 손대지 않는다")
+check("칸 내용이 번역됨", "소스코드 저장소입니다" not in out)
+check("칸이 파이프를 새지 않음",
+      all(l.count("|") == 3 for l in out.splitlines() if l.startswith("| ")),
+      str([l for l in out.splitlines() if l.startswith("| ") and l.count("|") != 3]))
+check("자리표시자 - 는 그대로", re.search(r"^\| .+ \| - \|$", out, re.M) is not None)
+check("칸 안 인라인 코드 원형", "`admin.config`" in out)
+check("칸 안 인라인 HTML 원형", '<font color="#0C121D">*</font>' in out)
+check("HTML 태그 앞에 공백이 끼지 않음", re.search(r"\w<font", out) is not None,
+      "⟦T#⟧가 아니라 ⟦C#⟧로 봉인되면 여기서 공백이 낀다")
+
+print("\n[mermaid] 라벨만 번역하고 그래프 구조는 손대지 않는다")
+check("노드 라벨이 번역됨", '"시작하기"' not in out)
+check("노드 id는 번역하지 않음", "문서노드" in out,
+      "id를 번역하면 자리마다 달라져 노드가 쪼개진다")
+check("flowchart 선언 원형", "flowchart LR" in out)
+check("라벨 안 <br/> 원형", "<br/>" in out)
+check("화살표 원형", out.count("-->") == 2, f"--> {out.count('-->')}개")
+
+print("\n[백틱] 한국어 산문은 번역, 앵커·경로는 봉인")
+check("백틱 안 한국어 산문 번역됨", "백틱 안의 한국어 문구도 번역합니다." not in out)
+check("백틱 안쪽에 공백이 끼지 않음", re.search(r"`[^` ]", out) is not None)
+check("앵커는 그대로", "`#custom-anchor`" in out)
+
 print("\n[미지원] 원문 그대로 남는 것 — 잘못 번역되지 않는지 확인")
-check("표 내용은 한국어 그대로", "| 저장소 | 소스코드 저장소입니다 |" in out)
 check("JSX 속성값은 한국어 그대로", 'title="주의"' in out)
 
 print("\n[정보] 하드랩 문단 처리")
