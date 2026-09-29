@@ -27,8 +27,16 @@ def create_log(
     ui_text_overrides: Optional[Dict[str, str]],
     metrics: dict,
     note: str = "",
+    sync: bool = True,
 ) -> int:
-    """Insert a new translation log. Returns the new row id."""
+    """
+    Insert a new translation log. Returns the new row id.
+
+    sync=False로 부르면 GitHub 푸시를 건너뛴다. 호출자가 여러 건을 연달아
+    기록한 뒤 **한 번만** sync_db()를 부르려는 경우에 쓴다 — 배치 번역에서
+    파일마다 푸시하면 커밋이 파일 수만큼 쌓이고, Streamlit Cloud는 커밋마다
+    앱을 재배포하므로 사용자가 결과 화면을 보기도 전에 세션이 날아간다.
+    """
     init_db()
     overrides_json = json.dumps(ui_text_overrides or {}, ensure_ascii=False)
     with db_session() as conn:
@@ -53,7 +61,8 @@ def create_log(
         )
         new_id = int(cur.lastrowid)
 
-    sync_db(f"Log #{new_id} ({source_file}) by {user}")
+    if sync:
+        sync_db(f"Log #{new_id} ({source_file}) by {user}")
     return new_id
 
 

@@ -32,6 +32,7 @@ from services.translation_logs import (
     list_logs,
     update_note,
 )
+from services.sync import sync_db
 from services import batch
 from services import catalog
 from services import effect_report
@@ -67,10 +68,25 @@ COST_PER_1K_OUTPUT_TOKENS = float(_secret_or_env("MODEL_COST_PER_1K_OUTPUT_TOKEN
 
 # GitHub 자동 백업 (Streamlit Cloud ephemeral 회피).
 # secrets에 둔 값을 환경변수로 export — services/sync.py가 os.getenv로 읽음.
-for _k in ("GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_BRANCH"):
+# GITHUB_BRANCH는 이제 데이터 경로에 쓰이지 않는다(services/sync.py 참고).
+# 데이터는 GITHUB_DATA_BRANCH(기본 app-data)로 간다 — 배포 브랜치에 커밋하면
+# Cloud가 앱을 재배포해 모든 세션이 날아가기 때문이다.
+for _k in ("GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_BRANCH", "GITHUB_DATA_BRANCH"):
     _v = _secret_or_env(_k, "")
     if _v:
         os.environ[_k] = _v
+
+# 부팅 시 데이터 브랜치에서 최신 DB·사용자·제품 목록을 내려받는다.
+# 배포본에 딸려 온 파일은 코드 커밋 시점의 오래된 스냅샷이므로, 여기서 덮어야
+# 재부팅 전에 등재한 용어와 로그가 살아 있다.
+#
+# 반드시 DB를 처음 읽기 전에 호출해야 한다. 프로세스당 한 번만 도는 것은
+# services/sync.py가 모듈 전역 플래그로 보장한다(rerun마다 재시도하지 않음).
+try:
+    from services.sync import pull_data_files
+    pull_data_files()
+except Exception as _sync_err:      # 못 내려받아도 배포본 파일로 계속 돌아야 한다
+    print(f"[sync] 부팅 시 데이터 복원 실패: {_sync_err}")
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -474,6 +490,12 @@ def render_translation_progress() -> None:
         if f["status"] == "finished":
             # 번역 로그 자동 저장 — 파일마다 한 건. 로그 화면과 '이전 매핑
             # 불러오기'가 파일 단위로 동작하므로 배치로 묶지 않는다.
+            #
+            # 다만 GitHub 푸시(sync)는 파일마다 하지 않는다. sync_db는 1MB짜리
+            # DB를 통째로 올리는 커밋이고, Streamlit Cloud는 커밋마다 앱을
+            # 재배포한다. 파일 5개면 푸시 5번 = 재배포 방아쇠 5번이라,
+            # 사용자가 결과 화면을 보기도 전에 세션이 날아간다. 게다가 이
+            # 업로드는 메인 스레드를 막으므로 화면 전환도 그만큼 늦어진다.
             try:
                 entry["log_id"] = create_log(
                     user=st.session_state.current_user,
@@ -484,12 +506,24 @@ def render_translation_progress() -> None:
                     ui_text_overrides=params["ui_overrides"] or {},
                     metrics=f["result"],
                     note="",
+                    sync=False,
                 )
             except Exception as log_err:
                 st.warning(f"{f['source_name']} 로그 저장 중 경고: {log_err}")
         results.append(entry)
 
     st.session_state.last_results = results
+
+    # 배치 전체에 대해 푸시 한 번.
+    _logged = [r for r in results if r["log_id"]]
+    if _logged:
+        try:
+            _ids = ", ".join(f"#{r['log_id']}" for r in _logged)
+            _names = ", ".join(r["source_name"] for r in _logged)
+            sync_db(f"Log {_ids} ({_names}) by {st.session_state.current_user}")
+        except Exception as sync_err:
+            # 푸시 실패는 치명적이지 않다 — 로그는 이미 로컬 DB에 들어갔다.
+            st.warning(f"로그 동기화 중 경고: {sync_err}")
 
     # Step 2에서 채운 반복 용어를 글로서리에 등재 (체크한 경우에만).
     # 번역이 끝난 뒤에 하는 이유 — 번역이 실패하면 검증되지 않은 표기가
