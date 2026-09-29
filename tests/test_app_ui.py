@@ -43,11 +43,18 @@ def make_at(**session):
     return at
 
 
-def fake_params():
+def fake_params(n=1):
+    """배치 잡 params. 파일 1개도 길이 1인 files 목록으로 넘긴다."""
     return {
-        "in_path": str(ROOT / "tests" / "fixtures" / "runAnalysis.mdx"),
-        "out_path": str(ROOT / "outputs" / "smoke_out.mdx"),
-        "output_filename": "smoke_out.mdx",
+        "files": [
+            {
+                "source_name": f"smoke{i}.mdx",
+                "in_path": str(ROOT / "tests" / "fixtures" / "runAnalysis.mdx"),
+                "out_path": str(ROOT / "outputs" / f"smoke_out{i}.mdx"),
+                "output_filename": f"smoke_out{i}.mdx",
+            }
+            for i in range(n)
+        ],
         "glossary_rows": [], "pattern_rows": [], "api_key": "sk-fake",
         "enable_cache": True, "enable_qa": False,
         "translation_mode": "매뉴얼", "ui_overrides": {},
@@ -91,6 +98,28 @@ msgs = [e.value for e in at.error]
 check("잡 조회됨(레지스트리 유지)", not any("앱이 재시작" in m for m in msgs), str(msgs))
 check("스레드 예외가 UI로 전달", any("의도된 실패" in m for m in msgs), str(msgs))
 
+print("[4-b] 배치 — 한 파일이 실패해도 나머지는 계속 간다")
+_calls = {"n": 0}
+
+
+def _fail_second(**kw):
+    _calls["n"] += 1
+    if _calls["n"] == 2:
+        raise RuntimeError("두 번째만 실패")
+    return {"input_tokens": 1, "cached_tokens": 0, "output_tokens": 1,
+            "total_tokens": 2, "paragraphs_translated": 1}
+
+
+jobs.translate_document = _fail_second
+job_id = jobs.start_job(fake_params(3))
+job = wait_done(job_id)
+_states = [f["status"] for f in job["files"]]
+check("3개 모두 시도됨", _calls["n"] == 3, f"{_calls['n']}회 호출")
+check("실패한 것만 error", _states == ["finished", "error", "finished"], str(_states))
+check("배치 자체는 finished", job["status"] == "finished", job["status"])
+check("실패 사유 보관", "두 번째만 실패" in (job["files"][1]["error"] or ""))
+check("진행률 100%", jobs.batch_progress(job) == 1.0)
+
 print("[5] 진행 중 잡에 계속 붙어 폴링")
 gate = threading.Event()
 
@@ -106,10 +135,10 @@ def _blocking(progress_callback=None, **kwargs):
 jobs.translate_document = _blocking
 job_id = jobs.start_job(fake_params())
 for _ in range(100):
-    if jobs.get_job(job_id)["total"]:
+    if jobs.get_job(job_id)["files"][0]["total"]:
         break
     time.sleep(0.05)
-check("progress_callback 반영", jobs.get_job(job_id)["done"] == 3)
+check("progress_callback 반영", jobs.get_job(job_id)["files"][0]["done"] == 3)
 at = make_at(translating_now=True, translate_job_id=job_id)
 try:
     at.run(timeout=4)      # 폴링 루프 → 타임아웃이 정상
@@ -128,12 +157,48 @@ at.session_state["current_user"] = "SmokeTest"
 at.session_state["app_mode"] = "Localize"
 at.session_state["step"] = 3
 at.session_state["selected_product"] = PRODUCT
-at.session_state["last_result"] = {"input_tokens": 10, "output_tokens": 20}
-at.session_state["last_output_path"] = str(tmp_out)
-at.session_state["last_output_filename"] = tmp_out.name
+at.session_state["last_results"] = [{
+    "source_name": tmp_out.name, "output_filename": tmp_out.name,
+    "output_path": str(tmp_out), "result": {"input_tokens": 10, "output_tokens": 20},
+    "error": None, "log_id": None,
+}]
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
 check("다운로드 버튼 렌더", len(at.get("download_button")) == 1)
+
+print("[6-a] Step 3 — 여러 파일이면 요약표 + ZIP + 파일 선택")
+tmp_out2 = ROOT / "outputs" / "_ui_probe2_FSP_en.mdx"
+tmp_out2.write_text("# hi 2\n", encoding="utf-8")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Localize"
+at.session_state["step"] = 3
+at.session_state["selected_product"] = PRODUCT
+at.session_state["last_results"] = [
+    {"source_name": "a.mdx", "output_filename": tmp_out.name,
+     "output_path": str(tmp_out),
+     "result": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30,
+                "paragraphs_translated": 5, "verification": [], "applied": []},
+     "error": None, "log_id": None},
+    {"source_name": "b.mdx", "output_filename": tmp_out2.name,
+     "output_path": str(tmp_out2),
+     "result": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12,
+                "paragraphs_translated": 2, "verification": [], "applied": []},
+     "error": None, "log_id": None},
+    {"source_name": "c.mdx", "output_filename": "c_en.mdx",
+     "output_path": None, "result": None, "error": "의도된 실패", "log_id": None},
+]
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+check("부분 실패 안내", any("1개 실패" in str(w.value) for w in at.warning),
+      str([str(w.value)[:50] for w in at.warning]))
+_dl = [b.label for b in at.get("download_button")]
+check("ZIP 일괄 다운로드", any("전체 ZIP" in l for l in _dl), str(_dl))
+check("파일별 다운로드도 있음", any("문서 다운로드" in l for l in _dl), str(_dl))
+check("파일 선택 셀렉트박스", len(at.get("selectbox")) >= 1)
+check("합산 토큰", any("15" in str(m.value) for m in at.metric),
+      str([str(m.value) for m in at.metric]))
+tmp_out2.unlink(missing_ok=True)
 tmp_out.unlink(missing_ok=True)
 
 print("[6-b] Step 3 — 세션이 날아가도 조용히 튕기지 않는다")
@@ -143,9 +208,7 @@ at = AppTest.from_file(APP, default_timeout=60)
 at.session_state["current_user"] = "SmokeTest"
 at.session_state["app_mode"] = "Localize"
 at.session_state["step"] = 3
-at.session_state["last_result"] = None
-at.session_state["last_output_path"] = None
-at.session_state["last_output_filename"] = None
+at.session_state["last_results"] = []
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
 check("첫 화면으로 튕기지 않음", at.session_state["step"] == 3,
@@ -161,10 +224,13 @@ at = AppTest.from_file(APP, default_timeout=60)
 at.session_state["current_user"] = "SmokeTest"
 at.session_state["app_mode"] = "Localize"
 at.session_state["step"] = 3
-at.session_state["last_result"] = {"input_tokens": 1, "output_tokens": 1,
-                                   "verification": [], "applied": []}
-at.session_state["last_output_path"] = "outputs/_definitely_missing.mdx"
-at.session_state["last_output_filename"] = "x.mdx"
+at.session_state["last_results"] = [{
+    "source_name": "x.mdx", "output_filename": "x.mdx",
+    "output_path": "outputs/_definitely_missing.mdx",
+    "result": {"input_tokens": 1, "output_tokens": 1,
+               "verification": [], "applied": []},
+    "error": None, "log_id": None,
+}]
 at.run()
 check("파일 소실도 예외 없음", not at.exception, str(at.exception))
 check("파일 소실 안내", any("찾을 수 없습니다" in str(w.value) for w in at.warning),

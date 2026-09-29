@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import os
-import time
+import zipfile
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -31,9 +32,10 @@ from services.translation_logs import (
     list_logs,
     update_note,
 )
+from services import batch
 from services import catalog
 from services import effect_report
-from services.jobs import get_job, start_job
+from services.jobs import batch_progress, get_job, start_job
 from services.users import add_user, list_users
 from translator_engine import (MARKDOWN_EXTENSIONS, extract_bold_terms,
                                extract_korean_paragraphs)
@@ -155,6 +157,171 @@ def mime_for(filename: str) -> str:
     return _MIME_BY_SUFFIX.get(Path(filename).suffix.lower(), "application/octet-stream")
 
 
+def render_result_detail(entry: dict) -> None:
+    """
+    파일 하나의 결과 상세 — 다운로드·통일된 표현·적용내역 리포트·검증·메모.
+
+    배치 결과 화면에서 선택된 파일 하나만 그린다. 파일이 10개일 때 이 내용을
+    모두 펼치면 화면이 감당이 안 되므로, 요약표는 위에서 한눈에 보여주고
+    근거·검증은 고른 파일만 펼친다.
+    """
+    result = entry.get("result")
+    output_path = entry.get("output_path")
+    output_filename = entry.get("output_filename")
+
+    if not result:
+        st.error(f"✗ {entry['source_name']} — 번역 실패")
+        if entry.get("error"):
+            st.caption(entry["error"])
+        st.caption(
+            "API가 일시적으로 혼잡할 때(overloaded / rate limit) 나올 수 있습니다. "
+            "이 파일만 다시 올려 시도해 보세요."
+        )
+        return
+
+    if not entry.get("available"):
+        st.warning(
+            f"{entry['source_name']} — 산출물 파일을 찾을 수 없습니다. "
+            "앱이 재시작되면서 임시 파일이 정리된 것으로 보입니다.",
+            icon="⚠️",
+        )
+        return
+
+    _verify = result.get("verification") or []
+    _v_err = [v for v in _verify if v.get("level") == "오류"]
+
+    with open(output_path, "rb") as f:
+        st.download_button(
+            label=f"문서 다운로드 — {output_filename}",
+            data=f,
+            file_name=output_filename,
+            mime=mime_for(output_filename),
+            type="primary",
+            use_container_width=True,
+            key=f"dl::{output_path}",
+        )
+
+    # ── 무엇이 통일됐는가 ────────────────────────────────────────────
+    # 산출물만 받아서는 이 도구가 무슨 일을 했는지 알 수 없다. 글로서리와
+    # UI 매핑은 자리표시자로 치환되므로 "어떤 말을 어디에 몇 번 고정했는지"가
+    # 정확히 남는다. 그걸 그대로 보여준다 — 신뢰는 결과가 아니라 근거에서
+    # 나온다.
+    _applied = result.get("applied") or []
+    if _applied:
+        _n_terms = len(_applied)
+        _n_hits = sum(int(a.get("적용") or 0) for a in _applied)
+        st.markdown(" ")
+        with st.container(border=True):
+            st.markdown(
+                f"##### 🔤 이 문서에서 통일된 표현 — {_n_terms}개 표현 · "
+                f"{_n_hits:,}곳"
+            )
+            st.caption(
+                "글로서리와 UI 텍스트 매핑에 등록된 표현입니다. "
+                "본문 어디에 나오든 **같은 영문으로 고정**되었으므로, "
+                "문단마다 다르게 번역되는 일이 없습니다."
+            )
+            _adf = pd.DataFrame(_applied)
+            st.dataframe(
+                _adf, use_container_width=True, hide_index=True,
+                column_config={
+                    "KO": st.column_config.TextColumn("국문", width="small"),
+                    "EN": st.column_config.TextColumn("영문(고정)", width="small"),
+                    "출처": st.column_config.TextColumn("출처", width="small"),
+                    "적용": st.column_config.NumberColumn("적용", width="small"),
+                    "예문": st.column_config.TextColumn("산출물에서", width="large"),
+                },
+            )
+            _by_ui = sum(1 for a in _applied if a.get("출처") == "UI 매핑")
+            if _by_ui:
+                st.caption(
+                    f"이 중 {_by_ui}개는 Step 2에서 직접 지정하신 UI 텍스트이고, "
+                    f"나머지 {_n_terms - _by_ui}개는 Glossary에서 왔습니다."
+                )
+
+            # 적용 지점을 표시한 리포트. 산출물 자체는 건드리지 않는다 —
+            # 배포용 문서에 표시가 남으면 안 되므로 별도 파일이다.
+            # rerun마다 다시 만들지 않도록 산출물 경로로 캐시한다.
+            _rep_key = f"effect_report::{output_path}"
+            if _rep_key not in st.session_state:
+                try:
+                    st.session_state[_rep_key] = effect_report.build_html(
+                        _applied, str(output_path), output_filename,
+                        st.session_state.get("selected_product"),
+                    )
+                except Exception as _e:
+                    st.session_state[_rep_key] = None
+                    st.caption(f"적용 내역 리포트를 만들지 못했습니다: {_e}")
+            _rep = st.session_state.get(_rep_key)
+            if _rep:
+                st.download_button(
+                    "적용 내역 리포트 내려받기",
+                    data=_rep.encode("utf-8"),
+                    file_name=f"{Path(output_filename).stem}_적용내역.html",
+                    mime="text/html",
+                    use_container_width=True,
+                    key=f"dlrep::{output_path}",
+                    help="브라우저에서 열면 적용된 자리가 색으로 표시됩니다. "
+                         "노란색은 Glossary, 보라색은 UI 텍스트 매핑입니다. "
+                         "인쇄에서 PDF로 저장하거나 Word에 붙여넣을 수 있습니다.",
+                )
+    else:
+        st.markdown(" ")
+        st.info(
+            "이번 문서에는 글로서리·UI 매핑에 등록된 표현이 하나도 걸리지 "
+            "않았습니다. [Glossary 추출]에서 이 문서 기준으로 용어를 등재하면 "
+            "반복되는 표현이 한 가지 영문으로 고정됩니다.",
+            icon="💡",
+        )
+
+    # ── 산출물 검증 ──────────────────────────────────────────────────
+    # 번역 파이프라인은 문단 단위라, 링크·아이콘을 문서에 되꽂은 뒤 만들어지는
+    # 문장 오류를 스스로 볼 수 없다. 저장된 문서를 다시 읽어 검사한 결과다.
+    if _verify:
+        st.markdown(" ")
+        with st.container(border=True):
+            _n_warn = len(_verify) - len(_v_err)
+            st.markdown(
+                f"##### {'⚠️' if _v_err else '✅'} 산출물 검증"
+                + (f" — 오류 {len(_v_err)}건" if _v_err else " — 오류 없음")
+                + (f" · 경고 {_n_warn}건" if _n_warn else "")
+            )
+            for _v in _verify:
+                _icon = "✗" if _v["level"] == "오류" else "!"
+                st.markdown(f"**{_icon} {_v['title']}**")
+                if _v.get("detail"):
+                    st.caption(_v["detail"])
+            st.caption(
+                "원본과 번역본을 대조해 마커 노출·결측값·낱말 붙음·구조 요소·"
+                "용어 표기 갈림을 확인합니다. 터미널에서 다시 보려면: "
+                "`python output_check.py <원본> <번역본>`"
+            )
+
+    # ── 메모 입력 (이번 번역에 대한 비고) ─────────────────────────────
+    _log_id = entry.get("log_id")
+    if _log_id:
+        st.markdown(" ")
+        with st.container(border=True):
+            st.markdown("##### 📝 메모 (선택)")
+            st.caption(
+                "이번 번역에 대한 메모를 남겨두면 나중에 '로그' 메뉴에서 검색해 다시 찾기 쉽습니다. "
+                "UI 텍스트 매핑도 함께 저장돼 있어 같은 문서를 다시 번역할 때 불러올 수 있어요."
+            )
+            note_text = st.text_area(
+                "메모",
+                key=f"step3_note::{_log_id}",
+                placeholder="예: 에이전트 테스트 2차 — '저장' 라벨만 'Apply'로 강제 매핑",
+                label_visibility="collapsed",
+                height=80,
+            )
+            if st.button("메모 저장", key=f"save_note::{_log_id}"):
+                try:
+                    update_note(int(_log_id), note_text.strip())
+                    st.toast("메모 저장됨", icon="💾")
+                except Exception as e:
+                    st.error(f"메모 저장 오류: {e}")
+
+
 # ─────────────────────────────────────────────
 # 번역 진행 화면
 #
@@ -171,6 +338,78 @@ def mime_for(filename: str) -> str:
 #    rerun 한 번이면 초기화된다. 자세한 내용은 services/jobs.py 참고.
 # ─────────────────────────────────────────────
 
+_FILE_STATUS_ICON = {
+    "pending": "·", "running": "▶", "finished": "✓", "error": "✗",
+}
+
+
+def _draw_progress_bar(job: dict) -> None:
+    """진행률 위젯 한 벌. fragment와 종료 화면이 같은 모양을 쓰도록 분리."""
+    files = job["files"]
+    n = len(files)
+    label = "번역/QA 진행 중" if st.session_state.enable_qa else "번역 중"
+
+    st.progress(int(batch_progress(job) * 100))
+
+    cur = files[job["current"]] if 0 <= job["current"] < n else None
+    n_done = sum(1 for f in files if f["status"] in ("finished", "error"))
+    if n > 1:
+        head = f"{label}... 파일 {min(n_done + 1, n)}/{n}"
+    else:
+        head = f"{label}..."
+    if cur and cur["total"]:
+        head += f" · 문단 {cur['done']}/{cur['total']}"
+    elif cur:
+        head += " · 문서 분석 중"
+    st.caption(head)
+
+    # 파일이 여러 개면 어디까지 왔는지 목록으로 보여준다. 30분 걸리는
+    # 배치에서 "지금 무슨 파일을 하고 있나"는 진행률 숫자보다 중요하다.
+    if n > 1:
+        lines = []
+        for f in files:
+            icon = _FILE_STATUS_ICON.get(f["status"], "·")
+            tail = ""
+            if f["status"] == "running" and f["total"]:
+                tail = f" — {f['done']}/{f['total']}"
+            elif f["status"] == "error":
+                tail = " — 실패"
+            lines.append(f"{icon} {f['source_name']}{tail}")
+        st.caption("\n".join(lines))
+
+    st.caption("⏳ 연결이 잠깐 끊겨도 번역은 서버에서 계속 진행됩니다.")
+
+
+# 진행률 폴링 — fragment로 이 함수만 1초마다 다시 돌고, 스크립트 본문은
+# 건드리지 않는다.
+#
+# ⚠️ 예전에는 `time.sleep(1.0); st.rerun()`으로 전체 스크립트를 1초마다
+#    되돌렸다. 그러면 스크립트가 한순간도 "끝난" 상태가 되지 못한다.
+#    Streamlit 프론트엔드는 실행이 끝날 때 앞선 실행의 남은 위젯을
+#    정리하므로, 끝나지 않으면 클릭 직전에 그려둔 Step 2 폼이 화면에
+#    그대로 남는다. 남은 위젯은 실행 중에 stale(회색·클릭 불가)로 표시되고
+#    rerun 경계에서 잠깐 정상으로 돌아오므로 — "번역 시작" 버튼이 1초
+#    주기로 비활성/활성을 깜빡인다. 게다가 그 버튼이 실제로 눌리기 때문에
+#    번역 잡이 중복으로 떠서 API가 429/503(overloaded)을 뱉었다.
+#
+#    fragment는 자기 컨테이너만 다시 그리므로 스크립트 실행은 정상적으로
+#    끝나고, 폼은 제대로 치워지며, 1초마다 app.py 전체(사이드바·DB 조회)를
+#    재실행하던 낭비도 사라진다.
+@st.fragment(run_every=1.0)
+def _poll_translation_progress() -> None:
+    job = get_job(st.session_state.get("translate_job_id"))
+    if job is None:
+        # 프로세스가 재시작됐다. 종료 처리는 스크립트 본문 몫이다.
+        st.rerun(scope="app")
+        return
+
+    _draw_progress_bar(job)
+
+    if job["status"] != "running":
+        # 로그 저장·step 변경은 fragment 범위를 넘는다 → 전체 rerun 한 번.
+        st.rerun(scope="app")
+
+
 def render_translation_progress() -> None:
     """번역 중 화면 — 진행률만 그리고, 끝나면 로그를 남기고 Step 3으로."""
     job = get_job(st.session_state.get("translate_job_id"))
@@ -183,55 +422,74 @@ def render_translation_progress() -> None:
         # 잡이 사라졌다 = 앱 프로세스가 재시작됐다(데몬 스레드는 함께 죽는다).
         # 단순 rerun으로는 여기 오지 않는다 — 레지스트리가 모듈 전역이므로.
         _clear_job_state()
-        st.session_state.pop("pending_translate", None)
         st.error("앱이 재시작되어 번역이 중단되었습니다. 파일을 다시 올리고 시도해주세요.")
         if st.button("돌아가기", type="primary"):
             st.rerun()
         return
 
-    label = "번역/QA 진행 중" if st.session_state.enable_qa else "번역 중"
-    done, total = job["done"], job["total"]
-
-    st.progress(int(done / total * 100) if total else 0)
-    st.caption(f"{label}... {done}/{total}" if total else f"{label}... 문서 분석 중")
-    st.caption("⏳ 연결이 잠깐 끊겨도 번역은 서버에서 계속 진행됩니다.")
-
     if job["status"] == "running":
-        # 폴링 — 이 rerun은 위 st.stop() 덕분에 진행률 영역만 다시 그린다.
-        time.sleep(1.0)
-        st.rerun()
+        _poll_translation_progress()
         return
 
-    # ── 종료 처리 ────────────────────────────────────────────────
-    _clear_job_state()
-    pending = st.session_state.pop("pending_translate", None) or {}
-    params = job["params"]
+    _draw_progress_bar(job)
 
-    if job["status"] == "error":
-        st.error(f"오류: {job['error']}")
+    # ── 종료 처리 ────────────────────────────────────────────────
+    params = job["params"]
+    files = job["files"]
+    ok_files = [f for f in files if f["status"] == "finished"]
+
+    if not ok_files:
+        # 전부 실패. 여기서 translating_now를 먼저 내리면, 이어지는 rerun
+        # (무엇이든 — 위젯 조작, 웹소켓 재연결) 한 번에 이 화면이 사라지고
+        # Step 2 폼으로 되돌아간다. 사용자에게는 "눌렀는데 아무 설명 없이
+        # 원래 화면"으로만 보인다. 확인을 누를 때까지 잡을 붙잡아 둔다.
+        if len(files) == 1:
+            st.error(f"오류: {files[0]['error']}")
+        else:
+            st.error(f"{len(files)}개 파일 모두 번역에 실패했습니다.")
+            for f in files:
+                st.error(f"{f['source_name']} — {f['error']}")
+        st.caption(
+            "API가 일시적으로 혼잡할 때(overloaded / rate limit) 나올 수 있습니다. "
+            "잠시 후 다시 시도해주세요."
+        )
         if st.button("돌아가기", type="primary"):
+            _clear_job_state()
             st.rerun()
         return
 
-    result = job["result"]
-    st.session_state.last_result = result
-    st.session_state.last_output_path = params["out_path"]
-    st.session_state.last_output_filename = params["output_filename"]
+    _clear_job_state()
 
-    # 번역 로그 자동 저장
-    try:
-        st.session_state.last_log_id = create_log(
-            user=st.session_state.current_user,
-            product=st.session_state.selected_product or "",
-            translation_mode=st.session_state.translation_mode or "",
-            source_file=pending.get("uploaded_name") or Path(params["in_path"]).name,
-            output_file=params["output_filename"],
-            ui_text_overrides=params["ui_overrides"] or {},
-            metrics=result,
-            note="",
-        )
-    except Exception as log_err:
-        st.warning(f"로그 저장 중 경고: {log_err}")
+    # ── 파일별 결과 + 로그 ───────────────────────────────────────
+    results = []
+    for f in files:
+        entry = {
+            "source_name": f["source_name"],
+            "output_filename": f["output_filename"],
+            "output_path": f["out_path"],
+            "result": f["result"],
+            "error": f["error"],
+            "log_id": None,
+        }
+        if f["status"] == "finished":
+            # 번역 로그 자동 저장 — 파일마다 한 건. 로그 화면과 '이전 매핑
+            # 불러오기'가 파일 단위로 동작하므로 배치로 묶지 않는다.
+            try:
+                entry["log_id"] = create_log(
+                    user=st.session_state.current_user,
+                    product=st.session_state.selected_product or "",
+                    translation_mode=st.session_state.translation_mode or "",
+                    source_file=f["source_name"],
+                    output_file=f["output_filename"],
+                    ui_text_overrides=params["ui_overrides"] or {},
+                    metrics=f["result"],
+                    note="",
+                )
+            except Exception as log_err:
+                st.warning(f"{f['source_name']} 로그 저장 중 경고: {log_err}")
+        results.append(entry)
+
+    st.session_state.last_results = results
 
     # Step 2에서 채운 반복 용어를 글로서리에 등재 (체크한 경우에만).
     # 번역이 끝난 뒤에 하는 이유 — 번역이 실패하면 검증되지 않은 표기가
@@ -248,8 +506,7 @@ def render_translation_progress() -> None:
                     "DNT": False, "Case-sensitive": False,
                     "Note": "번역 전 반복 용어에서 등재",
                     "Status": "approved",
-                    "File": pending.get("uploaded_name")
-                            or Path(params["in_path"]).name,
+                    "File": ", ".join(f["source_name"] for f in ok_files),
                 }),
                 view_ids=set(),
                 current_user=st.session_state.current_user,
@@ -261,9 +518,9 @@ def render_translation_progress() -> None:
             st.warning(f"용어 등재 중 경고: {term_err}")
 
     # 임시 상태 정리
-    st.session_state.pop("ui_text_mapping_rows", None)
-    st.session_state.pop("ui_text_source_sig", None)
-    st.session_state.pop("ui_text_input_path", None)
+    for _k in ("ui_text_mapping_rows", "ui_text_source_sig", "ui_text_input_paths",
+               "term_candidate_rows", "last_batch_detail"):
+        st.session_state.pop(_k, None)
 
     st.session_state.step = 3
     st.rerun()
@@ -335,9 +592,9 @@ def init_session_state():
         "enable_cache": True,
         "enable_qa": True,
         "current_user": "",
-        "last_result": None,
-        "last_output_path": None,
-        "last_output_filename": None,
+        # 배치 결과 — 파일 하나를 올려도 길이 1인 목록이다. 단일/다중을
+        # 분기하지 않으려고 모양을 하나로 통일했다.
+        "last_results": [],
         "glossary_editor_key": 0,
         "pattern_editor_key": 0,
     }
@@ -347,9 +604,8 @@ def init_session_state():
 
 
 def reset_translation_result():
-    st.session_state.last_result = None
-    st.session_state.last_output_path = None
-    st.session_state.last_output_filename = None
+    st.session_state.last_results = []
+    st.session_state.pop("last_batch_detail", None)
 
 
 # ─────────────────────────────────────────────
@@ -661,7 +917,7 @@ def _has_unsaved_changes() -> bool:
 def _clear_unsaved_state() -> None:
     """사용자가 '예, 버리고 이동'을 선택했을 때 임시 상태를 정리."""
     for k in (
-        "ui_text_mapping_rows", "ui_text_source_sig", "ui_text_input_path",
+        "ui_text_mapping_rows", "ui_text_source_sig", "ui_text_input_paths",
         "term_candidate_rows",
         "ui_text_preload_counts", "staged_master", "glossary_table_dirty",
     ):
@@ -2515,6 +2771,8 @@ if st.session_state.step == 2:
         "자동으로 뽑아 표에 보여드립니다. "
         "그대로 쓰고 싶은 영문 표기가 있으면 EN 칸에 입력하세요. "
         "비워두면 LLM이 알아서 번역하고, 입력한 항목은 그 표기 그대로 사용됩니다. "
+        "**여러 개를 한 번에 올릴 수 있습니다** — 매핑 표는 하나로 합쳐지고, "
+        "입력한 영문이 올린 문서 전체에 같게 적용됩니다. "
         "이 매핑은 자동으로 **[로그] 메뉴에 기록**되어, 나중에 같은 문서를 다시 번역할 때 불러올 수 있어요."
     )
     render_summary_pills(
@@ -2550,25 +2808,42 @@ if st.session_state.step == 2:
         .to_dict("records")
     )
 
-    uploaded_docx = st.file_uploader(
-        "업로드 또는 끌어서 놓기",
+    uploaded_docs = st.file_uploader(
+        "업로드 또는 끌어서 놓기 (여러 개 선택 가능)",
         type=["docx", "md", "markdown", "mdx"],
+        accept_multiple_files=True,
         label_visibility="collapsed",
     )
+    if uploaded_docs:
+        if len(uploaded_docs) > 1:
+            st.caption(
+                f"📎 {len(uploaded_docs)}개 · 순차로 번역합니다 — "
+                + " · ".join(d.name for d in uploaded_docs)
+            )
+        else:
+            st.caption(f"📎 {uploaded_docs[0].name}")
 
     # ── 파일 업로드 후: bold 추출 + 글로서리 자동 매칭 → 매핑 입력 표 ─
+    #
+    # 여러 파일을 올리면 표는 **하나로 병합**한다. 파일마다 따로 입력받으면
+    # 같은 용어를 여러 번 적어야 하고, 무엇보다 문서 간 표기가 갈린다
+    # (이 도구의 존재 이유가 표기 통일이므로 그건 곧 실패다). 어느 파일에서
+    # 왔는지는 '출처' 열로 보여주고, 입력한 영문은 배치 전체에 적용한다.
     ui_mapping_df = None
-    saved_input_path: Optional[Path] = None
+    saved_input_paths: list = []
 
-    if uploaded_docx is not None:
-        # 파일 바뀌면 재추출 (파일명 + size + 컬럼 스키마 버전).
+    if uploaded_docs:
+        # 파일 묶음이 바뀌면 재추출 (파일명+size 전체 + 컬럼 스키마 버전).
         # 스키마 버전은 ui_text_mapping_rows의 키 구조를 바꿀 때마다 올린다 —
         # 그래야 이전 세션의 row가 새 컬럼과 안 맞을 때 자동 재추출된다.
-        file_sig = f"{uploaded_docx.name}::{uploaded_docx.size}::ctx_v2"
+        file_sig = "||".join(f"{d.name}::{d.size}" for d in uploaded_docs) + "::batch_v1"
         if st.session_state.get("ui_text_source_sig") != file_sig:
             try:
-                tmp_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
-                bold_with_ctx = extract_bold_terms(str(tmp_path))
+                # 업로드 파일 저장은 반드시 메인 스레드에서 — UploadedFile은
+                # 스크립트 실행에 묶인 객체라 백그라운드로 넘기지 않는다.
+                _saved = [
+                    (d.name, save_uploaded_file(d, UPLOAD_DIR)) for d in uploaded_docs
+                ]
 
                 # 글로서리 자동 매칭 (KO 일치)
                 _glossary_lookup = {
@@ -2579,26 +2854,19 @@ if st.session_state.step == 2:
                 # 로그에서 가져온 매핑 — 글로서리보다 우선
                 _preloaded = st.session_state.pop("preload_ui_mapping", None) or {}
 
-                initial_rows = []
-                _source_counts = {"글로서리": 0, "로그": 0}
-                for ko, ctx in bold_with_ctx:
-                    if ko in _preloaded:
-                        en = _preloaded[ko]
-                        _source_counts["로그"] += 1
-                    elif ko in _glossary_lookup:
-                        en = _glossary_lookup[ko]
-                        _source_counts["글로서리"] += 1
-                    else:
-                        en = ""
-                    initial_rows.append({
-                        "KO (Bold)": ko,
-                        "EN (입력)": en,
-                        "맥락": ctx,
-                    })
+                # KO 기준으로 합친다 — 같은 라벨은 한 행, 출처 파일은 모아서.
+                initial_rows, _source_counts = batch.merge_bold_terms(
+                    [(_name, extract_bold_terms(str(_path)))
+                     for _name, _path in _saved],
+                    glossary_lookup=_glossary_lookup,
+                    preloaded=_preloaded,
+                )
 
                 st.session_state.ui_text_mapping_rows = initial_rows
                 st.session_state.ui_text_source_sig = file_sig
-                st.session_state.ui_text_input_path = str(tmp_path)
+                st.session_state.ui_text_input_paths = [
+                    {"source_name": n, "path": str(p)} for n, p in _saved
+                ]
                 st.session_state.ui_text_preload_counts = _source_counts
 
                 # 반복 용어 → 글로서리 후보.
@@ -2608,29 +2876,38 @@ if st.session_state.step == 2:
                 # 문단마다 다르게 번역된다 (실제로 "데이터 기반 답변
                 # 에이전트"가 다섯 가지로 나왔다). 번역 직전에 이 문서에서
                 # 반복되는 용어를 보여주고 영문을 정하게 한다.
+                #
+                # 여러 파일의 문단을 한 번에 넣는다 — 빈도가 배치 전체 기준이
+                # 되어야 "문서 3개에 흩어져 각 2번"처럼 파일별로는 기준에 못
+                # 미치지만 실제로는 반복되는 용어가 잡힌다.
                 _known = {r.get("KO") for r in glossary_rows if r.get("KO")}
                 _known |= {r["KO (Bold)"] for r in initial_rows}
+                _all_paras = []
+                for _name, _path in _saved:
+                    _all_paras.extend(extract_korean_paragraphs(str(_path)))
                 st.session_state.term_candidate_rows = (
                     catalog.suggest_terms_from_texts(
-                        extract_korean_paragraphs(str(tmp_path)),
-                        exclude=_known,
+                        _all_paras, exclude=_known,
                     ).to_dict("records")
                 )
             except Exception as e:
                 st.error(f"문서에서 볼드 텍스트 추출 실패: {e}")
 
-        saved_input_path = Path(st.session_state.ui_text_input_path) if st.session_state.get("ui_text_input_path") else None
+        saved_input_paths = st.session_state.get("ui_text_input_paths") or []
         ui_mapping_df = pd.DataFrame(
             st.session_state.get("ui_text_mapping_rows", []),
-            columns=["KO (Bold)", "EN (입력)", "맥락"],
+            columns=["KO (Bold)", "EN (입력)", "맥락", "출처"],
         )
 
         if ui_mapping_df.empty:
-            st.info("이 문서에는 볼드 처리된 한국어 텍스트가 없습니다. 그대로 번역을 진행하세요.", icon="ℹ️")
+            st.info("올린 문서에는 볼드 처리된 한국어 텍스트가 없습니다. 그대로 번역을 진행하세요.", icon="ℹ️")
         else:
-            # 같은 파일 또는 같은 제품의 이전 로그가 있으면 매핑 재사용 옵션 제공
+            # 같은 파일 또는 같은 제품의 이전 로그가 있으면 매핑 재사용 옵션 제공.
+            # 여러 파일이면 첫 파일 이름으로 찾는다 — '동일 제품' 매칭이 어차피
+            # 같이 걸리고, 불러온 매핑은 KO 일치로만 채워지므로 배치 전체에
+            # 안전하게 적용된다.
             _related_logs = find_related_logs(
-                source_file=uploaded_docx.name,
+                source_file=uploaded_docs[0].name,
                 product=st.session_state.selected_product or "",
                 limit=15,
             )
@@ -2700,7 +2977,11 @@ if st.session_state.step == 2:
                     bits.append(f"글로서리에서 **{_counts['글로서리']}개**")
                 st.caption(f"💡 {' / '.join(bits)} 자동 매칭됨")
 
-            st.markdown(f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)")
+            st.markdown(
+                f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)"
+                + (f" — 파일 {len(uploaded_docs)}개에서 병합"
+                   if len(uploaded_docs) > 1 else "")
+            )
             st.caption(
                 "⌨️ EN 칸에 입력하고 **Enter**를 누르면 값이 확정되면서 "
                 "**바로 아래 행의 EN 칸**으로 내려갑니다. 연속 입력에 쓰세요. "
@@ -2711,10 +2992,16 @@ if st.session_state.step == 2:
                 use_container_width=True,
                 hide_index=True,
                 num_rows="fixed",
-                disabled=["KO (Bold)", "맥락"],
-                column_order=["KO (Bold)", "EN (입력)", "맥락"],
+                disabled=["KO (Bold)", "맥락", "출처"],
+                column_order=(["KO (Bold)", "EN (입력)", "출처", "맥락"]
+                              if len(uploaded_docs) > 1
+                              else ["KO (Bold)", "EN (입력)", "맥락"]),
                 column_config={
                     "KO (Bold)": st.column_config.TextColumn("KO (Bold)", width="small"),
+                    "출처": st.column_config.TextColumn(
+                        "출처 파일", disabled=True, width="small",
+                        help="이 라벨이 나온 파일. 입력한 영문은 올린 파일 전체에 적용됩니다.",
+                    ),
                     "EN (입력)": st.column_config.TextColumn(
                         "EN (입력)",
                         help="비워두면 LLM이 번역. 입력하면 이 표기 그대로 사용.",
@@ -2798,17 +3085,23 @@ if st.session_state.step == 2:
 
     with col_translate:
         translate_clicked = st.button(
-            "번역 시작",
+            f"번역 시작 ({len(uploaded_docs)}개)" if len(uploaded_docs or []) > 1
+            else "번역 시작",
             type="primary",
             use_container_width=True,
-            disabled=(uploaded_docx is None),
+            disabled=not uploaded_docs,
         )
 
     # 클릭 시점에 백그라운드 잡을 띄우고 rerun → 다음 렌더부터는 위쪽
     # translating_now 분기가 진행률만 그린다. 번역 자체는 스크립트 실행과
     # 무관하게 스레드에서 계속 돌기 때문에 rerun이 나도 재시작되지 않는다.
     if translate_clicked:
-        if uploaded_docx is None:
+        # 이미 돌고 있는 잡이 있으면 무시. 잡을 두 개 띄우면 같은 문서를
+        # 두 번 번역하면서 API rate limit을 스스로 때리게 된다 — 출력 파일
+        # 경로도 같아 나중에 끝난 쪽이 앞선 결과를 덮어쓴다.
+        if st.session_state.get("translating_now"):
+            pass
+        elif not uploaded_docs:
             st.error("문서를 업로드하세요.")
         else:
             # 사용자가 채운 반복 용어를 이번 번역의 글로서리에 얹는다.
@@ -2842,17 +3135,31 @@ if st.session_state.step == 2:
 
             # 업로드 파일 저장은 반드시 메인 스레드에서 — UploadedFile은
             # 스크립트 실행에 묶인 객체라 백그라운드 스레드로 넘기지 않는다.
-            if saved_input_path is None or not saved_input_path.exists():
-                saved_input_path = save_uploaded_file(uploaded_docx, UPLOAD_DIR)
+            # 위 추출 단계에서 이미 저장해 뒀으면 그 경로를 재사용한다.
+            _saved_by_name = {
+                e["source_name"]: Path(e["path"])
+                for e in (saved_input_paths or [])
+            }
+            _out_names = batch.unique_output_names([
+                make_default_output_filename(
+                    st.session_state.selected_product, _doc.name,
+                )
+                for _doc in uploaded_docs
+            ])
+            _job_files = []
+            for _doc, _out_name in zip(uploaded_docs, _out_names):
+                _in = _saved_by_name.get(_doc.name)
+                if _in is None or not _in.exists():
+                    _in = save_uploaded_file(_doc, UPLOAD_DIR)
+                _job_files.append({
+                    "source_name": _doc.name,
+                    "in_path": str(_in),
+                    "out_path": str(OUTPUT_DIR / _out_name),
+                    "output_filename": _out_name,
+                })
 
-            _output_filename = make_default_output_filename(
-                st.session_state.selected_product,
-                uploaded_docx.name,
-            )
             st.session_state.translate_job_id = start_job({
-                "in_path": str(saved_input_path),
-                "out_path": str(OUTPUT_DIR / _output_filename),
-                "output_filename": _output_filename,
+                "files": _job_files,
                 "glossary_rows": glossary_rows,
                 "pattern_rows": pattern_rows,
                 "api_key": OPENAI_API_KEY,
@@ -2861,7 +3168,6 @@ if st.session_state.step == 2:
                 "translation_mode": st.session_state.translation_mode,
                 "ui_overrides": _ui_overrides_pending,
             })
-            st.session_state.pending_translate = {"uploaded_name": uploaded_docx.name}
             st.session_state.translating_now = True
             st.rerun()
 
@@ -2873,13 +3179,11 @@ if st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.subheader("Step 3. 다운로드")
 
-    result = st.session_state.last_result
-    output_path = st.session_state.last_output_path
-    output_filename = st.session_state.last_output_filename
+    results = st.session_state.get("last_results") or []
 
     # 세션이 비었으면 앱이 재시작된 것이다. 조용히 첫 화면으로 되돌리면
     # 사용자는 "다운로드를 눌렀더니 화면이 튕겼다"로만 인식한다.
-    if not result or not output_path:
+    if not results:
         st.warning(
             "앱이 다시 시작되어 이전 번역 결과가 사라졌습니다. "
             "배포나 재시작이 있으면 세션이 초기화됩니다. "
@@ -2895,9 +3199,19 @@ elif st.session_state.step == 3:
             _try_navigate({"app_mode": "로그"})
         st.stop()
 
-    # 파일 자체가 사라진 경우도 같다 — 클라우드는 재시작하면 임시 파일을
-    # 잃는다. 여기서 걸러야 open()에서 예외로 터지지 않는다.
-    if not Path(output_path).exists():
+    # 산출물 파일이 사라진 경우 — 클라우드는 재시작하면 임시 파일을 잃는다.
+    # 여기서 걸러야 open()에서 예외로 터지지 않는다. 파일별로 따로 본다:
+    # 5개 중 1개가 없어져도 나머지 4개는 받을 수 있어야 한다.
+    for _r in results:
+        _r["available"] = bool(
+            _r.get("output_path") and Path(_r["output_path"]).exists()
+        )
+
+    ok = [r for r in results if r.get("result") and r["available"]]
+    failed = [r for r in results if not r.get("result")]
+    gone = [r for r in results if r.get("result") and not r["available"]]
+
+    if not ok:
         st.warning(
             "산출물 파일을 찾을 수 없습니다. 앱이 재시작되면서 임시 파일이 "
             "정리된 것으로 보입니다. 다시 번역해 주세요.",
@@ -2908,159 +3222,141 @@ elif st.session_state.step == 3:
             st.rerun()
         st.stop()
 
-    # input/output 토큰 분리 비용 계산
-    estimated_cost = estimate_cost_usd(
-        result.get("input_tokens", 0),
-        result.get("output_tokens", 0),
-    )
+    # ── 배치 요약 ────────────────────────────────────────────────────
+    def _cost_of(r: dict) -> float:
+        m = r.get("result") or {}
+        return estimate_cost_usd(m.get("input_tokens", 0), m.get("output_tokens", 0))
 
-    _verify = result.get("verification") or []
-    _v_err = [v for v in _verify if v.get("level") == "오류"]
-    if _v_err:
+    def _errors_of(r: dict) -> list:
+        return [v for v in ((r.get("result") or {}).get("verification") or [])
+                if v.get("level") == "오류"]
+
+    _n_verify_err = sum(1 for r in ok if _errors_of(r))
+
+    if failed:
         st.warning(
-            f"로컬라이즈는 끝났지만 산출물 검증에서 오류 {len(_v_err)}건이 나왔습니다. "
-            "아래를 확인한 뒤 배포하세요.",
+            f"{len(results)}개 중 **{len(ok)}개 완료**, **{len(failed)}개 실패**. "
+            "실패한 파일은 아래 표에서 사유를 확인하고 다시 시도하세요.",
+            icon="⚠️",
+        )
+    elif _n_verify_err:
+        st.warning(
+            f"로컬라이즈는 끝났지만 {_n_verify_err}개 파일의 산출물 검증에서 "
+            "오류가 나왔습니다. 아래를 확인한 뒤 배포하세요.",
             icon="⚠️",
         )
     else:
-        st.success("로컬라이즈가 완료되었습니다.")
+        st.success(
+            f"로컬라이즈가 완료되었습니다. ({len(ok)}개)" if len(ok) > 1
+            else "로컬라이즈가 완료되었습니다."
+        )
+    if gone:
+        st.caption(
+            "⚠️ 산출물 파일이 사라진 항목이 있습니다(앱 재시작): "
+            + ", ".join(r["source_name"] for r in gone)
+        )
+
     st.write("### 결과")
 
+    _tot_in = sum((r.get("result") or {}).get("input_tokens", 0) for r in ok)
+    _tot_out = sum((r.get("result") or {}).get("output_tokens", 0) for r in ok)
     col_a, col_b, col_c = st.columns(3)
-    col_a.metric("입력 토큰", f"{result.get('input_tokens', 0):,}")
-    col_b.metric("출력 토큰", f"{result.get('output_tokens', 0):,}")
-    col_c.metric("예상 비용", f"${estimated_cost}")
+    col_a.metric("입력 토큰", f"{_tot_in:,}")
+    col_b.metric("출력 토큰", f"{_tot_out:,}")
+    col_c.metric("예상 비용", f"${round(sum(_cost_of(r) for r in ok), 4)}")
+
+    # 파일이 여러 개면 한눈에 보는 표를 먼저. 상세는 아래에서 하나씩.
+    if len(results) > 1:
+        _rows = []
+        for r in results:
+            m = r.get("result") or {}
+            _v_err = _errors_of(r)
+            _v_all = m.get("verification") or []
+            if not r.get("result"):
+                _state, _verify_cell = "✗ 실패", "-"
+            elif not r["available"]:
+                _state, _verify_cell = "⚠️ 파일 없음", "-"
+            elif _v_err:
+                _state, _verify_cell = "✓ 완료", f"⚠️ 오류 {len(_v_err)}"
+            elif _v_all:
+                _state, _verify_cell = "✓ 완료", f"! 경고 {len(_v_all)}"
+            else:
+                _state, _verify_cell = "✓ 완료", "✓"
+            _rows.append({
+                "파일": r["source_name"],
+                "상태": _state,
+                "문단": m.get("paragraphs_translated", 0) or 0,
+                "토큰": m.get("total_tokens", 0) or 0,
+                "비용": f"${_cost_of(r)}" if r.get("result") else "-",
+                "검증": _verify_cell,
+                # 실패가 없으면 빈 열이 되므로 아래에서 떼어낸다.
+                "사유": (r.get("error") or "")[:120],
+            })
+        _sdf = pd.DataFrame(_rows)
+        if not failed:
+            _sdf = _sdf.drop(columns=["사유"])
+        st.dataframe(
+            _sdf, use_container_width=True, hide_index=True,
+            column_config={
+                "파일": st.column_config.TextColumn("파일", width="medium"),
+                "상태": st.column_config.TextColumn("상태", width="small"),
+                "문단": st.column_config.NumberColumn("문단", width="small"),
+                "토큰": st.column_config.NumberColumn("토큰", width="small"),
+                "비용": st.column_config.TextColumn("비용", width="small"),
+                "검증": st.column_config.TextColumn("검증", width="small"),
+                "사유": st.column_config.TextColumn("실패 사유", width="large"),
+            },
+        )
+
+        # ZIP 일괄 다운로드 — 파일마다 버튼을 누르게 하면 10개짜리 배치에서
+        # 열 번 눌러야 한다. 산출물 경로로 캐시해 rerun마다 다시 만들지 않는다.
+        _zip_key = "batch_zip::" + "|".join(r["output_path"] for r in ok)
+        if _zip_key not in st.session_state:
+            try:
+                _buf = io.BytesIO()
+                with zipfile.ZipFile(_buf, "w", zipfile.ZIP_DEFLATED) as _zf:
+                    for r in ok:
+                        _zf.write(r["output_path"], arcname=r["output_filename"])
+                st.session_state[_zip_key] = _buf.getvalue()
+            except Exception as _e:
+                st.session_state[_zip_key] = None
+                st.caption(f"ZIP을 만들지 못했습니다: {_e}")
+        _zip_bytes = st.session_state.get(_zip_key)
+        if _zip_bytes:
+            _zip_name = (
+                f"{(st.session_state.selected_product or 'localized')}_en_"
+                f"{len(ok)}files.zip"
+            )
+            st.download_button(
+                f"전체 ZIP 다운로드 ({len(ok)}개)",
+                data=_zip_bytes,
+                file_name=_zip_name,
+                mime="application/zip",
+                type="primary",
+                use_container_width=True,
+            )
 
     st.markdown("")
 
-    with open(output_path, "rb") as f:
-        st.download_button(
-            label="문서 다운로드",
-            data=f,
-            file_name=output_filename,
-            mime=mime_for(output_filename),
-            type="primary",
-            use_container_width=True,
+    # ── 파일 선택 → 상세 ─────────────────────────────────────────────
+    if len(results) > 1:
+        st.markdown("##### 파일별 상세")
+        _labels = {
+            i: ("✓ " if r.get("result") and r["available"] else "✗ ") + r["source_name"]
+            for i, r in enumerate(results)
+        }
+        _pick = st.selectbox(
+            "상세를 볼 파일",
+            options=list(_labels.keys()),
+            format_func=lambda i: _labels[int(i)],
+            key="last_batch_detail",
+            label_visibility="collapsed",
         )
-
-    # ── 무엇이 통일됐는가 ────────────────────────────────────────────
-    # 산출물만 받아서는 이 도구가 무슨 일을 했는지 알 수 없다. 글로서리와
-    # UI 매핑은 자리표시자로 치환되므로 "어떤 말을 어디에 몇 번 고정했는지"가
-    # 정확히 남는다. 그걸 그대로 보여준다 — 신뢰는 결과가 아니라 근거에서
-    # 나온다.
-    _applied = result.get("applied") or []
-    if _applied:
-        _n_terms = len(_applied)
-        _n_hits = sum(int(a.get("적용") or 0) for a in _applied)
-        st.markdown(" ")
-        with st.container(border=True):
-            st.markdown(
-                f"##### 🔤 이 문서에서 통일된 표현 — {_n_terms}개 표현 · "
-                f"{_n_hits:,}곳"
-            )
-            st.caption(
-                "글로서리와 UI 텍스트 매핑에 등록된 표현입니다. "
-                "본문 어디에 나오든 **같은 영문으로 고정**되었으므로, "
-                "문단마다 다르게 번역되는 일이 없습니다."
-            )
-            _adf = pd.DataFrame(_applied)
-            st.dataframe(
-                _adf, use_container_width=True, hide_index=True,
-                column_config={
-                    "KO": st.column_config.TextColumn("국문", width="small"),
-                    "EN": st.column_config.TextColumn("영문(고정)", width="small"),
-                    "출처": st.column_config.TextColumn("출처", width="small"),
-                    "적용": st.column_config.NumberColumn("적용", width="small"),
-                    "예문": st.column_config.TextColumn("산출물에서", width="large"),
-                },
-            )
-            _by_ui = sum(1 for a in _applied if a.get("출처") == "UI 매핑")
-            if _by_ui:
-                st.caption(
-                    f"이 중 {_by_ui}개는 Step 2에서 직접 지정하신 UI 텍스트이고, "
-                    f"나머지 {_n_terms - _by_ui}개는 Glossary에서 왔습니다."
-                )
-
-            # 적용 지점을 표시한 리포트. 산출물 자체는 건드리지 않는다 —
-            # 배포용 문서에 표시가 남으면 안 되므로 별도 파일이다.
-            # rerun마다 다시 만들지 않도록 산출물 경로로 캐시한다.
-            _rep_key = f"effect_report::{output_path}"
-            if _rep_key not in st.session_state:
-                try:
-                    st.session_state[_rep_key] = effect_report.build_html(
-                        _applied, str(output_path), output_filename,
-                        st.session_state.get("selected_product"),
-                    )
-                except Exception as _e:
-                    st.session_state[_rep_key] = None
-                    st.caption(f"적용 내역 리포트를 만들지 못했습니다: {_e}")
-            _rep = st.session_state.get(_rep_key)
-            if _rep:
-                st.download_button(
-                    "적용 내역 리포트 내려받기",
-                    data=_rep.encode("utf-8"),
-                    file_name=f"{Path(output_filename).stem}_적용내역.html",
-                    mime="text/html",
-                    use_container_width=True,
-                    help="브라우저에서 열면 적용된 자리가 색으로 표시됩니다. "
-                         "노란색은 Glossary, 보라색은 UI 텍스트 매핑입니다. "
-                         "인쇄에서 PDF로 저장하거나 Word에 붙여넣을 수 있습니다.",
-                )
+        detail = results[int(_pick)]
     else:
-        st.markdown(" ")
-        st.info(
-            "이번 문서에는 글로서리·UI 매핑에 등록된 표현이 하나도 걸리지 "
-            "않았습니다. [Glossary 추출]에서 이 문서 기준으로 용어를 등재하면 "
-            "반복되는 표현이 한 가지 영문으로 고정됩니다.",
-            icon="💡",
-        )
+        detail = results[0]
 
-    # ── 산출물 검증 ──────────────────────────────────────────────────
-    # 번역 파이프라인은 문단 단위라, 링크·아이콘을 문서에 되꽂은 뒤 만들어지는
-    # 문장 오류를 스스로 볼 수 없다. 저장된 문서를 다시 읽어 검사한 결과다.
-    if _verify:
-        st.markdown(" ")
-        with st.container(border=True):
-            _n_warn = len(_verify) - len(_v_err)
-            st.markdown(
-                f"##### {'⚠️' if _v_err else '✅'} 산출물 검증"
-                + (f" — 오류 {len(_v_err)}건" if _v_err else " — 오류 없음")
-                + (f" · 경고 {_n_warn}건" if _n_warn else "")
-            )
-            for _v in _verify:
-                _icon = "✗" if _v["level"] == "오류" else "!"
-                st.markdown(f"**{_icon} {_v['title']}**")
-                if _v.get("detail"):
-                    st.caption(_v["detail"])
-            st.caption(
-                "원본과 번역본을 대조해 마커 노출·결측값·낱말 붙음·구조 요소·"
-                "용어 표기 갈림을 확인합니다. 터미널에서 다시 보려면: "
-                "`python output_check.py <원본> <번역본>`"
-            )
-
-    # ── 메모 입력 (이번 번역에 대한 비고) ─────────────────────────────
-    _log_id = st.session_state.get("last_log_id")
-    if _log_id:
-        st.markdown(" ")
-        with st.container(border=True):
-            st.markdown("##### 📝 메모 (선택)")
-            st.caption(
-                "이번 번역에 대한 메모를 남겨두면 나중에 '로그' 메뉴에서 검색해 다시 찾기 쉽습니다. "
-                "UI 텍스트 매핑도 함께 저장돼 있어 같은 문서를 다시 번역할 때 불러올 수 있어요."
-            )
-            note_text = st.text_area(
-                "메모",
-                key="step3_note",
-                placeholder="예: 에이전트 테스트 2차 — '저장' 라벨만 'Apply'로 강제 매핑",
-                label_visibility="collapsed",
-                height=80,
-            )
-            if st.button("메모 저장", key="save_note_step3"):
-                try:
-                    update_note(int(_log_id), note_text.strip())
-                    st.toast("메모 저장됨", icon="💾")
-                except Exception as e:
-                    st.error(f"메모 저장 오류: {e}")
+    render_result_detail(detail)
 
     st.markdown("---")
     col_prev, col_restart = st.columns(2)

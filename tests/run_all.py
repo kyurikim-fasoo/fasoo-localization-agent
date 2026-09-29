@@ -21,6 +21,7 @@ SUITES = [
     ("docx 회귀(어댑터 리팩터링 안전망)", "regression_docx.py"),
     ("카탈로그 추출", "test_catalog.py"),
     ("앱 UI", "test_app_ui.py"),
+    ("여러 문서 동시 로컬라이즈(병합·배치 잡)", "test_batch.py"),
     ("산출물 검증(마커·저장 후 대조)", "test_output_check.py"),
     ("적용 내역 리포트(하이라이트)", "test_effect_report.py"),
     ("글로서리 중복 삽입 방지", "test_glossary_dupe.py"),
