@@ -856,6 +856,38 @@ if not OPENAI_API_KEY:
     st.stop()
 
 
+def render_sync_banner() -> None:
+    """
+    데이터가 서버에 올라가지 않고 있으면 그 사실을 화면에 알린다.
+
+    Cloud의 디스크는 휘발성이라, 동기화가 실패하면 화면상 저장은 성공했는데
+    다음 재부팅에 조용히 사라진다. 실제로 "Glossary를 저장했는데 다시 실행하니
+    없다"가 이것이었다. 조용히 잃는 것이 가장 나쁜 결과이므로 밖으로 드러낸다.
+    """
+    try:
+        from services import sync
+    except Exception:
+        return
+    if not sync.is_enabled():
+        return          # 로컬 개발 — 파일이 그대로 남으므로 알릴 것이 없다
+
+    err = sync.last_error()
+    if err:
+        st.warning(
+            "⚠️ **저장한 내용이 서버에 올라가지 않았습니다.** 앱이 재시작되면 "
+            "사라질 수 있습니다. 관리자에게 알려주세요.\n\n"
+            f"`{err}`",
+            icon="⚠️",
+        )
+    elif sync.fallback_active():
+        st.info(
+            "데이터 전용 브랜치를 쓸 수 없어 배포 브랜치로 저장하고 있습니다. "
+            "데이터는 보존되지만, 저장할 때 앱이 재시작되어 화면이 처음으로 "
+            "돌아갈 수 있습니다. (GITHUB_DATA_BRANCH 설정 확인 필요)",
+            icon="ℹ️",
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 로그인 페이지 — current_user가 비어있으면 다른 화면 일체 안 보임
 # ──────────────────────────────────────────────────────────────────────
@@ -1003,6 +1035,9 @@ def _confirm_nav_dialog():
 # 페이지 렌더링 시작 전, 모달 큐가 있으면 띄움
 if st.session_state.get("pending_nav_target"):
     _confirm_nav_dialog()
+
+
+render_sync_banner()
 
 
 # ── 사이드바: 메뉴 nav (헤더 라벨 없음, 테두리 없는 Wrapsody 스타일) ────
