@@ -20,6 +20,7 @@ SUITES = [
     ("마크다운 엔드투엔드", "regression_markdown.py"),
     ("docx 회귀(어댑터 리팩터링 안전망)", "regression_docx.py"),
     ("카탈로그 추출", "test_catalog.py"),
+    ("하우스 스타일(표기 규칙 자동 교정)", "test_house_style.py"),
     ("앱 UI", "test_app_ui.py"),
     ("여러 문서 동시 로컬라이즈(병합·배치 잡)", "test_batch.py"),
     ("GitHub 데이터 동기화(배포 브랜치 분리·부팅 복원)", "test_sync.py"),

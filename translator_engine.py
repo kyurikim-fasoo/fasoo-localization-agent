@@ -1592,6 +1592,148 @@ def apply_highlight_fallback(translated: str, source_marked: str) -> str:
     return f"⟦HL:{colour}⟧{translated}⟦/HL⟧"
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 하우스 스타일 (Fasoo Writing Style Guide v2.0)
+#
+# 가이드는 두 종류의 규칙이 섞여 있다. 성격이 달라서 처리도 다르다.
+#
+#   기계적인 표기 규칙 — 찾아 바꾸면 끝난다. 여기 apply_house_style_en()이
+#     코드로 강제한다. 모델에게 매번 부탁하는 것보다 확실하고 공짜다.
+#   판단이 필요한 규칙 — 시제, Title Case, 용어 선택. 문장을 다시 써야 하므로
+#     house_style_en.md에 적어 프롬프트로 보낸다.
+#
+# ⚠️ 이 파일의 규칙은 **일부러 좁게** 잡았다. 기술 매뉴얼에서 오작동하면
+#    가이드를 안 지키는 것보다 나쁘기 때문이다. 넓히기 전에 아래 주석의
+#    '왜 좁은가'를 먼저 읽을 것.
+# ──────────────────────────────────────────────────────────────────────
+
+_HOUSE_STYLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "house_style_en.md")
+_house_rules_cache: Optional[str] = None
+
+
+def house_style_rules() -> str:
+    """
+    house_style_en.md의 규칙 본문. 파일이 없으면 빈 문자열(기존 동작 유지).
+
+    프로세스당 한 번만 읽는다 — 문단마다 호출되는 경로다. 파일 맨 위의 HTML
+    주석은 우리끼리 보는 메모라 프롬프트에서 잘라낸다.
+    """
+    global _house_rules_cache
+    if _house_rules_cache is None:
+        try:
+            with open(_HOUSE_STYLE_PATH, encoding="utf-8") as f:
+                text = f.read()
+            text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+            _house_rules_cache = text.strip()
+        except Exception:
+            _house_rules_cache = ""
+    return _house_rules_cache
+
+
+# 영문에서 숫자와 띄어 쓰는 단위. 가이드가 든 예(KB, MB, GB)를 중심으로 흔한
+# 것만 넣는다. 목록에 없는 것은 건드리지 않는다 — '4K', '1080p', '24V'처럼
+# 붙여 쓰는 표기를 망가뜨리지 않기 위함.
+_HS_UNITS = (
+    "bytes", "KiB", "MiB", "GiB", "TiB",
+    "KB", "MB", "GB", "TB", "PB",
+    "Kbps", "Mbps", "Gbps", "bps",
+    "KHz", "MHz", "GHz", "Hz", "ms",
+)
+_HS_UNIT_RE = re.compile(r"(?<=\d)(?=(?:" + "|".join(_HS_UNITS) + r")\b)")
+
+# 곡선 따옴표 → 직선. 가이드: "직선 따옴표로 통일한다."
+_HS_CURLY = {"“": '"', "”": '"', "‘": "'", "’": "'"}
+
+# 닫는 따옴표 뒤의 마침표·쉼표를 안으로. 문장이 끝나는 자리에서만 건드린다.
+_HS_QUOTE_PUNCT_RE = re.compile(r'"([^"\n]*)"([.,])(?=\s|$)')
+
+# 약어 풀이 괄호: USB(Universal Serial Bus) → USB (Universal Serial Bus)
+# 괄호 안이 **여러 낱말**일 때만. 'HTTP(S)'나 'ID(1)' 같은 관용 표기를
+# 건드리지 않으려는 것이다.
+_HS_ABBR_PAREN_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9})\((?=[A-Za-z]+ [A-Za-z])")
+
+# 일반 괄호 앞 띄어쓰기는 '(optional)'과 여러 낱말 괄호로만 한정한다.
+# 가이드는 "영문에서는 괄호 앞을 띄어 쓴다"로 일반 규칙이지만, 매뉴얼에는
+# print(value), translate_document(in_path) 같은 코드 표기가 그대로 들어온다.
+# 전부 띄우면 그게 깨지므로 안전한 범위만 적용한다.
+_HS_OPTIONAL_PAREN_RE = re.compile(r"(?<=[A-Za-z0-9])\((optional)\)")
+_HS_WORDS_PAREN_RE = re.compile(r"(?<=[a-z])\((?=[A-Za-z]+ [A-Za-z][A-Za-z ]*\))")
+
+# 중간점: 영문에서는 앞뒤를 띄어 쓴다. 한글이 붙어 있으면 국문 표기이므로
+# 그대로 둔다(국문은 붙여 쓰는 것이 가이드 규칙).
+_HS_MIDDOT_RE = re.compile(r"(?<![가-힣])\s*·\s*(?![가-힣])")
+
+# 기간의 물결표 → en dash. 날짜처럼 보이는 양쪽에서만. '~100 users'(대략)를
+# 건드리지 않으려는 것이다.
+_HS_DATE = r"(?:[A-Z][a-z]{2}\.?\s?\d{1,2}|\d{4}-\d{2}-\d{2})"
+_HS_TILDE_RANGE_RE = re.compile(r"(" + _HS_DATE + r")\s*~\s*(?=" + _HS_DATE + r")")
+
+# 다섯 자리 이상 정수에만 쉼표를 넣는다.
+#
+# 왜 네 자리가 아닌가 — 가이드는 "네 자리 이상"이지만, 연도는 다섯 자리부터
+# 쉼표를 쓴다는 예외가 같은 절에 있다. 네 자리 숫자만 보고 2024(연도)와
+# 1000(수량)을 가릴 방법이 없어서, 잘못 고치면 '2,024년'이 된다. 다섯 자리
+# 이상은 연도·픽셀·baud 모두 쉼표를 쓰므로 예외와 충돌하지 않는다.
+# 네 자리는 손대지 않고 모델/사람에게 맡긴다.
+_HS_BIG_INT_RE = re.compile(r"(?<![\w.,:/-])(\d{5,})(?![\w.,:/-])")
+# 쉼표를 넣지 않는 자리: 페이지 번호와 주소.
+_HS_NO_COMMA_BEFORE_RE = re.compile(r"(?:\bp\.|\bpages?|\bPages?)\s*$")
+
+
+def _hs_group_digits(m: "re.Match") -> str:
+    return f"{int(m.group(1)):,}"
+
+
+def _house_style_segment(text: str) -> str:
+    """마커 바깥의 평문 한 조각에 기계적 규칙을 적용한다."""
+    for curly, straight in _HS_CURLY.items():
+        text = text.replace(curly, straight)
+
+    text = _HS_UNIT_RE.sub(" ", text)
+    text = _HS_ABBR_PAREN_RE.sub(r"\1 (", text)
+    text = _HS_OPTIONAL_PAREN_RE.sub(r" (\1)", text)
+    text = _HS_WORDS_PAREN_RE.sub(" (", text)
+    text = _HS_MIDDOT_RE.sub(" · ", text)
+    text = _HS_TILDE_RANGE_RE.sub(r"\1–", text)
+    text = _HS_QUOTE_PUNCT_RE.sub(r'"\1\2"', text)
+
+    def _comma(m: "re.Match") -> str:
+        if _HS_NO_COMMA_BEFORE_RE.search(text[:m.start()]):
+            return m.group(1)          # page 10091 — 페이지 번호엔 쉼표 없음
+        return _hs_group_digits(m)
+
+    return _HS_BIG_INT_RE.sub(_comma, text)
+
+
+def apply_house_style_en(text: str) -> str:
+    """
+    번역된 영문에 하우스 스타일의 **기계적인** 표기 규칙을 적용한다.
+
+    마커(⟦…⟧) 안쪽은 절대 건드리지 않는다. 마크다운 인라인 코드와 봉인된
+    리터럴이 그 안에 들어 있어서, 평문 규칙을 적용하면 코드가 깨진다.
+
+    적용 대상(가이드 절 이름):
+      영문 단위 띄어쓰기 · bytes 표기 띄어쓰기 · 괄호 띄어쓰기(한정) ·
+      영문 축약어 표기 · 중간점 띄어쓰기 · 기간 표시 · 따옴표 사용 ·
+      따옴표와 구두점 위치 · 숫자 쉼표 사용(다섯 자리 이상)
+
+    일부러 적용하지 않는 것:
+      슬래시(/) 띄어쓰기 — 가이드가 "두 낱말 이상이면 띄어 쓸 수 있다"와
+      "실제 UI에 띄어쓰기가 적용된 경우 그대로 둔다"는 예외를 두고 있다.
+      'Lock / Unlock'은 붙여야 하고 'Lock mode / Unlock mode'는 띄워야 하는데,
+      구분자 양옆 낱말만 봐서는 가릴 수 없다. 잘못 붙이면 UI 표기가 틀어지므로
+      프롬프트 쪽 규칙으로 넘긴다.
+    """
+    if not text:
+        return text
+    parts = _split_preserving_markers(text)
+    return "".join(
+        part if (not part or _is_marker_token(part)) else _house_style_segment(part)
+        for part in parts
+    )
+
+
 def _split_preserving_markers(text: str) -> List[str]:
     return ANY_MARKER_SPLIT_RE.split(text)
 
@@ -2116,6 +2258,12 @@ def translate_paragraph_with_patterns(
 - Use enterprise software documentation style.
 """
 
+    # 하우스 규칙은 문서와 무관하게 고정이라 mode별 규칙 뒤에 바로 붙인다.
+    # 프롬프트 앞쪽의 고정 구간이 길수록 prompt-cache 적중률이 좋아진다.
+    _house = house_style_rules()
+    if _house:
+        style_rules = style_rules.rstrip() + "\n" + _house + "\n"
+
     style_ref_block = (
         f"\nExisting English in this document (match tone, vocabulary, sentence structure):\n{style_reference}\n"
         if style_reference else ""
@@ -2540,7 +2688,13 @@ def qa_check_batch(
         f"[{idx}]\nSOURCE: {src}\nTRANSLATION: {tr}" for idx, src, tr in items
     )
 
-    prompt = f"""You are a translation QA reviewer. Each numbered pair below contains a Korean SOURCE and its English TRANSLATION produced in a first pass.
+    _house = house_style_rules()
+    house_block = (
+        f"\n\nHouse style rules the translation must follow:\n{_house}"
+        if _house else ""
+    )
+
+    prompt = f"""You are a translation QA reviewer. Each numbered pair below contains a Korean SOURCE and its English TRANSLATION produced in a first pass.{house_block}
 
 Revise a translation ONLY when it has a clear problem:
 - Terminology inconsistent with the document's existing English style
@@ -3106,6 +3260,11 @@ def translate_document(
             # 8) 봉인 해제. 반드시 대소문자 정규화가 **모두 끝난 뒤**여야 한다.
             #    먼저 풀면 heading sentence-case가 "AI"를 "ai"로 내려버린다.
             translated = restore_literals(translated, lit_map)
+
+            # 9) 하우스 스타일의 기계적 표기 규칙. 봉인 해제 뒤여야 'MB'처럼
+            #    봉인됐던 영문까지 보이고, 마크다운 인라인 코드는 아직 ⟦C#⟧
+            #    토큰이라 건드려지지 않는다.
+            translated = apply_house_style_en(translated)
 
             if enable_cache:
                 cache[src] = translated
