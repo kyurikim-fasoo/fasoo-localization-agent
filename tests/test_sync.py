@@ -80,6 +80,7 @@ def reset(token="tok", repo="own/rep", data_branch=None, deploy_branch="main"):
     sy._branch_state = ""
     sy._pulled = False
     sy._last_error = ""
+    sy._last_error_stage = ""
     sy._fallback_used = False
     os.environ["GITHUB_TOKEN"] = token
     os.environ["GITHUB_REPO"] = repo
@@ -283,7 +284,34 @@ with tempfile.TemporaryDirectory() as td:
     check("데이터는 저장됐으므로 오류로 표시하지 않는다", sy.last_error() == "",
           sy.last_error())
 
-print("\n[11] sync 비활성이면 아무 요청도 하지 않는다")
+print("\n[11] 실패 단계를 가르고, 손쓸 수 있는 원인을 알려준다")
+# 토큰이 만료된 채 5주가 지나도록 아무도 몰랐다. "Bad credentials" 한 줄만
+# 띄우면 어디를 고쳐야 하는지 알 수 없어서 원인 안내를 붙였다.
+reset()
+fake = FakeRequests([("GET", "/git/ref/heads/app-data", FakeResp(401, {"message": "Bad credentials"}))])
+sy.requests = fake
+sy.ensure_data_branch()
+check("부팅 실패는 connect 단계", sy.last_error_stage() == sy.STAGE_CONNECT,
+      sy.last_error_stage())
+check("401이면 토큰 교체를 안내", "GITHUB_TOKEN" in sy.error_hint(), sy.error_hint())
+
+reset()
+with tempfile.TemporaryDirectory() as td:
+    f = Path(td) / "z.bin"
+    f.write_bytes(b"z")
+    fake = FakeRequests([
+        ("GET", "/git/ref/heads/app-data", FakeResp(200, {})),
+        ("GET", "/contents/data/z.bin", FakeResp(404)),
+        ("PUT", "/contents/data/z.bin", FakeResp(403, {})),
+    ])
+    sy.requests = fake
+    sy.push_file_to_github(f, "data/z.bin", "m")
+check("업로드 실패는 save 단계", sy.last_error_stage() == sy.STAGE_SAVE,
+      sy.last_error_stage())
+check("403이면 권한을 안내", "스코프" in sy.error_hint(), sy.error_hint())
+check("원인을 모르면 빈 문자열", (lambda: (sy._fail("알 수 없는 오류"), sy.error_hint())[1])() == "")
+
+print("\n[12] sync 비활성이면 아무 요청도 하지 않는다")
 reset(token="")
 fake = FakeRequests([])
 sy.requests = fake

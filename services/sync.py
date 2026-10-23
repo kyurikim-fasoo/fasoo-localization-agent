@@ -69,7 +69,13 @@ BRANCH_UNAVAILABLE = "unavailable"  # 준비 실패 — 배포 브랜치로 폴�
 _branch_state: str = ""
 _pulled = False
 _last_error: str = ""
+_last_error_stage: str = ""     # "" | STAGE_CONNECT | STAGE_SAVE
 _fallback_used = False
+
+# 실패가 어느 단계에서 났는가. 화면 문구가 달라진다 — 부팅 시 연결 실패는
+# "아직 저장한 것이 없는데" 저장 실패라고 하면 사용자가 엉뚱한 곳을 찾는다.
+STAGE_CONNECT = "connect"       # 부팅·브랜치 준비 — 아직 저장과 무관
+STAGE_SAVE = "save"             # 실제 업로드 실패 — 방금 저장한 것이 안 올라감
 
 
 def _config() -> tuple[str, str, str]:
@@ -94,6 +100,33 @@ def last_error() -> str:
     return _last_error
 
 
+def last_error_stage() -> str:
+    """실패 단계(STAGE_CONNECT / STAGE_SAVE). 실패가 없으면 빈 문자열."""
+    return _last_error_stage
+
+
+def error_hint() -> str:
+    """
+    실패 메시지에서 **사람이 바로 손쓸 수 있는 원인**을 추려준다.
+
+    GitHub가 돌려주는 본문은 "Bad credentials" 한 줄이라, 그것만 띄우면
+    어디를 고쳐야 하는지 알 수 없다. 실제로 토큰이 만료된 채 5주가 지나도록
+    아무도 몰랐던 적이 있다.
+    """
+    e = _last_error
+    if not e:
+        return ""
+    if "401" in e or "Bad credentials" in e:
+        return ("GITHUB_TOKEN이 만료되었거나 무효합니다. "
+                "새 토큰을 발급해 Secrets의 GITHUB_TOKEN을 교체하세요.")
+    if "403" in e:
+        return ("토큰 권한이 부족합니다. classic은 repo 스코프, "
+                "fine-grained는 이 저장소에 Contents: Read and write가 필요합니다.")
+    if "404" in e:
+        return "GITHUB_REPO 설정(owner/name)이 맞는지 확인하세요."
+    return ""
+
+
 def fallback_active() -> bool:
     """
     데이터 브랜치를 못 써서 배포 브랜치로 올리고 있는가.
@@ -104,15 +137,17 @@ def fallback_active() -> bool:
     return _fallback_used
 
 
-def _fail(msg: str) -> None:
-    global _last_error
+def _fail(msg: str, stage: str = STAGE_CONNECT) -> None:
+    global _last_error, _last_error_stage
     _last_error = msg
+    _last_error_stage = stage
     print(f"[sync] {msg}")
 
 
 def _ok() -> None:
-    global _last_error
+    global _last_error, _last_error_stage
     _last_error = ""
+    _last_error_stage = ""
 
 
 def _headers(token: str) -> dict:
@@ -353,7 +388,8 @@ def push_file_to_github(
         if r.status_code == 200:
             sha = r.json().get("sha")
         elif r.status_code not in (404,):
-            _fail(f"GET {repo_path} failed: {r.status_code} {r.text[:200]}")
+            _fail(f"GET {repo_path} failed: {r.status_code} {r.text[:200]}",
+                  STAGE_SAVE)
             return None
 
         with open(local_path, "rb") as f:
@@ -371,10 +407,10 @@ def push_file_to_github(
         if r.status_code in (200, 201):
             _ok()
             return r.json().get("commit", {}).get("sha")
-        _fail(f"PUT {repo_path} failed: {r.status_code} {r.text[:200]}")
+        _fail(f"PUT {repo_path} failed: {r.status_code} {r.text[:200]}", STAGE_SAVE)
         return None
     except Exception as e:
-        _fail(f"exception: {e}")
+        _fail(f"exception: {e}", STAGE_SAVE)
         return None
 
 

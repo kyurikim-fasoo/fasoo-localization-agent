@@ -873,10 +873,23 @@ def render_sync_banner() -> None:
 
     err = sync.last_error()
     if err:
+        # 부팅 시 연결 실패와 저장 실패를 가른다. 둘 다 "데이터가 안 남는다"는
+        # 결과는 같지만, 연결 실패는 아직 저장한 것이 없는 시점이라 "저장한
+        # 내용이 올라가지 않았다"고 하면 사용자가 엉뚱한 곳을 찾는다.
+        if sync.last_error_stage() == sync.STAGE_SAVE:
+            headline = ("⚠️ **방금 저장한 내용이 서버에 올라가지 않았습니다.** "
+                        "앱이 재시작되면 사라집니다.")
+        else:
+            headline = ("⚠️ **서버에 연결하지 못했습니다.** 지금 저장하는 내용은 "
+                        "앱이 재시작되면 사라집니다.")
+
+        hint = sync.error_hint()
         st.warning(
-            "⚠️ **저장한 내용이 서버에 올라가지 않았습니다.** 앱이 재시작되면 "
-            "사라질 수 있습니다. 관리자에게 알려주세요.\n\n"
-            f"`{err}`",
+            headline
+            + " 작업을 이어가되, **[Glossary 관리] → 📥 백업 다운로드**로 먼저 "
+              "내려받아 두세요. 관리자에게도 알려주세요."
+            + (f"\n\n**원인:** {hint}" if hint else "")
+            + f"\n\n`{err}`",
             icon="⚠️",
         )
     elif sync.fallback_active():
