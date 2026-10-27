@@ -3191,10 +3191,12 @@ if st.session_state.app_mode == "대시보드":
     for _col, (_title, _desc, _target, _key, _type) in zip(
         st.columns(len(_SHORTCUTS)), _SHORTCUTS
     ):
+        # 제목·설명과 버튼을 한 줄에 — 대시보드 전체가 한 화면에 들어오도록 높이를 줄인다
         with _col, st.container(border=True):
-            st.markdown(f"**{_title}**")
-            st.caption(_desc)
-            if st.button("시작" if _type == "primary" else "열기",
+            _t, _b = st.columns([3, 2], vertical_alignment="center")
+            _t.markdown(f"**{_title}**  \n<span style='font-size:.8rem;opacity:.6'>{_desc}</span>",
+                        unsafe_allow_html=True)
+            if _b.button("시작" if _type == "primary" else "열기",
                          key=_key, type=_type, use_container_width=True):
                 _try_navigate(_target)
 
@@ -3282,35 +3284,42 @@ if st.session_state.app_mode == "대시보드":
         .reset_index()
     )
     _monthly["비용"] = _monthly["비용"].round(2)
-    st.markdown("**월별 번역 문서**")
-    st.altair_chart(
-        alt.Chart(_monthly).mark_bar(color=_BAR, cornerRadiusTopLeft=4,
-                                     cornerRadiusTopRight=4, size=28)
-        .encode(
-            x=alt.X("month:O", title=None, axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
-            tooltip=[alt.Tooltip("month:O", title="월"), "문서:Q",
-                     alt.Tooltip("단락:Q", format=","),
-                     alt.Tooltip("비용:Q", format="$,.2f")],
-        ).properties(height=220),
-        use_container_width=True,
-    )
-
     _g = (_df.groupby("product")
           .agg(문서=("created_at", "size"), 단락=("paragraphs_translated", "sum"))
           .reset_index().sort_values("문서", ascending=False))
-    st.markdown("**제품별 번역 문서**")
-    st.altair_chart(
-        alt.Chart(_g).mark_bar(color=_BAR, cornerRadiusTopRight=4,
-                               cornerRadiusBottomRight=4, size=16)
-        .encode(
-            y=alt.Y("product:N", title=None, sort="-x"),
-            x=alt.X("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
-            tooltip=[alt.Tooltip("product:N", title="제품"), "문서:Q",
-                     alt.Tooltip("단락:Q", format=",")],
-        ).properties(height=max(120, 30 * len(_g))),
-        use_container_width=True,
-    )
+
+    # 두 차트를 나란히 — 대시보드 전체가 스크롤 없이 한 화면에 들어오게 한다
+    _CH = 200
+    _c_month, _c_prod = st.columns(2)
+    with _c_month:
+        st.markdown("**월별 번역 문서**")
+        st.altair_chart(
+            alt.Chart(_monthly).mark_bar(color=_BAR, cornerRadiusTopLeft=4,
+                                         cornerRadiusTopRight=4, size=28)
+            .encode(
+                x=alt.X("month:O", title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
+                tooltip=[alt.Tooltip("month:O", title="월"), "문서:Q",
+                         alt.Tooltip("단락:Q", format=","),
+                         alt.Tooltip("비용:Q", format="$,.2f")],
+            ).properties(height=_CH),
+            use_container_width=True,
+        )
+    with _c_prod:
+        st.markdown("**제품별 번역 문서**")
+        # 제품이 늘어도 높이는 고정하고 막대 두께가 줄어든다
+        st.altair_chart(
+            alt.Chart(_g).mark_bar(color=_BAR, cornerRadiusTopRight=4,
+                                   cornerRadiusBottomRight=4)
+            .encode(
+                y=alt.Y("product:N", title=None, sort="-x",
+                        scale=alt.Scale(paddingInner=0.35)),
+                x=alt.X("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
+                tooltip=[alt.Tooltip("product:N", title="제품"), "문서:Q",
+                         alt.Tooltip("단락:Q", format=",")],
+            ).properties(height=_CH),
+            use_container_width=True,
+        )
 
     st.stop()
 
