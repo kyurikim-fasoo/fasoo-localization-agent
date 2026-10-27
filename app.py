@@ -208,6 +208,10 @@ def render_result_detail(entry: dict) -> None:
     # 번역 파이프라인은 문단 단위라, 링크·아이콘을 문서에 되꽂은 뒤 만들어지는
     # 문장 오류를 스스로 볼 수 없다. 저장된 문서를 다시 읽어 검사한 결과다.
     _verify = result.get("verification") or []
+    if result.get("segments"):
+        # 용어 표기 불일치는 검토 화면의 '표기 확인' 카드가 단락까지 짚어 보여준다.
+        # 문서 전체 비율만 말하는 이 경고는 할 수 있는 일이 없어 여기서는 뺀다.
+        _verify = [v for v in _verify if "영어 표기가 일관되지 않습니다" not in v.get("title", "")]
     if _verify:
         _v_err = [v for v in _verify if v.get("level") == "오류"]
         _n_warn = len(_verify) - len(_v_err)
@@ -223,6 +227,16 @@ def render_result_detail(entry: dict) -> None:
                 if _v.get("detail"):
                     st.caption(_v["detail"])
             st.caption("원본과 번역본을 비교해 서식 손상, 누락, 용어 불일치를 확인했습니다.")
+            # 단락에서 찾을 수 있는 문제(한국어 남음·공백 누락·빈 값·서식)는
+            # 검토 화면의 '확인 필요'에 모여 있다 — 거기로 바로 보낸다.
+            _fk = st.session_state.get(f"review_filter_key::{entry['output_path']}")
+            if _fk:
+                st.button(
+                    "확인 필요 단락 보기", key=f"verify_goto::{entry['output_path']}",
+                    on_click=lambda: (st.session_state.__setitem__(_fk, "확인 필요"),
+                                      st.session_state.pop(
+                                          f"review_focus::{entry['output_path']}", None)),
+                )
 
     # ── 메모 입력 (이번 번역에 대한 비고) ─────────────────────────────
     _log_id = entry.get("log_id")
@@ -311,6 +325,14 @@ _REVIEW_CSS = """<style>
 .rv-bar{display:flex;flex-wrap:wrap;gap:4px 22px;padding:10px 16px;border-radius:8px;
   background:rgba(127,127,127,.07);font-size:.82rem}
 .rv-bar span{opacity:.75}.rv-bar .rv-bar-k{color:#1E88E5;opacity:1;font-weight:600}
+.rv-src{font-size:.82rem;font-weight:400;opacity:.6;margin-top:2px}
+.rv-v0,.rv-v1,.rv-v2,.rv-v3{border-radius:3px;font-weight:600}
+span.rv-v0{background:rgba(230,81,0,.15);color:#BF360C}span.rv-v1{background:rgba(142,36,170,.14);color:#6A1B9A}
+span.rv-v2{background:rgba(0,137,123,.15);color:#00695C}span.rv-v3{background:rgba(109,76,65,.15);color:#4E342E}
+i.rv-v0{background:#E65100}i.rv-v1{background:#8E24AA}i.rv-v2{background:#00897B}i.rv-v3{background:#6D4C41}
+.rv-vrow{display:flex;justify-content:space-between;gap:8px;font-size:.8rem;margin-top:3px}
+.rv-vrow i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.rv-badge-warn{background:rgba(230,81,0,.14);color:#BF360C}
 </style>"""
 
 
@@ -322,8 +344,6 @@ def _review_glossary_rows() -> list:
 
 
 def render_review(entry: dict) -> None:
-    import html as _html
-
     result = entry.get("result") or {}
     segments = result.get("segments") or []
     output_path = entry.get("output_path")
@@ -348,12 +368,30 @@ def render_review(entry: dict) -> None:
                     else ("⚠️ " + ", ".join(fl) if fl else "")),
             "원문": review.to_display(seg["src"]),
             "번역": review.to_display(out),
-            "_out": out, "_heading": bool(seg.get("heading")), "_fl": fl,
+            "_out": out, "_src": seg["src"], "_heading": bool(seg.get("heading")), "_fl": fl,
             "_terms": terms_en + [a[1] for a in added],
             "_flag": bool(fl), "_edited": seg["i"] in edits, "_term": bool(terms_en),
         })
     n_flag = sum(r["_flag"] for r in rows)
     n_term = sum(r["_term"] for r in rows)
+
+    # 표기 확인 — 같은 한국어가 여러 영어 표기로 갈린 용어. 수정·용어 추가가
+    # 있을 때만 다시 계산한다(문서 전체 용어 후보를 뽑으므로 가볍지 않다).
+    var_key = f"review_variants::{output_path}::{ver}::{len(added)}"
+    if var_key not in st.session_state:
+        try:
+            st.session_state[var_key] = review.term_variants(
+                [(r["i"], review._ANY_MARKER_RE.sub("", r["원문"]),
+                  review._ANY_MARKER_RE.sub("", r["번역"])) for r in rows],
+                exclude_ko={t[0] for s in segments for t in s.get("terms") or []}
+                | {a[0] for a in added},
+            )
+        except Exception:
+            st.session_state[var_key] = []      # 표기 확인은 보조 기능 — 화면을 막지 않는다
+    dismissed = st.session_state.setdefault(f"review_dismiss::{output_path}", set())
+    variants = [v for v in st.session_state[var_key] if v["ko"] not in dismissed]
+    fkey = f"review_focus::{output_path}"
+    focus = next((v for v in variants if v["ko"] == st.session_state.get(fkey)), None)
 
     st.markdown(_REVIEW_CSS, unsafe_allow_html=True)
     st.markdown("##### 번역 검토 및 보정")
@@ -365,6 +403,7 @@ def render_review(entry: dict) -> None:
         f'<span>AI 번역<b class="rv-blue">{len(rows) - n_term:,}개</b></span>'
         + (f'<span>수정<b>{len(edits)}개</b></span>' if edits else "")
         + (f'<span>확인 필요<b class="rv-amber">{n_flag}개</b></span>' if n_flag else "")
+        + (f'<span>표기 확인<b class="rv-amber">{len(variants)}개</b></span>' if variants else "")
         + "</div>",
         unsafe_allow_html=True,
     )
@@ -373,30 +412,47 @@ def render_review(entry: dict) -> None:
         st.success(_flash, icon="✅")
 
     options = [f for f in _REVIEW_FILTERS if f != "확인 필요" or n_flag]
-    f1, f2, f3 = st.columns([5, 3, 1.2], vertical_alignment="center")
+    # 아래 결과 검사의 '확인 필요 단락 보기'가 이 필터를 바꿀 수 있게 키를 알려둔다
+    st.session_state[f"review_filter_key::{output_path}"] = (
+        f"review_filter::{output_path}::{len(options)}" if n_flag else None)
+    f1, f2, f3, f4 = st.columns([4.6, 2.6, 1.7, 1.1], vertical_alignment="center")
     with f1:
-        mode = st.radio(
-            "표시", options, index=0, horizontal=True,
-            # 선택지가 바뀌면(확인 필요가 생기거나 사라지면) 새 위젯으로 그린다
-            key=f"review_filter::{output_path}::{len(options)}",
-            label_visibility="collapsed",
-        )
+        # 선택지가 바뀌면(확인 필요가 생기거나 사라지면) 새 위젯으로 그린다.
+        # 기본값은 세션 상태로만 준다 — '확인 필요 단락 보기'가 같은 키를 바꾸므로
+        # index=를 함께 주면 Streamlit이 두 출처가 겹친다고 경고한다.
+        _rkey = f"review_filter::{output_path}::{len(options)}"
+        st.session_state.setdefault(_rkey, options[0])
+        mode = st.radio("표시", options, horizontal=True, key=_rkey,
+                        label_visibility="collapsed")
     with f2:
         q = st.text_input("검색", key=f"review_q::{output_path}",
                           placeholder="원문 또는 번역에서 검색",
                           label_visibility="collapsed")
     with f3:
+        show_src = st.toggle("원문 함께 보기", key=f"review_src::{output_path}")
+    with f4:
         edit_mode = st.toggle("편집", key=f"review_edit::{output_path}",
                               disabled=not in_path,
                               help="단락을 표에서 직접 고칩니다." if in_path
                               else "원본 파일이 없어 수정할 수 없습니다.")
 
-    view = {
-        "확인 필요": [r for r in rows if r["_flag"]],
-        "용어 적용": [r for r in rows if r["_term"]],
-        "AI 번역": [r for r in rows if not r["_term"]],
-        "수정함": [r for r in rows if r["_edited"]],
-    }.get(mode, rows)
+    if focus:
+        # 표기 확인 중에는 그 용어가 나온 단락만 — 필터보다 우선한다
+        fi = set(focus["idx"])
+        view = [r for r in rows if r["i"] in fi]
+        mode = "표기 확인"
+        n1, n2 = st.columns([5, 1], vertical_alignment="center")
+        n1.info(f"'{focus['ko']}'이(가) 나온 단락 {len(view)}개를 표시합니다. "
+                "표기마다 색을 다르게 칠했습니다.", icon="🔎")
+        n2.button("전체 보기", use_container_width=True, key=f"review_unfocus::{output_path}",
+                  on_click=lambda: st.session_state.pop(fkey, None))
+    else:
+        view = {
+            "확인 필요": [r for r in rows if r["_flag"]],
+            "용어 적용": [r for r in rows if r["_term"]],
+            "AI 번역": [r for r in rows if not r["_term"]],
+            "수정함": [r for r in rows if r["_edited"]],
+        }.get(mode, rows)
     if q.strip():
         ql = q.strip().lower()
         view = [r for r in view if ql in r["원문"].lower() or ql in r["번역"].lower()]
@@ -409,7 +465,7 @@ def render_review(entry: dict) -> None:
             "번역 칸을 직접 고친 뒤 **수정 내용 적용**을 선택하세요. "
             "\\*\\*로 감싼 굵게 표시와 ⟦ ⟧ 기호는 링크·이미지 등의 위치이므로 지우지 마세요."
             if edit_mode else
-            "적용된 용어는 파란색으로 강조됩니다. 단락에 마우스를 올리면 원문이 표시됩니다."
+            "적용된 용어는 파란색으로 강조됩니다."
         )
         if not view:
             st.caption("확인이 필요한 단락이 없습니다." if mode == "확인 필요"
@@ -435,6 +491,7 @@ def render_review(entry: dict) -> None:
             }
         else:
             paras = []
+            vsurf = [v["surfaces"] for v in focus["variants"]] if focus else None
             for r in view:
                 cls = ("rv-p" + (" rv-h" if r["_heading"] else "")
                        + (" rv-edited" if r["_edited"] else "")
@@ -442,9 +499,10 @@ def render_review(entry: dict) -> None:
                 tag = ('<span class="rv-tag rv-t-edit">수정함</span>' if r["_edited"]
                        else "".join(f'<span class="rv-tag rv-t-flag">{f}</span>'
                                     for f in r["_fl"]))
-                src = _html.escape(review._ANY_MARKER_RE.sub("", r["원문"]), quote=True)
-                paras.append(f'<div class="{cls}" title="{src}">'
-                             f'{review.to_preview_html(r["_out"], r["_terms"])}{tag}</div>')
+                src = (f'<div class="rv-src">{review.to_preview_html(r["_src"], [])}</div>'
+                       if show_src else "")
+                paras.append(f'<div class="{cls}">'
+                             f'{review.to_preview_html(r["_out"], r["_terms"], vsurf)}{tag}{src}</div>')
             with st.container(height=520, border=False):
                 st.markdown(f'<div class="rv-doc">{"".join(paras)}</div>',
                             unsafe_allow_html=True)
@@ -457,8 +515,71 @@ def render_review(entry: dict) -> None:
                          disabled=not changed, key=f"review_apply::{output_path}"):
                 _apply_review(entry, segments, rows, changed, edits, ekey, vkey, ver)
 
-    with right, st.container(border=True):
-        _render_applied_terms(entry, added)
+    with right:
+        if variants:
+            with st.container(border=True):
+                _render_variant_cards(entry, variants, fkey, dismissed)
+        with st.container(border=True):
+            _render_applied_terms(entry, added)
+
+
+def _render_variant_cards(entry: dict, variants: list, fkey: str, dismissed: set) -> None:
+    """
+    표기 확인 카드 — 무엇이(용어), 어디서(단락 보기), 어떻게(Glossary 등록·무시)를
+    한 자리에 둔다. 문서 안 표기를 일괄로 바꾸지는 않는다: 단수·복수·관사·문장
+    구조에 따라 고칠 방법이 달라 자동 치환은 문장을 깨뜨린다.
+    """
+    import html as _html
+
+    output_path = entry["output_path"]
+    st.markdown(
+        f'<div class="rv-thead"><span>표기 확인</span>'
+        f'<span class="rv-badge rv-badge-warn">{len(variants)}</span></div>'
+        '<div class="rv-legend">같은 한국어가 여러 영어 표기로 번역되었습니다.</div>',
+        unsafe_allow_html=True,
+    )
+    for n, v in enumerate(variants):
+        ko = v["ko"]
+        with st.container(border=True):
+            lines = "".join(
+                f'<div class="rv-vrow"><span><i class="rv-v{j}"></i>{_html.escape(x["en"])}</span>'
+                f'<span class="rv-tn">{len(x["idx"])}곳</span></div>'
+                for j, x in enumerate(v["variants"][:4])
+            ) + (f'<div class="rv-vrow"><span class="rv-ten">그 밖의 표현</span>'
+                 f'<span class="rv-tn">{v["other"]}곳</span></div>' if v["other"] else "")
+            st.markdown(f'<div class="rv-tko">{_html.escape(ko)}</div>{lines}',
+                        unsafe_allow_html=True)
+            # 옆 패널이 좁아 버튼을 나란히 두면 글자가 세로로 꺾인다 — 위아래로 쌓는다
+            st.button("단락 보기", key=f"review_vfocus::{output_path}::{n}",
+                      width="stretch",
+                      on_click=lambda k=ko: st.session_state.__setitem__(fkey, k))
+            # 팝오버는 쓰지 않는다 — 사용자 메뉴용 전역 스타일이 모든 팝오버 버튼을
+            # 동그란 아바타 모양으로 줄여 버린다. 카드 안에서 폼을 펼친다.
+            rkey = f"review_vreg::{output_path}"
+            if st.session_state.get(rkey) != ko:
+                st.button("Glossary에 등록", key=f"review_vregopen::{output_path}::{n}",
+                          width="stretch",
+                          on_click=lambda k=ko: st.session_state.__setitem__(rkey, k))
+            else:
+                en = st.radio("이 표기로 통일", [x["en"] for x in v["variants"]],
+                              key=f"review_ven::{output_path}::{n}")
+                scope = st.selectbox(
+                    "범위", ["Team", "Personal"], key=f"review_vscope::{output_path}::{n}",
+                    format_func=lambda s: "Team (모든 사용자)" if s == "Team" else "개인 (본인만)",
+                )
+                st.caption("다음 번역부터 이 표기로 고정됩니다. 이 문서의 다른 표기는 "
+                           "'단락 보기'에서 확인해 직접 고치세요.")
+                r1, r2 = st.columns(2)
+                r1.button("취소", key=f"review_vregcancel::{output_path}::{n}", width="stretch",
+                          on_click=lambda: st.session_state.pop(rkey, None))
+                if r2.button("등록", type="primary", width="stretch",
+                             key=f"review_vadd::{output_path}::{n}"):
+                    st.session_state.pop(rkey, None)
+                    _save_review_term(entry, ko, en, scope)
+            st.button("무시", key=f"review_vdismiss::{output_path}::{n}", type="tertiary",
+                      help="문맥상 다르게 쓰는 게 맞으면 이 문서에서는 표시하지 않습니다.",
+                      on_click=lambda k=ko: (dismissed.add(k),
+                                             st.session_state.pop(fkey, None)))
 
 
 def _render_applied_terms(entry: dict, added: list) -> None:
@@ -576,31 +697,39 @@ def _review_add_term(entry: dict, output_path: str) -> None:
     )
     if st.button("추가", use_container_width=True, key=f"review_g_add::{output_path}",
                  disabled=not (_ko.strip() and _en.strip())):
-        try:
-            _res = save_terms_from_dataframe(
-                pd.DataFrame([{
-                    "id": None,
-                    "Scope": "Team" if _scope == "Team" else st.session_state.current_user,
-                    "KO": _ko.strip(), "EN": _en.strip(),
-                    "Product": st.session_state.selected_product or "ALL",
-                    "DNT": False, "Case-sensitive": False,
-                    "Note": "번역 검토에서 추가", "Status": "approved",
-                    "File": entry.get("source_name", ""),
-                }]),
-                view_ids=set(), current_user=st.session_state.current_user,
-                source="번역 검토",
-            )
-            if _res.get("inserted"):
-                # 옆 패널에 '검토 중 추가'로 바로 보이게 하고, 미리보기에서도 강조한다
-                st.session_state.setdefault(f"review_added::{output_path}", []).append(
-                    (_ko.strip(), _en.strip()))
-                st.session_state[f"review_flash::{output_path}"] = (
-                    f"'{_ko.strip()}'을(를) Glossary에 추가했습니다. 다음 번역부터 적용됩니다.")
-                st.rerun()
-            else:
-                st.toast("같은 용어가 이미 Glossary에 있습니다.", icon="ℹ️")
-        except Exception as e:
-            st.error(f"추가하지 못했습니다. ({e})")
+        _save_review_term(entry, _ko.strip(), _en.strip(), _scope)
+
+
+def _save_review_term(entry: dict, ko: str, en: str, scope: str) -> None:
+    """번역 검토에서 Glossary에 용어를 등록한다 — 직접 추가와 표기 확인 카드가 함께 쓴다."""
+    output_path = entry["output_path"]
+    try:
+        _res = save_terms_from_dataframe(
+            pd.DataFrame([{
+                "id": None,
+                "Scope": "Team" if scope == "Team" else st.session_state.current_user,
+                "KO": ko, "EN": en,
+                "Product": st.session_state.selected_product or "ALL",
+                "DNT": False, "Case-sensitive": False,
+                "Note": "번역 검토에서 추가", "Status": "approved",
+                "File": entry.get("source_name", ""),
+            }]),
+            view_ids=set(), current_user=st.session_state.current_user,
+            source="번역 검토",
+        )
+    except Exception as e:
+        st.error(f"추가하지 못했습니다. ({e})")
+        return
+    if _res.get("inserted"):
+        # 옆 패널에 '검토 중 추가'로 바로 보이게 하고, 미리보기에서도 강조한다.
+        # 표기 확인 카드는 고정된 용어를 빼고 다시 계산되므로 저절로 사라진다.
+        st.session_state.setdefault(f"review_added::{output_path}", []).append((ko, en))
+        st.session_state.pop(f"review_focus::{output_path}", None)
+        st.session_state[f"review_flash::{output_path}"] = (
+            f"'{ko}'을(를) '{en}'(으)로 Glossary에 등록했습니다. 다음 번역부터 적용됩니다.")
+        st.rerun()
+    else:
+        st.toast("같은 용어가 이미 Glossary에 있습니다.", icon="ℹ️")
 
 
 # ─────────────────────────────────────────────

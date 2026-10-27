@@ -123,6 +123,29 @@ def run_case(label, src_path):
 run_case("docx", ROOT / "input_ko_fsp.docx")
 run_case("mdx", ROOT / "tests" / "fixtures" / "runAnalysis.mdx")
 
+print("[표기 확인] 같은 한국어가 여러 영어 표기로 갈린 곳")
+_ko = ["정책 설정 화면에서 값을 바꿉니다.", "정책 설정을 저장합니다.",
+       "정책 설정은 관리자만 볼 수 있습니다.", "정책 설정을 내보냅니다.",
+       "사용자를 추가합니다.", "정책 설정 목록을 확인합니다."]
+_en = ["Change the value on the Policy Settings screen.", "Save the policy settings.",
+       "Only administrators can view the policy configuration.",
+       "Export the policy configuration.", "Add a user.", "Check the policy settings list."]
+_pairs = [(i * 10, k, e) for i, (k, e) in enumerate(zip(_ko, _en))]
+_v = review.term_variants(_pairs)
+check("용어 하나 발견", [x["ko"] for x in _v] == ["정책 설정"], str(_v))
+if _v:
+    _vv = {x["en"]: x["idx"] for x in _v[0]["variants"]}
+    check("표기와 단락 위치", _vv == {"policy settings": [0, 10, 50],
+                                  "policy configuration": [20, 30]}, str(_vv))
+    check("대소문자 다른 모양도 같은 표기로", "Policy Settings" in _v[0]["variants"][0]["surfaces"])
+check("Glossary로 고정된 용어는 제외", review.term_variants(_pairs, exclude_ko={"정책 설정"}) == [])
+_same = [(i, k, e.replace("policy configuration", "policy settings")) for i, k, e in _pairs]
+check("표기가 하나면 경고 없음", review.term_variants(_same) == [])
+_h = review.to_preview_html("the Policy Settings and ⟦B⟧policy configuration⟦/B⟧", ["Save"],
+                            [["Policy Settings"], ["policy configuration"]])
+check("표기별 색", '<span class="rv-v0">Policy Settings</span>' in _h
+      and '<b><span class="rv-v1">policy configuration</span></b>' in _h, _h)
+
 print()
 if failures:
     print(f"FAILED {len(failures)}건: {failures}")

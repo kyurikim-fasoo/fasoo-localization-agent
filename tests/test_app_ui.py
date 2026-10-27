@@ -262,6 +262,72 @@ finally:
 for _f in (_rsrc, _rout):
     _f.unlink(missing_ok=True)
 
+print("[6-v] 번역 검토 — 표기 확인 카드와 원문 함께 보기")
+_vsrc = ROOT / "outputs" / "_ui_variant_src.md"
+_vout = ROOT / "outputs" / "_ui_variant_FSP_en.md"
+_vsrc.write_text("정책 설정 화면에서 값을 바꿉니다.\n\n정책 설정을 저장합니다.\n\n"
+                 "정책 설정은 관리자만 볼 수 있습니다.\n\n정책 설정을 내보냅니다.\n\n"
+                 "정책 설정 목록을 확인합니다.\n", encoding="utf-8")
+_ven = ["Change the value on the Policy Settings screen.", "Save the policy settings.",
+        "Only administrators can view the policy configuration.",
+        "Export the policy configuration.", "Check the policy settings list."]
+_ad = _te.make_adapter(str(_vsrc)); _ad.load()
+_vsegs = [{"i": i, "src": u.src, "out": e, "heading": False}
+          for (i, u), e in zip(enumerate(_ad.units()), _ven)]
+_te.rebuild_with_edits(str(_vsrc), str(_vout), _vsegs, {})
+
+
+def _variant_app():
+    a = AppTest.from_file(APP, default_timeout=60)
+    a.session_state["current_user"] = "SmokeTest"
+    a.session_state["app_mode"] = "Localize"
+    a.session_state["step"] = 3
+    a.session_state["selected_product"] = PRODUCT
+    a.session_state["last_results"] = [{
+        "source_name": _vsrc.name, "output_filename": _vout.name,
+        "output_path": str(_vout), "in_path": str(_vsrc),
+        "result": {"input_tokens": 1, "output_tokens": 1, "segments": _vsegs},
+        "error": None, "log_id": None,
+    }]
+    return a.run()
+
+
+def _md_of(a):
+    return " ".join(str(m.value) for m in a.markdown)
+
+
+at = _variant_app()
+check("예외 없음", not at.exception, str(at.exception))
+_md = _md_of(at)
+check("표기 확인 수", '표기 확인<b class="rv-amber">1개' in _md, _md[:500])
+check("카드: 용어와 표기", "정책 설정" in _md and "policy configuration" in _md)
+at.toggle(key=f"review_src::{_vout}").set_value(True).run()
+check("원문 함께 보기", 'class="rv-src">정책 설정' in _md_of(at))
+at.button(key=f"review_vfocus::{_vout}::0").click().run()
+check("단락 보기 → 안내", any("정책 설정" in str(i.value) for i in at.info),
+      str([str(i.value)[:40] for i in at.info]))
+check("단락 보기 → 표기별 색", 'class="rv-v1"' in _md_of(at))
+at.button(key=f"review_unfocus::{_vout}").click().run()
+check("전체 보기 → 안내 사라짐", not any("정책 설정" in str(i.value) for i in at.info))
+at.button(key=f"review_vdismiss::{_vout}::0").click().run()
+check("무시 → 카드 사라짐", "표기 확인<b" not in _md_of(at))
+
+at = _variant_app()
+at.button(key=f"review_vregopen::{_vout}::0").click().run()
+at.radio(key=f"review_ven::{_vout}::0").set_value("policy settings")
+at.selectbox(key=f"review_vscope::{_vout}::0").set_value("Personal")
+at.button(key=f"review_vadd::{_vout}::0").click().run()
+check("예외 없음", not at.exception, str(at.exception))
+check("등록 안내", any("Glossary에 등록" in str(s.value) for s in at.success),
+      str([str(s.value)[:40] for s in at.success]))
+check("등록 → 카드 사라짐", "표기 확인<b" not in _md_of(at))
+check("등록 → 검토 중 추가로 표시", "rv-added\"></i>정책 설정" in _md_of(at))
+import sqlite3 as _sq
+with _sq.connect(ROOT / "data" / "glossary.db") as _c:
+    _c.execute("DELETE FROM terms WHERE ko='정책 설정' AND owner='SmokeTest'")
+for _f in (_vsrc, _vout):
+    _f.unlink(missing_ok=True)
+
 print("[6-h] Glossary 관리 — 변경 이력 탭")
 at = AppTest.from_file(APP, default_timeout=60)
 at.session_state["current_user"] = "SmokeTest"

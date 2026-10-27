@@ -15,7 +15,7 @@ Streamlit에 의존하지 않는다. 화면은 app.py가 그린다.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import output_check
 from translator_engine import (B_CLOSE, B_OPEN, check_marker_integrity,
@@ -126,26 +126,141 @@ _MARK_HTML = (
     (re.compile(r"⟦D\d+⟧"), '<span class="rv-img">이미지</span>'),
     (re.compile(r"⟦LB⟧"), "<br>"), (re.compile(r"⟦TB⟧"), " "),
 )
-_HL_OPEN, _HL_CLOSE = "\x01", "\x02"
+# 강조 자리를 이스케이프 전에 표시해 두는 제어 문자. 그룹 g는 chr(0x10 + g)로 연다.
+_HL_BASE, _HL_CLOSE = 0x10, "\x02"
 
 
-def _highlight(text: str, terms_en: List[str]) -> str:
-    """마커 밖의 글자에서만 용어 영문을 찾아 표시한다."""
-    terms = sorted({t for t in terms_en if t and t.strip()}, key=len, reverse=True)
-    if not terms:
+def _highlight(text: str, groups: List[List[str]]) -> str:
+    """마커 밖의 글자에서만 구절을 찾아 표시한다. 앞의 그룹이 우선한다."""
+    pats = []
+    for g, phrases in enumerate(groups):
+        for t in sorted({t for t in phrases if t and t.strip()}, key=len, reverse=True):
+            pats.append(f"(?P<g{g}_{len(pats)}>" + re.escape(t) + ")")
+    if not pats:
         return text
-    rx = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(re.escape(t) for t in terms)
-                    + r")(?![A-Za-z0-9])", re.IGNORECASE)
+    rx = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(pats) + r")(?![A-Za-z0-9])",
+                    re.IGNORECASE)
+
+    def _sub(m: re.Match) -> str:
+        g = int(m.lastgroup[1:].split("_")[0])
+        return chr(_HL_BASE + g) + m.group(0) + _HL_CLOSE
+
     parts = re.split(r"(⟦[^⟧]*⟧)", text)
-    return "".join(p if p.startswith("⟦") else rx.sub(_HL_OPEN + r"\1" + _HL_CLOSE, p)
-                   for p in parts)
+    return "".join(p if p.startswith("⟦") else rx.sub(_sub, p) for p in parts)
 
 
-def to_preview_html(marked: str, terms_en: List[str]) -> str:
-    """마크드 텍스트 한 단락 → 미리보기 HTML. 원문 HTML은 이스케이프한다."""
+def to_preview_html(marked: str, terms_en: List[str],
+                    variants: Optional[List[List[str]]] = None) -> str:
+    """
+    마크드 텍스트 한 단락 → 미리보기 HTML. 원문 HTML은 이스케이프한다.
+    terms_en: 적용된 용어(파란색). variants: 표기 확인 중인 표기들 — 표기마다 다른 색.
+    """
     import html as _html
-    text = _html.escape(_highlight(marked or "", terms_en), quote=False)
+    variants = (variants or [])[:4]
+    classes = [f"rv-v{j}" for j in range(len(variants))] + ["rv-term"]
+    text = _html.escape(_highlight(marked or "", variants + [terms_en]), quote=False)
     for rx, rep in _MARK_HTML:
         text = rx.sub(rep, text)
     text = _ANY_MARKER_RE.sub("", text)          # 그 밖의 마커(주석·봉인 등)는 숨긴다
-    return text.replace(_HL_OPEN, '<span class="rv-term">').replace(_HL_CLOSE, "</span>")
+    for g, cls in enumerate(classes):
+        text = text.replace(chr(_HL_BASE + g), f'<span class="{cls}">')
+    return text.replace(_HL_CLOSE, "</span>")
+
+
+# ── 표기 확인 ───────────────────────────────────────────────────────────
+# 같은 한국어 용어가 문서 안에서 여러 영어 표기로 갈린 곳을 찾는다.
+# 문서 전체 검사(output_check.check_term_consistency)는 비율만 알려줘 무엇을
+# 고쳐야 할지 알 수 없었다. 여기서는 단락 짝(원문·번역)을 그대로 쓰므로
+# "어느 단락에서 어떤 표기"인지까지 돌려준다 — 화면이 그 단락을 보여줄 수 있다.
+#
+# 표기 추정 방법: 용어가 나온 단락들의 영문 2~4단어 구절 중, 그 단락들에
+# 몰려 있고(다른 단락에는 드묾) 가장 많은 단락을 덮는 것을 첫 표기로 고른다.
+# 남은 단락에서 같은 방식으로 다음 표기를 고른다. 2곳 이상 쓰인 표기만 센다 —
+# 한 곳뿐인 구절은 대명사나 의역일 수 있어 근거가 약하다.
+
+def _norm_word(w: str) -> str:
+    w = w.lower()
+    if len(w) > 4 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _phrases(text: str, lo: int = 2, hi: int = 4) -> Dict[str, str]:
+    """{정규화 키: 본문에 쓰인 모양}. 앞뒤 낱말이 불용어인 구절은 버린다."""
+    words = output_check._EN_WORD_RE.findall(text)
+    out: Dict[str, str] = {}
+    for n in range(lo, hi + 1):
+        for i in range(len(words) - n + 1):
+            g = words[i:i + n]
+            if g[0].lower() in output_check._EN_STOP or g[-1].lower() in output_check._EN_STOP:
+                continue
+            out.setdefault(" ".join(_norm_word(w) for w in g), " ".join(g))
+    return out
+
+
+def term_variants(pairs: List[Tuple[int, str, str]], exclude_ko=(),
+                  min_paras: int = 3, max_terms: int = 40,
+                  min_exclusive: float = 0.6) -> List[Dict]:
+    """
+    pairs: [(단락 i, 원문 평문, 번역 평문)]
+    exclude_ko: 이미 Glossary로 고정된 한국어 — 표기가 갈릴 수 없으므로 뺀다.
+    반환: [{"ko", "idx": [용어가 나온 단락 i],
+            "variants": [{"en", "surfaces", "idx"}], "other": 표기를 못 찾은 단락 수}]
+    """
+    from collections import Counter
+
+    from services.catalog import suggest_terms_from_texts
+
+    ko_texts = [s for _, s, _ in pairs if contains_korean(s)]
+    if not ko_texts:
+        return []
+    cand = suggest_terms_from_texts(ko_texts, exclude=set(exclude_ko), limit=max_terms)
+    if cand.empty:
+        return []
+
+    per = [_phrases(o) for _, _, o in pairs]
+    doc_df: Counter = Counter()
+    for p in per:
+        doc_df.update(p.keys())
+
+    found = []
+    for ko in cand["KO"]:
+        idx = [k for k, (_, s, o) in enumerate(pairs) if ko in s and o.strip()]
+        if len(idx) < min_paras:
+            continue
+        in_term: Counter = Counter()
+        for k in idx:
+            in_term.update(per[k].keys())
+        n_ko = len(ko.split())
+        remaining, chosen = set(idx), []
+        while remaining and len(chosen) < 4:
+            tally: Counter = Counter()
+            for k in remaining:
+                tally.update(per[k].keys())
+            best, best_rank = None, None
+            for key, n in tally.items():
+                if n < 2 or in_term[key] / doc_df[key] < min_exclusive:
+                    continue
+                if any(key in c or c in key for c, _ in chosen):
+                    continue
+                # 많이 덮을수록, 다른 단락에 덜 나올수록, 한국어 낱말 수와 비슷할수록
+                rank = (n, in_term[key] / doc_df[key], -abs(len(key.split()) - n_ko))
+                if best_rank is None or rank > best_rank:
+                    best, best_rank = key, rank
+            if best is None:
+                break
+            covered = {k for k in remaining if best in per[k]}
+            chosen.append((best, covered))
+            remaining -= covered
+        if len(chosen) < 2:
+            continue
+        variants = []
+        for key, covered in chosen:
+            surf = Counter(per[k][key] for k in covered)
+            variants.append({"en": surf.most_common(1)[0][0], "surfaces": sorted(surf),
+                             "idx": sorted(pairs[k][0] for k in covered)})
+        found.append({"ko": ko, "idx": [pairs[k][0] for k in idx],
+                      "variants": variants, "other": len(remaining)})
+    return found
