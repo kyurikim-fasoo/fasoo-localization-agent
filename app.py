@@ -3198,30 +3198,6 @@ if st.session_state.app_mode == "대시보드":
                          key=_key, type=_type, use_container_width=True):
                 _try_navigate(_target)
 
-    # ── 최근 작업 ───────────────────────────────────────────────────
-    st.markdown(" ")
-    _rh, _rb = st.columns([5, 1], vertical_alignment="bottom")
-    _rh.markdown("**내 최근 작업**")
-    if _rb.button("모두 보기 →", key="dash_all_logs", type="tertiary"):
-        _try_navigate({"app_mode": "로그"})
-    _recent = list_logs(user=st.session_state.current_user, limit=5)
-    if _recent.empty:
-        st.caption("아직 번역한 문서가 없습니다. 문서 Localize에서 시작하세요.")
-    else:
-        _rv = _recent[["created_at", "source_file", "product",
-                       "paragraphs_translated", "note"]].copy()
-        _rv["created_at"] = _rv["created_at"].str[:16].str.replace("T", " ")
-        st.dataframe(
-            _rv, use_container_width=True, hide_index=True,
-            column_config={
-                "created_at": st.column_config.TextColumn("날짜", width="small"),
-                "source_file": st.column_config.TextColumn("문서"),
-                "product": st.column_config.TextColumn("제품", width="small"),
-                "paragraphs_translated": st.column_config.NumberColumn("단락", width="small"),
-                "note": st.column_config.TextColumn("메모"),
-            },
-        )
-
     # ── 현황 ────────────────────────────────────────────────────────
     st.markdown(" ")
     _sh, _sp = st.columns([3, 2], vertical_alignment="bottom")
@@ -3240,7 +3216,6 @@ if st.session_state.app_mode == "대시보드":
     _df = metrics.load_logs(since=_since)
     _gc = metrics.glossary_counts()
     _n_terms = _gc["terms"]["team"] + _gc["terms"]["personal"]
-    _n_patterns = _gc["patterns"]["team"] + _gc["patterns"]["personal"]
 
     _k1, _k2, _k3, _k4 = st.columns(4)
     _k1.metric("번역한 문서", f"{len(_df):,}")
@@ -3321,35 +3296,21 @@ if st.session_state.app_mode == "대시보드":
         use_container_width=True,
     )
 
-    _c_left, _c_right = st.columns(2)
-    with _c_left:
-        _g = (_df.groupby("product")
-              .agg(문서=("created_at", "size"), 단락=("paragraphs_translated", "sum"))
-              .reset_index().sort_values("문서", ascending=False))
-        st.markdown("**제품별 번역 문서**")
-        st.altair_chart(
-            alt.Chart(_g).mark_bar(color=_BAR, cornerRadiusTopRight=4,
-                                   cornerRadiusBottomRight=4, size=16)
-            .encode(
-                y=alt.Y("product:N", title=None, sort="-x"),
-                x=alt.X("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
-                tooltip=[alt.Tooltip("product:N", title="제품"), "문서:Q",
-                         alt.Tooltip("단락:Q", format=",")],
-            ).properties(height=max(120, 30 * len(_g))),
-            use_container_width=True,
-        )
-    with _c_right:
-        st.markdown("**Glossary 현황**")
-        st.dataframe(
-            pd.DataFrame([
-                {"구분": "용어", "Team": _gc["terms"]["team"],
-                 "개인": _gc["terms"]["personal"], "합계": _n_terms},
-                {"구분": "패턴", "Team": _gc["patterns"]["team"],
-                 "개인": _gc["patterns"]["personal"], "합계": _n_patterns},
-            ]),
-            use_container_width=True, hide_index=True,
-        )
-        st.caption("개인 항목은 등록한 사용자의 번역에만 적용됩니다.")
+    _g = (_df.groupby("product")
+          .agg(문서=("created_at", "size"), 단락=("paragraphs_translated", "sum"))
+          .reset_index().sort_values("문서", ascending=False))
+    st.markdown("**제품별 번역 문서**")
+    st.altair_chart(
+        alt.Chart(_g).mark_bar(color=_BAR, cornerRadiusTopRight=4,
+                               cornerRadiusBottomRight=4, size=16)
+        .encode(
+            y=alt.Y("product:N", title=None, sort="-x"),
+            x=alt.X("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
+            tooltip=[alt.Tooltip("product:N", title="제품"), "문서:Q",
+                     alt.Tooltip("단락:Q", format=",")],
+        ).properties(height=max(120, 30 * len(_g))),
+        use_container_width=True,
+    )
 
     st.stop()
 
