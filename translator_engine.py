@@ -2996,13 +2996,13 @@ def verify_saved_output(in_path: str, out_path: str,
         ):
             out.append({
                 "level": "경고",
-                "title": f"서로 다른 용어가 «{en}» 하나로 매핑돼 있습니다",
+                "title": f"서로 다른 용어가 같은 영어 '{en}'(으)로 번역됩니다",
                 "detail": " · ".join(kos)
-                          + " — 문서에서 구분되지 않습니다. 글로서리를 나누세요.",
+                          + " — 문서에서 구분되지 않습니다. Glossary에서 표기를 나누세요.",
             })
         return out
     except Exception as e:
-        return [{"level": "경고", "title": "저장 후 검증을 마치지 못했습니다",
+        return [{"level": "경고", "title": "결과 검사를 완료하지 못했습니다",
                  "detail": str(e)}]
 
 

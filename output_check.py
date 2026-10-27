@@ -284,7 +284,7 @@ def verify(src_path: str, out_path: str,
     stray = [t for t in out.texts if any(c in t for c in _MARKER_CHARS)]
     if stray:
         f.append(Finding(
-            "오류", f"마커가 문서에 그대로 찍혔습니다 ({len(stray)}곳)",
+            "오류", f"번역 처리용 기호가 문서에 남아 있습니다 ({len(stray)}곳)",
             " / ".join(t.strip()[:60] for t in stray[:3]),
         ))
 
@@ -301,7 +301,7 @@ def verify(src_path: str, out_path: str,
         f.append(Finding(
             "오류", f"한국어가 남아 있습니다 ({len(left)}곳)",
             " / ".join(x[:50] for x in left[:3])
-            + ("  ※ 제품명이라면 --dnt 로 제외하세요" if len(left) <= 5 else ""),
+            + ("  ※ 제품 이름이면 무시해도 됩니다." if len(left) <= 5 else ""),
         ))
 
     # 3. 구조 요소 — 번역이 개수를 바꿔서는 안 된다
@@ -322,7 +322,7 @@ def verify(src_path: str, out_path: str,
     _sc_colors, _oc_colors = set(src.highlight_colors), set(out.highlight_colors)
     if _sc_colors - _oc_colors:
         f.append(Finding(
-            "오류", "하이라이트 색이 통째로 사라졌습니다",
+            "오류", "일부 하이라이트 색이 사라졌습니다",
             ", ".join(sorted(_sc_colors - _oc_colors)),
         ))
 
@@ -344,7 +344,7 @@ def verify(src_path: str, out_path: str,
     if recased:
         f.append(Finding(
             "경고", f"버전 표기의 대소문자가 바뀌었습니다 ({len(recased)}건)",
-            ", ".join(recased) + " — 원문 표기를 그대로 두는 편이 좋습니다",
+            ", ".join(recased) + " — 원문 표기를 유지하세요.",
         ))
 
     # 6. 보존돼야 할 영문 리터럴 (제품명·약어 등)
@@ -354,7 +354,7 @@ def verify(src_path: str, out_path: str,
         a, b = src.text.count(lit), out.text.count(lit)
         if a and b < a:
             f.append(Finding(
-                "경고", f"원문 영문 «{lit}» 가 줄었습니다",
+                "경고", f"영문 표기 '{lit}'의 개수가 줄었습니다",
                 f"원본 {a}회 → 번역본 {b}회",
             ))
 
@@ -369,7 +369,7 @@ def verify(src_path: str, out_path: str,
     if _sc and _oc < _sc * 0.5:
         f.append(Finding(
             "경고", "번역본 글자 수가 원본의 절반 미만입니다",
-            f"원본 {_sc:,}자 → 번역본 {_oc:,}자 · 내용 누락일 수 있습니다",
+            f"원본 {_sc:,}자 → 번역본 {_oc:,}자 · 내용이 빠졌을 수 있습니다.",
         ))
 
     # 10. 결측값이 본문에 찍혔는가 — 무조건 차단해야 하는 부류
@@ -379,9 +379,9 @@ def verify(src_path: str, out_path: str,
             _nullish.append((m.group(0), t.strip()[:60]))
     if _nullish:
         f.append(Finding(
-            "오류", f"결측값이 본문에 찍혔습니다 ({len(_nullish)}곳)",
+            "오류", f"빈 값(nan 등)이 본문에 들어갔습니다 ({len(_nullish)}곳)",
             " / ".join(f"«{w}» {ctx}" for w, ctx in _nullish[:3])
-            + "  ※ 글로서리·UI 매핑의 빈 셀이 문자열로 새어 나온 것입니다",
+            + "  ※ Glossary 또는 UI 텍스트 매핑의 빈 칸을 확인하세요.",
         ))
 
     # 11. 마커 자리에서 낱말이 붙었는가
@@ -394,17 +394,16 @@ def verify(src_path: str, out_path: str,
             _glued.append((w, t.strip()[:60]))
     if _glued:
         f.append(Finding(
-            "오류", f"낱말이 붙어 있습니다 ({len(_glued)}곳)",
-            " / ".join(f"«{w}»" for w, _ in _glued[:6])
-            + "  ※ 마커 경계에서 공백이 빠진 자리입니다",
+            "오류", f"단어 사이 공백이 빠졌습니다 ({len(_glued)}곳)",
+            " / ".join(f"«{w}»" for w, _ in _glued[:6]),
         ))
 
     # 9. 용어별 영문 표기가 갈렸는가 (문단 1:1 정렬이 성립할 때만)
     for term, cov, rivals in check_term_consistency(src, out):
         f.append(Finding(
-            "경고", f"«{term}» 의 영문 표기가 갈립니다",
-            f"가장 흔한 표현도 {cov * 100:.0f}%에만 등장"
-            + (f" · 경쟁 표기: {', '.join(rivals)}" if rivals else ""),
+            "경고", f"'{term}'의 영어 표기가 일관되지 않습니다",
+            f"가장 많이 쓴 표기의 비율 {cov * 100:.0f}%"
+            + (f" · 다른 표기: {', '.join(rivals)}" if rivals else ""),
         ))
 
     return f, src, out

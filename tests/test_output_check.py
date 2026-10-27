@@ -130,7 +130,7 @@ _bad = _docx([
 ], str(TMP / "_chk_bad.docx"))
 
 _f, _s, _o = oc.verify(_src, _bad, literals=["K-Assistant"])
-check("마커 노출 감지", has(_f, "마커가 문서에 그대로"), str(_f))
+check("마커 노출 감지", has(_f, "처리용 기호가 문서에 남아"), str(_f))
 check("한국어 잔존 감지", has(_f, "한국어가 남아"), str(_f))
 check("버전 삭제 감지", has(_f, "버전 표기가 사라"), str(_f))
 check("하이라이트 소실 감지", has(_f, "하이라이트가 사라진 문단"), str(_f))
@@ -327,7 +327,7 @@ check("문단 수가 어긋나면 판단 보류",
 
 _f3, _, _ = oc.verify(_src2, _bad2)
 check("verify 결과에 경고로 실림",
-      any("영문 표기가 갈립니다" in x.title for x in _f3), str(_f3))
+      any("표기가 일관되지 않습니다" in x.title for x in _f3), str(_f3))
 
 for _n in ("_c_src", "_c_bad", "_c_good", "_c_short"):
     (TMP / f"{_n}.docx").unlink(missing_ok=True)
@@ -604,8 +604,8 @@ _asm_src = _docx([
     ("appKey와 serverId를 입력합니다.", None, None),
 ], str(TMP / "_asm_src.docx"))
 _f5, _, _ = oc.verify(_asm_src, _asm)
-check("nan 노출 감지", has(_f5, "결측값이 본문에"), str(_f5))
-check("결합 문자열 감지", has(_f5, "낱말이 붙어"), str(_f5))
+check("nan 노출 감지", has(_f5, "빈 값(nan 등)이 본문에"), str(_f5))
+check("결합 문자열 감지", has(_f5, "단어 사이 공백이"), str(_f5))
 check("camelCase 식별자는 오탐 아님", "appKey" not in str(_f5), str(_f5))
 
 print("[17] 2차 리포트 — 같은 영문으로 매핑된 서로 다른 원문")
@@ -681,7 +681,7 @@ check("정상 문서는 오류 없음",
 _bad_glossary = [{"KO": "상태", "EN": "Status"}, {"KO": "사용 여부", "EN": "Status"}]
 _vf = te.verify_saved_output(_lk_in, str(_lk_out), _bad_glossary)
 check("같은 영문으로 매핑된 용어를 짚어준다",
-      any("하나로 매핑" in v["title"] for v in _vf), str(_vf))
+      any("같은 영어" in v["title"] for v in _vf), str(_vf))
 check("마크다운 경로는 대상 아님",
       te.verify_saved_output("a.md", "b.md", []) == [])
 

@@ -89,7 +89,7 @@ check("예외 없음", not at.exception, str(at.exception))
 print("[2] 잡 유실 시 안전 복구 (앱 재시작 시나리오)")
 at = make_at(translating_now=True, translate_job_id="no-such-job").run()
 check("예외 없음", not at.exception, str(at.exception))
-check("안내 문구", any("앱이 재시작" in e.value for e in at.error))
+check("안내 문구", any("다시 시작" in e.value for e in at.error))
 check("플래그 정리", at.session_state["translating_now"] is False)
 check("업로더 미노출", len(at.get("file_uploader")) == 0)
 
@@ -112,7 +112,7 @@ job_id = jobs.start_job(fake_params())
 wait_done(job_id)
 at = make_at(translating_now=True, translate_job_id=job_id).run()
 msgs = [e.value for e in at.error]
-check("잡 조회됨(레지스트리 유지)", not any("앱이 재시작" in m for m in msgs), str(msgs))
+check("잡 조회됨(레지스트리 유지)", not any("다시 시작" in m for m in msgs), str(msgs))
 check("스레드 예외가 UI로 전달", any("의도된 실패" in m for m in msgs), str(msgs))
 
 print("[4-b] 배치 — 한 파일이 실패해도 나머지는 계속 간다")
@@ -207,13 +207,13 @@ at.session_state["last_results"] = [
 ]
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
-check("부분 실패 안내", any("1개 실패" in str(w.value) for w in at.warning),
+check("부분 실패 안내", any("1개는 실패" in str(w.value) for w in at.warning),
       str([str(w.value)[:50] for w in at.warning]))
 _dl = [b.label for b in at.get("download_button")]
-check("ZIP 일괄 다운로드", any("전체 ZIP" in l for l in _dl), str(_dl))
-check("파일별 다운로드도 있음", any("문서 다운로드" in l for l in _dl), str(_dl))
+check("ZIP 일괄 다운로드", any("모두 다운로드" in l for l in _dl), str(_dl))
+check("파일별 다운로드도 있음", any("다운로드:" in l for l in _dl), str(_dl))
 check("파일 선택 셀렉트박스", len(at.get("selectbox")) >= 1)
-check("합산 토큰", any("15" in str(m.value) for m in at.metric),
+check("합산 지표", any(m.label == "API 비용" for m in at.metric),
       str([str(m.value) for m in at.metric]))
 tmp_out2.unlink(missing_ok=True)
 tmp_out.unlink(missing_ok=True)
@@ -233,7 +233,7 @@ check("첫 화면으로 튕기지 않음", at.session_state["step"] == 3,
 check("재시작 안내", any("다시 시작" in str(w.value) for w in at.warning),
       str([str(w.value)[:40] for w in at.warning]))
 check("복구 경로 제공",
-      {"처음으로", "로그 보기"} <= {b.label for b in at.button},
+      {"처음으로", "작업 기록 보기"} <= {b.label for b in at.button},
       str([b.label for b in at.button]))
 
 # 산출물 파일만 사라진 경우도 예외 없이 안내한다
@@ -304,16 +304,16 @@ check("업로드 없이도 결과 화면이 뜸", len(at.metric) >= 4,
       f"metric {len(at.metric)}개")
 check("탭 2개(용어·패턴) 렌더", len(at.tabs) == 2, f"tabs {len(at.tabs)}개")
 _caps = " ".join(str(c.value) for c in at.caption)
-check("선택 안내 노출", "등재할 항목을 선택" in _caps, _caps[:120])
-check("용어·패턴 통합 등재 안내", "함께 골라" in _caps, _caps[:160])
+check("선택 안내 노출", "추가할 항목을 선택" in _caps, _caps[:120])
+check("용어·패턴 통합 등재 안내", "함께 선택할 수" in _caps, _caps[:160])
 # 선택 전에도 버튼은 자리에 있어야 한다. 통째로 사라지면 기능이 없어진
 # 것처럼 보이고, 무엇을 해야 다음으로 넘어가는지도 알 수 없다.
-_save_btns = [b for b in at.button if "등재" in b.label]
+_save_btns = [b for b in at.button if "검토 후 추가" in b.label]
 check("선택 전에도 등재 버튼이 보인다", len(_save_btns) == 1,
       str([b.label for b in at.button]))
 check("선택 전에는 비활성", all(b.disabled for b in _save_btns),
       str([(b.label, b.disabled) for b in _save_btns]))
-check("선택 안내 문구", any("전체 선택" in str(c.value) for c in at.caption),
+check("선택 안내 문구", any("추가할 항목을 선택" in str(c.value) for c in at.caption),
       str([str(c.value)[:50] for c in at.caption]))
 
 print("[9] 표기 충돌 — 후보를 클릭으로 고르는 카드 UI")
@@ -338,7 +338,7 @@ check("후보가 라디오로 렌더", len(at.radio) >= 1, f"radio {len(at.radio
 if at.radio:
     check("행의 후보 + 제외 선택지", set(at.radio[0].options) == {"선택 안 함", "OK", "Check"},
           str(at.radio[0].options))
-check("판정 근거 노출", any("화면마다" in str(c.value) for c in at.caption),
+check("판정 근거 노출", any("의미가 다른" in str(c.value) for c in at.caption),
       str([str(c.value)[:30] for c in at.caption]))
 _labels = [b.label for b in at.button]
 check("페이지 이동은 ◀ ▶ 버튼", "◀" in _labels and "▶" in _labels, str(_labels))
@@ -409,13 +409,13 @@ check("예외 없음", not at.exception, str(at.exception))
 check("'선택 안 함'이 기본값", at.radio[0].value == "선택 안 함", str(at.radio[0].value))
 check("후보 앞에 제외 선택지", at.radio[0].options[0] == "선택 안 함",
       str(at.radio[0].options))
-check("등재 버튼 비활성", all(b.disabled for b in at.button if "등재" in b.label),
+check("등재 버튼 비활성", all(b.disabled for b in at.button if "검토 후 추가" in b.label),
       str([(b.label, b.disabled) for b in at.button if "등재" in b.label]))
 check("추천값 일괄 선택 제공",
-      any("추천값" in str(c.label) for c in at.checkbox),
+      any("AI 추천" in str(c.label) for c in at.checkbox),
       str([str(c.label) for c in at.checkbox]))
 
-at2 = [c for c in at.checkbox if "추천값" in str(c.label)][0].check().run()
+at2 = [c for c in at.checkbox if "AI 추천" in str(c.label)][0].check().run()
 check("일괄 선택 시 추천값 적용", at2.radio[0].value == "OK", str(at2.radio[0].value))
 
 print("[12] 등재 전 검수 — 제안 승인/반려")
@@ -438,7 +438,7 @@ at.session_state["catalog_review"] = {
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
 _txt = " ".join(str(m.value) for m in at.markdown)
-check("검수 화면으로 전환", "등재 전 검수" in _txt, _txt[:80])
+check("검수 화면으로 전환", "추가 전 검토" in _txt, _txt[:80])
 check("제안 있는 항목만 라디오", len(at.radio) == 1, f"radio {len(at.radio)}개")
 check("제안이 기본 선택", at.radio[0].value == "vulnerability check",
       str(at.radio[0].value))
@@ -448,7 +448,7 @@ check("직접 입력 선택지 제공", any("직접 입력" in o for o in at.rad
       str(at.radio[0].options))
 check("사유 노출", any("소문자" in str(c.value) for c in at.caption))
 _btns = [b.label for b in at.button]
-check("확정 버튼", any("확정하고" in b for b in _btns), str(_btns))
+check("확정 버튼", any("개 추가" in b for b in _btns), str(_btns))
 check("취소 버튼", "취소" in _btns, str(_btns))
 
 # 반려하면 원본이 유지된다
@@ -456,7 +456,7 @@ at2 = at.radio[0].set_value("Vulnerability Check").run()
 check("반려 시 원본 유지", at2.radio[0].value == "Vulnerability Check",
       str(at2.radio[0].value))
 _btns2 = [b.label for b in at2.button]
-check("수정 반영 표시 사라짐", not any("수정 1건" in b for b in _btns2), str(_btns2))
+check("수정 반영 표시 사라짐", not any("수정 1개" in b for b in _btns2), str(_btns2))
 
 # 취소하면 목록으로 돌아간다
 at3 = [b for b in at2.button if b.label == "취소"][0].click().run()
@@ -480,7 +480,7 @@ at.session_state["catalog_review"] = {
         "rows": [{"KO": "문서", "EN": "Document", "문맥(key)": "label",
                   "기존대조": "충돌(기존)", "기존 EN": "file"}],
         "sugg": {0: {"suggest": "file",
-                     "reason": "기존 글로서리에는 `file`로 등록돼 있습니다.",
+                     "reason": "Glossary에는 `file`(으)로 등록되어 있습니다.",
                      "labels": ["기존 글로서리", "카탈로그 표기"]}},
     },
 }
@@ -489,9 +489,9 @@ check("예외 없음", not at.exception, str(at.exception))
 check("양쪽 표기가 선택지로",
       {"file", "Document"} <= set(at.radio[0].options), str(at.radio[0].options))
 check("기존 표기가 기본값", at.radio[0].value == "file", str(at.radio[0].value))
-check("무엇과 다른지 안내", any("기존 글로서리에는" in str(c.value) for c in at.caption),
+check("무엇과 다른지 안내", any("Glossary에는" in str(c.value) for c in at.caption),
       str([str(c.value)[:40] for c in at.caption]))
-check("헤더에 충돌 건수", any("기존 글로서리와 충돌" in str(c.value) for c in at.caption),
+check("헤더에 충돌 건수", any("Glossary와 표기가 다름" in str(c.value) for c in at.caption),
       str([str(c.value)[:40] for c in at.caption]))
 at2 = at.radio[0].set_value("Document").run()
 check("카탈로그 표기로 바꿀 수 있음", at2.radio[0].value == "Document",
@@ -522,12 +522,12 @@ check("원본이 미리 채워져 있음",
 
 at3 = at2.text_input[0].set_value("vuln scan").run()
 check("고친 값이 등재 버튼에 반영",
-      any("수정 1건" in b.label for b in at3.button),
+      any("수정 1개" in b.label for b in at3.button),
       str([b.label for b in at3.button]))
 
 at4 = at2.text_input[0].set_value("   ").run()
 check("공백만 넣으면 원본 유지",
-      not any("수정 1건" in b.label for b in at4.button),
+      not any("수정 1개" in b.label for b in at4.button),
       str([b.label for b in at4.button]))
 
 print("[15] 용어 + 패턴을 한 번에 검수·등재")
@@ -551,11 +551,11 @@ at.session_state["catalog_review"] = {
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
 _txt = " ".join(str(m.value) for m in at.markdown)
-check("한 화면에 검수", "등재 전 검수 · 2건" in _txt, _txt[:120])
-check("용어 묶음 표시", "용어 1건" in _txt, _txt[:200])
-check("패턴 묶음 표시", "패턴 1건" in _txt, _txt[:200])
+check("한 화면에 검수", "추가 전 검토 · 2개" in _txt, _txt[:120])
+check("용어 묶음 표시", "용어 1개" in _txt, _txt[:200])
+check("패턴 묶음 표시", "패턴 1개" in _txt, _txt[:200])
 check("두 종류 모두 라디오", len(at.radio) == 2, f"radio {len(at.radio)}개")
-check("확정 버튼에 합계", any("2건 등재" in b.label for b in at.button),
+check("확정 버튼에 합계", any("2개 추가" in b.label for b in at.button),
       str([b.label for b in at.button]))
 
 
@@ -576,16 +576,16 @@ at.session_state["catalog_review"] = {
 }
 at.run()
 check("등재 안 함 선택지 제공",
-      any("등재 안 함" in o for o in at.radio[0].options), str(at.radio[0].options))
-_before = [b.label for b in at.button if "확정하고" in b.label]
-check("기본은 2건 등재", any("2건 등재" in b for b in _before), str(_before))
+      any("추가 안 함" in o for o in at.radio[0].options), str(at.radio[0].options))
+_before = [b.label for b in at.button if "개 추가" in b.label]
+check("기본은 2건 등재", any("2개 추가" in b for b in _before), str(_before))
 
-_skip = [o for o in at.radio[0].options if "등재 안 함" in o][0]
+_skip = [o for o in at.radio[0].options if "추가 안 함" in o][0]
 at2 = at.radio[0].set_value(_skip).run()
-_after = [b.label for b in at2.button if "확정하고" in b.label]
-check("제외하면 건수가 줄어든다", any("1건 등재" in b for b in _after), str(_after))
-check("제외 건수 표시", any("제외 1건" in b for b in _after), str(_after))
-check("안내 문구", any("등재하지 않습니다" in str(c.value) for c in at2.caption),
+_after = [b.label for b in at2.button if "개 추가" in b.label]
+check("제외하면 건수가 줄어든다", any("1개 추가" in b for b in _after), str(_after))
+check("제외 건수 표시", any("1개는 추가하지" in str(c.value) for c in at2.caption), str(_after))
+check("안내 문구", any("추가하지 않습니다" in str(c.value) for c in at2.caption),
       str([str(c.value)[:30] for c in at2.caption]))
 
 
@@ -677,10 +677,10 @@ try:
           _NAME2 in _json2.loads(_CFG2.read_text(encoding="utf-8")))
 
     at = [c for c in at.checkbox if "전체 선택" in str(c.label)][0].check().run()
-    _save = [b for b in at.button if "검수 후 등재" in b.label]
+    _save = [b for b in at.button if "검토 후 추가" in b.label]
     check("등재 버튼", bool(_save), str([b.label for b in at.button]))
     at = _save[0].click().run()
-    at = [b for b in at.button if "확정하고" in b.label][0].click().run()
+    at = [b for b in at.button if "개 추가" in b.label][0].click().run()
     check("등재 후 예외 없음", not at.exception,
           str(at.exception[0].value)[:160] if at.exception else "")
 
@@ -688,12 +688,12 @@ try:
           any(_NAME2 in str(x.value) for x in at.success),
           str([str(x.value)[:60] for x in at.success]))
     check("등재 후 등재 대상 카드 복귀",
-          any("등재 대상" in str(m.value) for m in at.markdown))
+          any("추가할 위치" in str(m.value) for m in at.markdown))
     _sel = [x for x in at.selectbox if x.label == "제품"]
     check("제품 선택이 유지됨", _sel and _sel[0].value == _NAME2,
           _sel[0].value if _sel else "selectbox 없음")
 
-    _go = [b for b in at.button if "이 글로서리로 Localize" in b.label]
+    _go = [b for b in at.button if "문서 Localize" in b.label]
     check("배너에 이동 버튼", bool(_go), str([b.label for b in at.button]))
     at = _go[0].click().run()
     check("Localize로 이동", at.session_state["app_mode"] == "Localize",

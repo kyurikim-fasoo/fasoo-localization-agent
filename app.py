@@ -117,12 +117,12 @@ def add_product(name: str) -> tuple[bool, str]:
     if not name:
         return False, "제품 이름을 입력하세요."
     if len(name) > 40:
-        return False, "제품 이름이 너무 깁니다 (40자 이내)."
+        return False, "제품 이름은 40자 이내로 입력하세요."
     cfg = load_product_config()
     if name in cfg:
-        return False, f"«{name}» 은(는) 이미 있습니다."
+        return False, f"'{name}' 제품이 이미 있습니다."
     if name.upper() == "ALL":
-        return False, "ALL은 '전 제품 공통'을 뜻하는 예약어입니다."
+        return False, "ALL은 전체 제품을 뜻하는 예약어라 제품 이름으로 쓸 수 없습니다."
     cfg[name] = {"default_glossaries": [], "default_patterns": []}
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -133,7 +133,7 @@ def add_product(name: str) -> tuple[bool, str]:
         sync_products(f"product: + {name}")
     except Exception:
         pass          # 동기화 실패가 제품 추가 자체를 막지는 않는다
-    return True, f"제품 «{name}» 을(를) 추가했습니다."
+    return True, f"'{name}' 제품을 추가했습니다."
 
 
 def save_uploaded_file(uploaded_file, save_dir: Path) -> Path:
@@ -184,19 +184,16 @@ def render_result_detail(entry: dict) -> None:
     output_filename = entry.get("output_filename")
 
     if not result:
-        st.error(f"✗ {entry['source_name']} — 번역 실패")
+        st.error(f"번역하지 못했습니다: {entry['source_name']}")
         if entry.get("error"):
             st.caption(entry["error"])
-        st.caption(
-            "API가 일시적으로 혼잡할 때(overloaded / rate limit) 나올 수 있습니다. "
-            "이 파일만 다시 올려 시도해 보세요."
-        )
+        st.caption("서비스가 일시적으로 혼잡할 수 있습니다. 이 파일만 다시 업로드해 시도하세요.")
         return
 
     if not entry.get("available"):
         st.warning(
-            f"{entry['source_name']} — 산출물 파일을 찾을 수 없습니다. "
-            "앱이 재시작되면서 임시 파일이 정리된 것으로 보입니다.",
+            f"결과 파일을 찾을 수 없습니다: {entry['source_name']}. "
+            "앱이 다시 시작되어 임시 파일이 삭제되었습니다. 다시 번역하세요.",
             icon="⚠️",
         )
         return
@@ -206,7 +203,7 @@ def render_result_detail(entry: dict) -> None:
 
     with open(output_path, "rb") as f:
         st.download_button(
-            label=f"문서 다운로드 — {output_filename}",
+            label=f"다운로드: {output_filename}",
             data=f,
             file_name=output_filename,
             mime=mime_for(output_filename),
@@ -227,30 +224,24 @@ def render_result_detail(entry: dict) -> None:
         st.markdown(" ")
         with st.container(border=True):
             st.markdown(
-                f"##### 🔤 이 문서에서 통일된 표현 — {_n_terms}개 표현 · "
-                f"{_n_hits:,}곳"
+                f"##### 일관되게 번역된 표현 {_n_terms}개 · {_n_hits:,}곳"
             )
-            st.caption(
-                "글로서리와 UI 텍스트 매핑에 등록된 표현입니다. "
-                "본문 어디에 나오든 **같은 영문으로 고정**되었으므로, "
-                "문단마다 다르게 번역되는 일이 없습니다."
-            )
+            st.caption("Glossary와 UI 텍스트 매핑에 있는 표현은 문서 전체에서 같은 영문으로 번역됩니다.")
             _adf = pd.DataFrame(_applied)
             st.dataframe(
                 _adf, use_container_width=True, hide_index=True,
                 column_config={
                     "KO": st.column_config.TextColumn("국문", width="small"),
-                    "EN": st.column_config.TextColumn("영문(고정)", width="small"),
+                    "EN": st.column_config.TextColumn("영문", width="small"),
                     "출처": st.column_config.TextColumn("출처", width="small"),
-                    "적용": st.column_config.NumberColumn("적용", width="small"),
-                    "예문": st.column_config.TextColumn("산출물에서", width="large"),
+                    "적용": st.column_config.NumberColumn("적용 횟수", width="small"),
+                    "예문": st.column_config.TextColumn("예문", width="large"),
                 },
             )
             _by_ui = sum(1 for a in _applied if a.get("출처") == "UI 매핑")
             if _by_ui:
                 st.caption(
-                    f"이 중 {_by_ui}개는 Step 2에서 직접 지정하신 UI 텍스트이고, "
-                    f"나머지 {_n_terms - _by_ui}개는 Glossary에서 왔습니다."
+                    f"UI 텍스트 매핑 {_by_ui}개 · Glossary {_n_terms - _by_ui}개"
                 )
 
             # 적용 지점을 표시한 리포트. 산출물 자체는 건드리지 않는다 —
@@ -265,27 +256,25 @@ def render_result_detail(entry: dict) -> None:
                     )
                 except Exception as _e:
                     st.session_state[_rep_key] = None
-                    st.caption(f"적용 내역 리포트를 만들지 못했습니다: {_e}")
+                    st.caption(f"적용 내역 보고서를 만들지 못했습니다. ({_e})")
             _rep = st.session_state.get(_rep_key)
             if _rep:
                 st.download_button(
-                    "적용 내역 리포트 내려받기",
+                    "적용 내역 보고서 다운로드",
                     data=_rep.encode("utf-8"),
                     file_name=f"{Path(output_filename).stem}_적용내역.html",
                     mime="text/html",
                     use_container_width=True,
                     key=f"dlrep::{output_path}",
-                    help="브라우저에서 열면 적용된 자리가 색으로 표시됩니다. "
-                         "노란색은 Glossary, 보라색은 UI 텍스트 매핑입니다. "
-                         "인쇄에서 PDF로 저장하거나 Word에 붙여넣을 수 있습니다.",
+                    help="적용된 위치를 색으로 표시한 HTML 파일입니다. "
+                         "노란색은 Glossary, 보라색은 UI 텍스트 매핑입니다.",
                 )
     else:
         st.markdown(" ")
         st.info(
-            "이번 문서에는 글로서리·UI 매핑에 등록된 표현이 하나도 걸리지 "
-            "않았습니다. [Glossary 추출]에서 이 문서 기준으로 용어를 등재하면 "
-            "반복되는 표현이 한 가지 영문으로 고정됩니다.",
-            icon="💡",
+            "이 문서에는 Glossary나 UI 텍스트 매핑에 있는 표현이 없습니다. "
+            "Glossary 추출에서 용어를 추가하면 다음 번역부터 일관되게 적용됩니다.",
+            icon="ℹ️",
         )
 
     # ── 산출물 검증 ──────────────────────────────────────────────────
@@ -296,7 +285,7 @@ def render_result_detail(entry: dict) -> None:
         with st.container(border=True):
             _n_warn = len(_verify) - len(_v_err)
             st.markdown(
-                f"##### {'⚠️' if _v_err else '✅'} 산출물 검증"
+                f"##### {'⚠️' if _v_err else '✅'} 결과 검사"
                 + (f" — 오류 {len(_v_err)}건" if _v_err else " — 오류 없음")
                 + (f" · 경고 {_n_warn}건" if _n_warn else "")
             )
@@ -305,35 +294,28 @@ def render_result_detail(entry: dict) -> None:
                 st.markdown(f"**{_icon} {_v['title']}**")
                 if _v.get("detail"):
                     st.caption(_v["detail"])
-            st.caption(
-                "원본과 번역본을 대조해 마커 노출·결측값·낱말 붙음·구조 요소·"
-                "용어 표기 갈림을 확인합니다. 터미널에서 다시 보려면: "
-                "`python output_check.py <원본> <번역본>`"
-            )
+            st.caption("원본과 번역본을 비교해 서식 손상, 누락, 용어 불일치를 확인했습니다.")
 
     # ── 메모 입력 (이번 번역에 대한 비고) ─────────────────────────────
     _log_id = entry.get("log_id")
     if _log_id:
         st.markdown(" ")
         with st.container(border=True):
-            st.markdown("##### 📝 메모 (선택)")
-            st.caption(
-                "이번 번역에 대한 메모를 남겨두면 나중에 '로그' 메뉴에서 검색해 다시 찾기 쉽습니다. "
-                "UI 텍스트 매핑도 함께 저장돼 있어 같은 문서를 다시 번역할 때 불러올 수 있어요."
-            )
+            st.markdown("##### 메모 (선택)")
+            st.caption("메모는 작업 기록에서 검색할 수 있습니다.")
             note_text = st.text_area(
                 "메모",
                 key=f"step3_note::{_log_id}",
-                placeholder="예: 에이전트 테스트 2차 — '저장' 라벨만 'Apply'로 강제 매핑",
+                placeholder="예: 2차 검토용, '저장'을 'Apply'로 지정",
                 label_visibility="collapsed",
                 height=80,
             )
             if st.button("메모 저장", key=f"save_note::{_log_id}"):
                 try:
                     update_note(int(_log_id), note_text.strip())
-                    st.toast("메모 저장됨", icon="💾")
+                    st.toast("메모를 저장했습니다.", icon="✅")
                 except Exception as e:
-                    st.error(f"메모 저장 오류: {e}")
+                    st.error(f"메모를 저장하지 못했습니다. ({e})")
 
 
 # ─────────────────────────────────────────────
@@ -361,7 +343,7 @@ def _draw_progress_bar(job: dict) -> None:
     """진행률 위젯 한 벌. fragment와 종료 화면이 같은 모양을 쓰도록 분리."""
     files = job["files"]
     n = len(files)
-    label = "번역/QA 진행 중" if st.session_state.enable_qa else "번역 중"
+    label = "번역 및 검토 중" if st.session_state.enable_qa else "번역 중"
 
     st.progress(int(batch_progress(job) * 100))
 
@@ -391,7 +373,7 @@ def _draw_progress_bar(job: dict) -> None:
             lines.append(f"{icon} {f['source_name']}{tail}")
         st.caption("\n".join(lines))
 
-    st.caption("⏳ 연결이 잠깐 끊겨도 번역은 서버에서 계속 진행됩니다.")
+    st.caption("창을 닫거나 연결이 끊겨도 번역은 계속 진행됩니다.")
 
 
 # 진행률 폴링 — fragment로 이 함수만 1초마다 다시 돌고, 스크립트 본문은
@@ -436,7 +418,7 @@ def render_translation_progress() -> None:
         # 잡이 사라졌다 = 앱 프로세스가 재시작됐다(데몬 스레드는 함께 죽는다).
         # 단순 rerun으로는 여기 오지 않는다 — 레지스트리가 모듈 전역이므로.
         _clear_job_state()
-        st.error("앱이 재시작되어 번역이 중단되었습니다. 파일을 다시 올리고 시도해주세요.")
+        st.error("앱이 다시 시작되어 번역이 중단되었습니다. 파일을 다시 업로드하세요.")
         if st.button("돌아가기", type="primary"):
             st.rerun()
         return
@@ -458,15 +440,12 @@ def render_translation_progress() -> None:
         # Step 2 폼으로 되돌아간다. 사용자에게는 "눌렀는데 아무 설명 없이
         # 원래 화면"으로만 보인다. 확인을 누를 때까지 잡을 붙잡아 둔다.
         if len(files) == 1:
-            st.error(f"오류: {files[0]['error']}")
+            st.error(f"번역하지 못했습니다. ({files[0]['error']})")
         else:
-            st.error(f"{len(files)}개 파일 모두 번역에 실패했습니다.")
+            st.error(f"파일 {len(files)}개를 모두 번역하지 못했습니다.")
             for f in files:
                 st.error(f"{f['source_name']} — {f['error']}")
-        st.caption(
-            "API가 일시적으로 혼잡할 때(overloaded / rate limit) 나올 수 있습니다. "
-            "잠시 후 다시 시도해주세요."
-        )
+        st.caption("서비스가 일시적으로 혼잡할 수 있습니다. 잠시 후 다시 시도하세요.")
         if st.button("돌아가기", type="primary"):
             _clear_job_state()
             st.rerun()
@@ -507,7 +486,7 @@ def render_translation_progress() -> None:
                     sync=False,
                 )
             except Exception as log_err:
-                st.warning(f"{f['source_name']} 로그 저장 중 경고: {log_err}")
+                st.warning(f"작업 기록을 저장하지 못했습니다: {f['source_name']} ({log_err})")
         results.append(entry)
 
     st.session_state.last_results = results
@@ -521,7 +500,7 @@ def render_translation_progress() -> None:
             sync_db(f"Log {_ids} ({_names}) by {st.session_state.current_user}")
         except Exception as sync_err:
             # 푸시 실패는 치명적이지 않다 — 로그는 이미 로컬 DB에 들어갔다.
-            st.warning(f"로그 동기화 중 경고: {sync_err}")
+            st.warning(f"작업 기록을 서버에 저장하지 못했습니다. ({sync_err})")
 
     # Step 2에서 채운 반복 용어를 글로서리에 등재 (체크한 경우에만).
     # 번역이 끝난 뒤에 하는 이유 — 번역이 실패하면 검증되지 않은 표기가
@@ -536,7 +515,7 @@ def render_translation_progress() -> None:
                     "EN": list(_pending_terms.values()),
                     "Product": st.session_state.selected_product or "ALL",
                     "DNT": False, "Case-sensitive": False,
-                    "Note": "번역 전 반복 용어에서 등재",
+                    "Note": "Localize 반복 용어에서 추가",
                     "Status": "approved",
                     "File": ", ".join(f["source_name"] for f in ok_files),
                 }),
@@ -544,10 +523,10 @@ def render_translation_progress() -> None:
                 current_user=st.session_state.current_user,
             )
             if _saved.get("inserted"):
-                st.toast(f"용어 {_saved['inserted']}개를 글로서리에 등재했습니다.",
-                         icon="📖")
+                st.toast(f"Glossary에 용어 {_saved['inserted']}개를 추가했습니다.",
+                         icon="✅")
         except Exception as term_err:
-            st.warning(f"용어 등재 중 경고: {term_err}")
+            st.warning(f"Glossary에 용어를 추가하지 못했습니다. ({term_err})")
 
     # 임시 상태 정리
     for _k in ("ui_text_mapping_rows", "ui_text_source_sig", "ui_text_input_paths",
@@ -618,7 +597,7 @@ def init_session_state():
     """모든 session_state 초기값을 한 곳에서 관리합니다."""
     defaults = {
         "step": 1,
-        "app_mode": "Localize",
+        "app_mode": "대시보드",
         "selected_product": None,
         "translation_mode": "매뉴얼",
         "enable_cache": True,
@@ -645,8 +624,8 @@ def reset_translation_result():
 # ─────────────────────────────────────────────
 
 def render_summary_pills(product: str, mode: str, cache: bool, qa: bool = True):
-    cache_text = "사용" if cache else "사용 안 함"
-    qa_text = "사용" if qa else "사용 안 함"
+    cache_text = "켜짐" if cache else "꺼짐"
+    qa_text = "켜짐" if qa else "꺼짐"
     st.markdown(
         f"""
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin: 0 0 16px 0;">
@@ -660,11 +639,11 @@ def render_summary_pills(product: str, mode: str, cache: bool, qa: bool = True):
             </span>
             <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px;
                          background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
-                <strong>캐시</strong> {cache_text}
+                <strong>문장 재사용</strong> {cache_text}
             </span>
             <span style="padding:7px 12px; border:1px solid #d0d7de; border-radius:999px;
                          background:#f6f8fa; color:#24292f; font-size:14px; line-height:1.4;">
-                <strong>QA</strong> {qa_text}
+                <strong>일관성 검토</strong> {qa_text}
             </span>
         </div>
         """,
@@ -753,14 +732,14 @@ st.markdown(
         max-width: 100% !important;
     }
 
-    /* ── 사이드바 폭 + 영역 축소 (기본 ~244px → 170px) ───────────── */
+    /* ── 사이드바 폭 + 영역 축소 (기본 ~244px → 200px) ───────────── */
     section[data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
-        width: 170px;
-        min-width: 170px;
+        width: 200px;
+        min-width: 200px;
     }
     section[data-testid="stSidebar"][aria-expanded="true"] {
-        width: 170px !important;
-        min-width: 170px !important;
+        width: 200px !important;
+        min-width: 200px !important;
     }
 
     /* ── Glossary 추출: 페이지 이동 버튼 — 아이콘을 크게 ────────── */
@@ -875,26 +854,25 @@ def render_sync_banner() -> None:
         # 결과는 같지만, 연결 실패는 아직 저장한 것이 없는 시점이라 "저장한
         # 내용이 올라가지 않았다"고 하면 사용자가 엉뚱한 곳을 찾는다.
         if sync.last_error_stage() == sync.STAGE_SAVE:
-            headline = ("⚠️ **방금 저장한 내용이 서버에 올라가지 않았습니다.** "
-                        "앱이 재시작되면 사라집니다.")
+            headline = ("**변경 내용을 서버에 저장하지 못했습니다.** "
+                        "앱이 다시 시작되면 변경 내용이 사라집니다.")
         else:
-            headline = ("⚠️ **서버에 연결하지 못했습니다.** 지금 저장하는 내용은 "
-                        "앱이 재시작되면 사라집니다.")
+            headline = ("**서버에 연결할 수 없습니다.** 지금 저장하는 내용은 "
+                        "앱이 다시 시작되면 사라집니다.")
 
         hint = sync.error_hint()
         st.warning(
             headline
-            + " 작업을 이어가되, **[Glossary 관리] → 📥 백업 다운로드**로 먼저 "
-              "내려받아 두세요. 관리자에게도 알려주세요."
+            + " **Glossary 관리 > 백업 다운로드**로 데이터를 내려받고 "
+              "관리자에게 알리세요."
             + (f"\n\n**원인:** {hint}" if hint else "")
             + f"\n\n`{err}`",
             icon="⚠️",
         )
     elif sync.fallback_active():
         st.info(
-            "데이터 전용 브랜치를 쓸 수 없어 배포 브랜치로 저장하고 있습니다. "
-            "데이터는 보존되지만, 저장할 때 앱이 재시작되어 화면이 처음으로 "
-            "돌아갈 수 있습니다. (GITHUB_DATA_BRANCH 설정 확인 필요)",
+            "데이터는 안전하게 저장되지만, 저장할 때 앱이 다시 시작되어 "
+            "첫 화면으로 돌아갈 수 있습니다. 관리자는 GITHUB_DATA_BRANCH 설정을 확인하세요.",
             icon="ℹ️",
         )
 
@@ -912,14 +890,14 @@ if not st.session_state.current_user:
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown("# Fasoo Localization Agent")
-        st.caption("국문 문서를 영문으로 로컬라이즈합니다.")
+        st.caption("한국어 문서를 영어로 로컬라이즈합니다.")
         st.markdown(" ")
-        st.markdown("### 👋 시작하기")
+        st.markdown("### 로그인")
 
         registered = list_users()
 
         if registered:
-            st.caption("기존 사용자")
+            st.caption("사용자")
             options = ["(선택)"] + registered
             chosen = st.selectbox(
                 "기존 사용자",
@@ -933,12 +911,12 @@ if not st.session_state.current_user:
                 disabled=(chosen == "(선택)"),
             ):
                 st.session_state.current_user = chosen
-                st.session_state.app_mode = "Localize"
+                st.session_state.app_mode = "대시보드"
                 st.rerun()
             st.markdown(" ")
-            st.markdown("**또는 새 사용자 등록**")
+            st.markdown("**처음 사용하시나요?**")
         else:
-            st.caption("아직 등록된 사용자가 없습니다. 첫 사용자를 등록해주세요.")
+            st.caption("등록된 사용자가 없습니다. 이름을 입력해 시작하세요.")
 
         new_name = st.text_input(
             "이름",
@@ -947,21 +925,16 @@ if not st.session_state.current_user:
             key="login_new_name",
         )
         if st.button(
-            "등록 후 시작",
+            "등록하고 시작",
             use_container_width=True,
             type="primary" if not registered else "secondary",
             disabled=(not new_name.strip()),
         ):
             add_user(new_name.strip())
             st.session_state.current_user = new_name.strip()
-            st.session_state.app_mode = "Localize"
+            st.session_state.app_mode = "대시보드"
             st.rerun()
 
-        st.markdown(" ")
-        st.caption(
-            "💡 Team 용어는 모두가 함께 관리하고, "
-            "내 용어(Personal)는 본인에게만 보이며 본인만 수정할 수 있습니다."
-        )
     st.stop()
 
 
@@ -1021,18 +994,17 @@ def _try_navigate(target: dict) -> None:
     st.rerun()
 
 
-@st.dialog("저장하지 않은 변경사항이 있어요")
+@st.dialog("변경 내용을 저장하지 않았습니다")
 def _confirm_nav_dialog():
-    st.warning("저장하지 않은 입력/편집이 사라집니다.", icon="⚠️")
-    st.write("정말 다른 화면으로 이동하시겠어요?")
+    st.write("이 화면을 나가면 저장하지 않은 변경 내용이 사라집니다.")
     col_keep, col_leave = st.columns(2)
     # 왼쪽 — 계속 작성 (안전한 default, 흰색/secondary)
-    if col_keep.button("계속 작성", use_container_width=True, key="confirm_nav_keep"):
+    if col_keep.button("취소", use_container_width=True, key="confirm_nav_keep"):
         st.session_state.pop("pending_nav_target", None)
         st.rerun()
     # 오른쪽 — 저장하지 않고 나가기 (위험한 액션, 빨간색/primary)
     if col_leave.button(
-        "저장하지 않고 나가기",
+        "저장하지 않고 이동",
         use_container_width=True,
         type="primary",
         key="confirm_nav_leave",
@@ -1052,46 +1024,25 @@ render_sync_banner()
 
 
 # ── 사이드바: 메뉴 nav (헤더 라벨 없음, 테두리 없는 Wrapsody 스타일) ────
+# (app_mode 값, 표시 라벨, 위젯 key). app_mode 값은 코드 곳곳의 분기 키라
+# 그대로 두고, 화면에 보이는 이름만 라벨로 바꾼다.
+NAV_ITEMS = [
+    ("대시보드", "대시보드", "nav_dashboard"),
+    ("Localize", "Localize", "nav_translate"),
+    ("Glossary 관리", "Glossary 관리", "nav_glossary"),
+    ("Glossary 추출", "Glossary 추출", "nav_extract"),
+    ("로그", "작업 기록", "nav_logs"),
+]
+
 with st.sidebar:
-    if st.button(
-        "Localize",
-        use_container_width=True,
-        type="primary" if st.session_state.app_mode == "Localize" else "secondary",
-        key="nav_translate",
-    ):
-        _try_navigate({"app_mode": "Localize"})
-
-    if st.button(
-        "Glossary 관리",
-        use_container_width=True,
-        type="primary" if st.session_state.app_mode == "Glossary 관리" else "secondary",
-        key="nav_glossary",
-    ):
-        _try_navigate({"app_mode": "Glossary 관리"})
-
-    if st.button(
-        "Glossary 추출",
-        use_container_width=True,
-        type="primary" if st.session_state.app_mode == "Glossary 추출" else "secondary",
-        key="nav_extract",
-    ):
-        _try_navigate({"app_mode": "Glossary 추출"})
-
-    if st.button(
-        "로그",
-        use_container_width=True,
-        type="primary" if st.session_state.app_mode == "로그" else "secondary",
-        key="nav_logs",
-    ):
-        _try_navigate({"app_mode": "로그"})
-
-    if st.button(
-        "대시보드",
-        use_container_width=True,
-        type="primary" if st.session_state.app_mode == "대시보드" else "secondary",
-        key="nav_dashboard",
-    ):
-        _try_navigate({"app_mode": "대시보드"})
+    for _mode, _label, _key in NAV_ITEMS:
+        if st.button(
+            _label,
+            use_container_width=True,
+            type="primary" if st.session_state.app_mode == _mode else "secondary",
+            key=_key,
+        ):
+            _try_navigate({"app_mode": _mode})
 
 # ── 메인 헤더 ─────────────────────────────────────────────────────────
 # 우측 상단: 원형 이니셜 아이콘 (popover trigger). 클릭하면 사용자 이름 +
@@ -1129,7 +1080,7 @@ if st.session_state.app_mode == "Localize":
     col_title, col_user = st.columns([9, 1])
     with col_title:
         st.title("Fasoo Localization Agent")
-        st.caption("국문 문서를 영문으로 로컬라이즈합니다.")
+        st.caption("한국어 문서를 영어로 로컬라이즈합니다.")
     with col_user:
         st.markdown(" ")
         _render_user_menu()
@@ -1146,8 +1097,8 @@ else:
 # ─────────────────────────────────────────────
 
 if st.session_state.app_mode == "Localize" and st.session_state.step == 1:
-    st.subheader("Step 1. 기본 정보")
-    st.markdown("번역할 텍스트 유형과 제품을 선택하세요.")
+    st.subheader("1단계: 기본 정보")
+    st.caption("제품과 텍스트 유형을 선택하세요.")
 
     default_product_index = 0
     if st.session_state.selected_product in products:
@@ -1163,12 +1114,14 @@ if st.session_state.app_mode == "Localize" and st.session_state.step == 1:
     )
 
     enable_cache = st.checkbox(
-        "중복된 문장은 재사용해 속도와 비용을 줄입니다.",
+        "같은 문장 재사용",
+        help="문서에 반복되는 문장은 한 번만 번역해 시간과 비용을 줄입니다.",
         value=st.session_state.enable_cache,
     )
 
     enable_qa = st.checkbox(
-        "2차 일관성 검사(QA)를 수행해 문서 내 영문 톤·용어와 일치하도록 보정합니다.",
+        "일관성 검토",
+        help="번역 후 한 번 더 검토해 문서 전체의 용어와 어조를 맞춥니다. 시간이 더 걸립니다.",
         value=st.session_state.enable_qa,
     )
 
@@ -1195,9 +1148,8 @@ if st.session_state.app_mode == "Localize" and st.session_state.step == 1:
 if st.session_state.app_mode == "Glossary 관리":
     st.subheader("Glossary 관리")
     st.caption(
-        f"Team 항목은 모두가 함께 보고 편집합니다. "
-        f"Scope을 본인 이름(**{st.session_state.current_user}**)으로 둔 항목은 본인에게만 보이고 본인만 수정할 수 있습니다. "
-        f"여기서 추가/수정/삭제한 결과는 번역 시 자동으로 적용됩니다."
+        "여기서 변경한 내용은 다음 번역부터 적용됩니다. Team 항목은 모든 사용자가 사용하고, "
+        "범위를 본인 이름으로 지정한 항목은 본인만 보고 수정할 수 있습니다."
     )
 
     # 제품 필터는 사용 안 함 — 전체 항목을 항상 표시.
@@ -1222,12 +1174,12 @@ if st.session_state.app_mode == "Glossary 관리":
 
     col_act_upload, col_act_download, _col_spacer = st.columns([2, 2, 6])
     with col_act_upload:
-        if st.button("📤  최신 엑셀 불러오기", use_container_width=True, key="toggle_master_upload"):
+        if st.button("Excel 가져오기", use_container_width=True, key="toggle_master_upload"):
             st.session_state.show_master_upload = not st.session_state.show_master_upload
             st.rerun()
     with col_act_download:
         st.download_button(
-            "📥  백업 다운로드",
+            "백업 다운로드",
             data=_dl_bytes,
             file_name=_dl_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1239,13 +1191,10 @@ if st.session_state.app_mode == "Glossary 관리":
     # ── 최신 엑셀 불러오기 영역 (토글) ─────────────────────────────────
     if st.session_state.show_master_upload:
         with st.container(border=True):
-            st.markdown("**최신 Master Glossary 엑셀 불러오기**")
-            st.caption(
-                "팀에서 관리하는 마스터 엑셀을 올리면 **Team 영역만** 새로 채웁니다. "
-                "모든 사용자의 Personal 항목은 그대로 유지됩니다."
-            )
+            st.markdown("**Master Glossary 가져오기**")
+            st.caption("Team 항목을 Excel 파일 내용으로 바꿉니다. 개인 항목은 바뀌지 않습니다.")
             uploaded_workbook = st.file_uploader(
-                "Master Glossary 엑셀",
+                "Master Glossary Excel 파일",
                 type=["xlsx", "xlsm", "xls"],
                 key="uploaded_workbook",
                 label_visibility="collapsed",
@@ -1268,7 +1217,7 @@ if st.session_state.app_mode == "Glossary 관리":
                         ppick = list(sheets.items())[1]
 
                     if gpick is None and ppick is None:
-                        st.warning("적용할 시트를 찾지 못했습니다.")
+                        st.warning("가져올 시트가 없습니다. 시트 이름에 glossary 또는 pattern이 들어가야 합니다.")
                     else:
                         # DB는 안 건드림 — staged로 보관해 표에 미리보기로 표시.
                         # 사용자가 [저장] 버튼을 명시적으로 눌러야 DB에 반영된다.
@@ -1281,7 +1230,7 @@ if st.session_state.app_mode == "Glossary 관리":
                         st.session_state.show_master_upload = False
                         st.rerun()
                 except Exception as e:
-                    st.error(f"임포트 오류: {e}")
+                    st.error(f"파일을 가져오지 못했습니다. ({e})")
             if st.button("닫기", key="close_master_upload"):
                 st.session_state.show_master_upload = False
                 st.rerun()
@@ -1293,7 +1242,7 @@ if st.session_state.app_mode == "Glossary 관리":
         col_warn, col_cancel = st.columns([5, 1])
         with col_warn:
             st.warning(
-                f"📥 **{_stg['source']}** 미리보기 중. **[저장]** 을 눌러야 DB에 반영됩니다.",
+                f"**{_stg['source']}** 미리 보기입니다. **저장**을 선택해야 적용됩니다.",
                 icon="⚠️",
             )
         with col_cancel:
@@ -1315,24 +1264,24 @@ if st.session_state.app_mode == "Glossary 관리":
                 product_filter=_stg.get("active_product"),
             )
             _terms_view_ids = set()
-            st.caption(f"📥 미리보기 {len(terms_df)}건 (저장 시 Team 영역 전체 교체)")
+            st.caption(f"미리 보기 {len(terms_df)}개 · 저장하면 Team 용어 전체가 바뀝니다.")
         else:
             col_search, col_scope, col_count = st.columns([3, 1, 1])
             with col_search:
                 terms_search = st.text_input(
-                    "검색 (KO/EN/Note)",
+                    "검색",
                     key="terms_search",
-                    placeholder="예: Wrapsody, rule, 정책 …",
+                    placeholder="한국어, 영어 또는 메모로 검색",
                     label_visibility="collapsed",
                 )
             with col_scope:
                 terms_scope_label = st.selectbox(
                     "Scope",
-                    ["전체", "Team만", "내 용어만"],
+                    ["전체", "Team", "내 항목"],
                     key="terms_scope_filter",
                     label_visibility="collapsed",
                 )
-            terms_scope = {"전체": "all", "Team만": "team", "내 용어만": "mine"}[terms_scope_label]
+            terms_scope = {"전체": "all", "Team": "team", "내 항목": "mine"}[terms_scope_label]
 
             terms_df = load_terms(
                 product=active_product,
@@ -1352,20 +1301,21 @@ if st.session_state.app_mode == "Glossary 관리":
             disabled=["id", "File", "Status"],
             column_order=["적용", "Scope", "KO", "EN", "Product", "DNT", "Case-sensitive", "Note"],
             column_config={
-                "적용": st.column_config.CheckboxColumn("적용", default=True),
+                "적용": st.column_config.CheckboxColumn("사용", default=True,
+                                                        help="선택을 해제하면 번역에 적용하지 않습니다."),
                 "id": None,
                 "Scope": st.column_config.SelectboxColumn(
-                    "Scope",
+                    "범위",
                     options=["Team", st.session_state.current_user],
                     default=st.session_state.current_user,
-                    help="Team = 모두 공유 / 내 이름 = 본인만 보이는 개인 용어",
+                    help="Team: 모든 사용자가 사용 · 본인 이름: 본인만 사용",
                 ),
                 "KO": st.column_config.TextColumn("KO"),
                 "EN": st.column_config.TextColumn("EN"),
-                "Product": st.column_config.TextColumn("Product", help="ALL 또는 제품명 (예: AI-R DLP)"),
-                "DNT": st.column_config.CheckboxColumn("DNT", help="번역하지 말고 원문 그대로 유지"),
-                "Case-sensitive": st.column_config.CheckboxColumn("Case-sensitive", help="대소문자를 정확히 보존"),
-                "Note": st.column_config.TextColumn("Note"),
+                "Product": st.column_config.TextColumn("제품", help="전체 제품에 적용하려면 ALL을 입력하세요."),
+                "DNT": st.column_config.CheckboxColumn("번역 안 함", help="원문을 그대로 둡니다."),
+                "Case-sensitive": st.column_config.CheckboxColumn("대소문자 구분", help="영문 대소문자를 그대로 유지합니다."),
+                "Note": st.column_config.TextColumn("메모"),
                 "Status": None,
                 "File": None,
             },
@@ -1382,11 +1332,11 @@ if st.session_state.app_mode == "Glossary 관리":
         col_status, col_save = st.columns([5, 1])
         with col_status:
             if _is_staged:
-                st.caption(f"⚠️ Master Excel 미리보기 — [저장] 시 Team {len(terms_df)}건 전체 교체")
+                st.caption(f"저장하면 Team 용어가 {len(terms_df)}개로 바뀝니다.")
             elif terms_changed:
-                st.caption("⚠️ 변경됨 — 저장하지 않으면 사라집니다.")
+                st.caption("저장하지 않은 변경 내용이 있습니다.")
             else:
-                st.caption("✓ 저장됨")
+                st.caption("모든 변경 내용이 저장되었습니다.")
         with col_save:
             save_clicked = st.button(
                 "저장",
@@ -1412,9 +1362,9 @@ if st.session_state.app_mode == "Glossary 관리":
                         m = replace_patterns_from_excel(
                             _psdf, source_file=f"{_stg['source']} [{_psname}]"
                         )
-                        st.toast(f"Master Excel 저장됨 — 용어 {n}건 / 패턴 {m}건", icon="💾")
+                        st.toast(f"Master Glossary를 적용했습니다. 용어 {n}개, 패턴 {m}개", icon="✅")
                     else:
-                        st.toast(f"Master Excel 저장됨 — 용어 {n}건", icon="💾")
+                        st.toast(f"Master Glossary를 적용했습니다. 용어 {n}개", icon="✅")
                     del st.session_state.staged_master
                     st.session_state.pop("glossary_table_dirty", None)
                     st.rerun()
@@ -1424,14 +1374,14 @@ if st.session_state.app_mode == "Glossary 관리":
                         view_ids=_terms_view_ids,
                         current_user=st.session_state.current_user,
                     )
-                    summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
+                    summary = f"추가 {counts['inserted']}개, 수정 {counts['updated']}개, 삭제 {counts['deleted']}개"
                     if counts.get("denied", 0) > 0:
-                        summary += f" / 권한 없어 거부 {counts['denied']}"
-                    st.toast(f"용어 저장됨 — {summary}", icon="💾")
+                        summary += f", 권한이 없어 제외 {counts['denied']}개"
+                    st.toast(f"저장했습니다. {summary}", icon="✅")
                     st.session_state.pop("glossary_table_dirty", None)
                     st.rerun()
             except Exception as e:
-                st.error(f"저장 오류: {e}")
+                st.error(f"저장하지 못했습니다. ({e})")
 
     # ── 패턴 탭 ──────────────────────────────
     with tab2:
@@ -1442,24 +1392,24 @@ if st.session_state.app_mode == "Glossary 관리":
                 source_file=f"{_stg['source']} [{_psname}]",
             )
             _patterns_view_ids = set()
-            st.caption(f"📥 미리보기 {len(patterns_df)}건 (저장 시 Team 영역 전체 교체)")
+            st.caption(f"미리 보기 {len(patterns_df)}개 · 저장하면 Team 패턴 전체가 바뀝니다.")
         else:
             col_search, col_scope, col_count = st.columns([3, 1, 1])
             with col_search:
                 patterns_search = st.text_input(
-                    "검색 (KO/EN/Note)",
+                    "검색",
                     key="patterns_search",
-                    placeholder="예: 클릭, click, 화면 …",
+                    placeholder="한국어, 영어 또는 메모로 검색",
                     label_visibility="collapsed",
                 )
             with col_scope:
                 patterns_scope_label = st.selectbox(
                     "Scope",
-                    ["전체", "Team만", "내 패턴만"],
+                    ["전체", "Team", "내 항목"],
                     key="patterns_scope_filter",
                     label_visibility="collapsed",
                 )
-            patterns_scope = {"전체": "all", "Team만": "team", "내 패턴만": "mine"}[patterns_scope_label]
+            patterns_scope = {"전체": "all", "Team": "team", "내 항목": "mine"}[patterns_scope_label]
 
             patterns_df = load_patterns(
                 search=patterns_search,
@@ -1478,17 +1428,18 @@ if st.session_state.app_mode == "Glossary 관리":
             disabled=["id", "File", "Status"],
             column_order=["적용", "Scope", "KO", "EN", "Note"],
             column_config={
-                "적용": st.column_config.CheckboxColumn("적용", default=True),
+                "적용": st.column_config.CheckboxColumn("사용", default=True,
+                                                        help="선택을 해제하면 번역에 적용하지 않습니다."),
                 "id": None,
                 "Scope": st.column_config.SelectboxColumn(
-                    "Scope",
+                    "범위",
                     options=["Team", st.session_state.current_user],
                     default=st.session_state.current_user,
-                    help="Team = 모두 공유 / 내 이름 = 본인만 보이는 개인 패턴",
+                    help="Team: 모든 사용자가 사용 · 본인 이름: 본인만 사용",
                 ),
                 "KO": st.column_config.TextColumn("KO"),
                 "EN": st.column_config.TextColumn("EN"),
-                "Note": st.column_config.TextColumn("Note"),
+                "Note": st.column_config.TextColumn("메모"),
                 "Status": None,
                 "File": None,
             },
@@ -1501,11 +1452,11 @@ if st.session_state.app_mode == "Glossary 관리":
         col_status_p, col_save_p = st.columns([5, 1])
         with col_status_p:
             if _is_staged:
-                st.caption(f"⚠️ Master Excel 미리보기 — [저장] 시 Team {len(patterns_df)}건 전체 교체")
+                st.caption(f"저장하면 Team 패턴이 {len(patterns_df)}개로 바뀝니다.")
             elif patterns_changed:
-                st.caption("⚠️ 변경됨 — 저장하지 않으면 사라집니다.")
+                st.caption("저장하지 않은 변경 내용이 있습니다.")
             else:
-                st.caption("✓ 저장됨")
+                st.caption("모든 변경 내용이 저장되었습니다.")
         with col_save_p:
             save_p_clicked = st.button(
                 "저장",
@@ -1529,9 +1480,9 @@ if st.session_state.app_mode == "Glossary 관리":
                             source_file=f"{_stg['source']} [{_sname}]",
                             product_filter=_stg.get("active_product"),
                         )
-                        st.toast(f"Master Excel 저장됨 — 용어 {n}건 / 패턴 {m}건", icon="💾")
+                        st.toast(f"Master Glossary를 적용했습니다. 용어 {n}개, 패턴 {m}개", icon="✅")
                     else:
-                        st.toast(f"Master Excel 저장됨 — 패턴 {m}건", icon="💾")
+                        st.toast(f"Master Glossary를 적용했습니다. 패턴 {m}개", icon="✅")
                     del st.session_state.staged_master
                     st.session_state.pop("glossary_table_dirty", None)
                     st.rerun()
@@ -1541,14 +1492,14 @@ if st.session_state.app_mode == "Glossary 관리":
                         view_ids=_patterns_view_ids,
                         current_user=st.session_state.current_user,
                     )
-                    summary = f"추가 {counts['inserted']} / 수정 {counts['updated']} / 삭제 {counts['deleted']}"
+                    summary = f"추가 {counts['inserted']}개, 수정 {counts['updated']}개, 삭제 {counts['deleted']}개"
                     if counts.get("denied", 0) > 0:
-                        summary += f" / 권한 없어 거부 {counts['denied']}"
-                    st.toast(f"패턴 저장됨 — {summary}", icon="💾")
+                        summary += f", 권한이 없어 제외 {counts['denied']}개"
+                    st.toast(f"저장했습니다. {summary}", icon="✅")
                     st.session_state.pop("glossary_table_dirty", None)
                     st.rerun()
             except Exception as e:
-                st.error(f"저장 오류: {e}")
+                st.error(f"저장하지 못했습니다. ({e})")
 
     # Glossary 관리 페이지는 워크플로가 아니므로 여기서 페이지 렌더링 끝.
     st.stop()
@@ -1564,15 +1515,16 @@ if st.session_state.app_mode == "Glossary 관리":
 
 if st.session_state.app_mode == "Glossary 추출":
     st.subheader("Glossary 추출")
+    st.caption("제품의 다국어 리소스나 기존 매뉴얼에서 용어와 패턴을 찾아 Glossary에 추가합니다.")
 
     uploaded_catalogs = st.file_uploader(
-        "다국어 메시지 파일(JSON) 또는 국문·영문 Word 매뉴얼 2개",
+        "다국어 리소스(JSON) 또는 한국어·영어 Word 매뉴얼",
         type=["json", "docx"],
         accept_multiple_files=True,
         key="catalog_uploader",
         help=(
-            "**JSON** — 한국어/영어 파일을 각각, 또는 두 언어가 함께 든 파일 하나.\n\n"
-            "**Word(.docx)** — 같은 버전의 국문본과 영문본을 함께 2개."
+            "**JSON**: 언어별 파일 또는 두 언어가 함께 든 파일 1개\n\n"
+            "**Word(.docx)**: 같은 버전의 한국어판과 영어판 2개"
         ),
     )
 
@@ -1583,11 +1535,10 @@ if st.session_state.app_mode == "Glossary 추출":
     # 되고, 그 기준은 번역할 문서와 무관하다 — 실제로 105건을 등재해서
     # 문서에 걸린 게 1건뿐이었다.
     uploaded_target = st.file_uploader(
-        "번역할 문서 (선택) — 넣으면 이 문서에 나오는 용어만 추립니다",
+        "번역할 문서 (선택)",
         type=["docx", "md", "markdown", "mdx"],
         key="catalog_target_uploader",
-        help="번역 대상 국문 문서를 함께 올리면, 카탈로그 수만 건 중 "
-             "이 문서에 실제로 쓰이는 용어만 골라 빈도순으로 보여줍니다.",
+        help="번역할 한국어 문서를 함께 업로드하면 이 문서에 나오는 용어만 표시합니다.",
     )
 
     if uploaded_target is not None:
@@ -1603,7 +1554,7 @@ if st.session_state.app_mode == "Glossary 추출":
                     t for t, _ctx in extract_bold_terms(str(_tpath))
                 ]
             except Exception as _e:
-                st.warning(f"번역 대상 문서를 읽지 못했습니다: {_e}")
+                st.warning(f"번역할 문서를 읽지 못했습니다. ({_e})")
                 st.session_state.catalog_target_texts = None
                 st.session_state.catalog_target_name = None
                 st.session_state.catalog_target_labels = None
@@ -1618,8 +1569,8 @@ if st.session_state.app_mode == "Glossary 추출":
     _target_texts = st.session_state.get("catalog_target_texts") or None
     if _target_texts:
         st.caption(
-            f"📄 **{st.session_state.get('catalog_target_name')}** 기준으로 "
-            f"후보를 좁힙니다 (한국어 문단 {len(_target_texts):,}개)."
+            f"**{st.session_state.get('catalog_target_name')}**에 나오는 용어만 "
+            f"표시합니다. (단락 {len(_target_texts):,}개)"
         )
 
     if uploaded_catalogs:
@@ -1634,14 +1585,14 @@ if st.session_state.app_mode == "Glossary 추출":
                 _align = None
                 if _docx and _json:
                     raise ValueError(
-                        "JSON과 Word를 섞어 올릴 수 없습니다. "
-                        "둘 중 한 종류만 올려주세요."
+                        "JSON과 Word 파일은 함께 업로드할 수 없습니다. "
+                        "한 가지 형식만 업로드하세요."
                     )
                 if _docx:
                     if len(_docx) != 2:
                         raise ValueError(
-                            f"Word 매뉴얼은 국문본·영문본 **2개**를 올려주세요 "
-                            f"(지금 {len(_docx)}개). 같은 버전이어야 합니다."
+                            f"같은 버전의 한국어판과 영어판, 2개 파일을 업로드하세요. "
+                            f"(현재 {len(_docx)}개)"
                         )
                     _a, _b = _docx
                     _pf_a, _pf_b, _align = catalog.parse_docx_pair(
@@ -1770,8 +1721,8 @@ if st.session_state.app_mode == "Glossary 추출":
     if st.session_state.get("catalog_error"):
         st.error(st.session_state.catalog_error)
     elif st.session_state.get("catalog_result") is None:
-        st.markdown("##### 무엇을 올릴 수 있나요")
-        _t_json, _t_docx = st.tabs(["JSON 카탈로그", "Word 매뉴얼 쌍"])
+        st.markdown("##### 지원하는 파일")
+        _t_json, _t_docx = st.tabs(["JSON 리소스", "Word 매뉴얼"])
         with _t_json:
             st.markdown(
                 "```json\n"
@@ -1782,27 +1733,22 @@ if st.session_state.app_mode == "Glossary 추출":
                 "```"
             )
             st.caption(
-                "필드명이 `key`/`en`/`ko`가 아니어도 자동으로 찾습니다. "
-                "언어는 파일명이 아니라 내용으로 판별합니다."
+                "필드 이름과 언어는 자동으로 인식합니다."
             )
         with _t_docx:
             st.markdown(
-                "**같은 버전의 국문본·영문본 `.docx` 2개**를 함께 올리세요. "
-                "제목(Heading) 순서를 기준으로 두 문서를 맞춘 뒤, "
-                "**굵게 표시된 화면 라벨**과 제목·표를 짝지어 후보를 뽑습니다."
+                "**같은 버전의 한국어판과 영어판 .docx 파일 2개**를 업로드하세요. "
+                "두 문서의 제목 순서를 기준으로 내용을 맞춘 뒤, 굵게 표시된 UI 라벨과 "
+                "제목, 표에서 용어를 찾습니다."
             )
             st.markdown(
-                "- 문장을 마침표로 쪼개지 않고 **단락째** 맞추므로, "
-                "국문 한 문장이 영문 두 문장이 돼도 괜찮습니다.\n"
-                "- 앞표지·법적 고지·연락처는 번역물이 아니라 지역별 원고라 "
-                "**자동으로 제외**합니다.\n"
-                "- 두 문서의 구성이 어긋난 구간은 후보에서 빼고 목록으로 알려줍니다 "
-                "— 대개 한쪽 문서의 **누락**입니다."
+                "- 단락 단위로 맞추므로 문장 수가 달라도 됩니다.\n"
+                "- 표지, 법적 고지, 연락처는 제외합니다.\n"
+                "- 두 문서의 구성이 다른 부분은 제외하고 목록으로 보여 줍니다."
             )
             st.info(
-                "제목에 Word의 **제목 1~4** 스타일이 적용돼 있어야 합니다. "
-                "글자 크기만 키운 가짜 제목은 인식되지 않습니다.",
-                icon="💡",
+                "제목에는 Word의 **제목 1~4** 스타일이 적용되어 있어야 합니다.",
+                icon="ℹ️",
             )
     else:
         # 결과 블록 — 들여쓰기 유지를 위한 컨테이너
@@ -1829,18 +1775,17 @@ if st.session_state.app_mode == "Glossary 추출":
             _last = st.session_state.get("catalog_last_save")
             if _last:
                 st.success(
-                    f"{_last['msg']}를 `{_last['product']}` · `{_last['scope']}` 에 "
-                    "등재했습니다."
-                    + (f"  ·  제외 {_last['skipped']}건" if _last.get("skipped") else "")
-                    + (f"  ·  이미 있어 건너뜀 {_last['skipped_db']}건"
-                       if _last.get("skipped_db") else "")
-                    + "  —  아래 표에서 ✅ 로 표시됩니다.",
-                    icon="📖",
+                    f"{_last['msg']}를 추가했습니다. "
+                    f"(제품: {_last['product']}, 범위: {_last['scope']})"
+                    + (f" · 제외 {_last['skipped']}개" if _last.get("skipped") else "")
+                    + (f" · 이미 있는 항목 {_last['skipped_db']}개"
+                       if _last.get("skipped_db") else ""),
+                    icon="✅",
                 )
                 # 등재하자마자 바로 번역하러 갈 수 있게. 방금 등재한 제품을
                 # 들고 넘어가므로 Localize에서 다시 고르지 않아도 된다.
                 if st.button(
-                    f"이 글로서리로 Localize 하기  ({_last['product']})",
+                    f"{_last['product']} 문서 Localize",
                     type="primary", use_container_width=True,
                     key="catalog_go_localize_banner",
                 ):
@@ -1854,83 +1799,72 @@ if st.session_state.app_mode == "Glossary 추출":
             if _align is not None:
                 with st.container(border=True):
                     if _align.ok:
-                        st.markdown("##### ✅ 두 매뉴얼이 잘 맞춰졌습니다")
+                        st.markdown("##### ✅ 두 매뉴얼의 내용을 맞췄습니다")
                     else:
-                        st.markdown("##### ⚠️ 정렬이 불안정합니다")
+                        st.markdown("##### ⚠️ 두 매뉴얼의 구성이 많이 다릅니다")
                         st.warning(
-                            "두 문서의 버전이 다르거나 구성이 많이 바뀐 것 같습니다. "
-                            "아래 후보를 그대로 등재하지 말고 하나씩 확인하세요.",
+                            "버전이 다를 수 있습니다. 후보를 하나씩 확인한 뒤 추가하세요.",
                             icon="⚠️",
                         )
                     _m1, _m2, _m3 = st.columns(3)
                     _m1.metric(
-                        "제목 정렬",
+                        "일치하는 제목",
                         f"{_align.heading_matched}/{_align.heading_total}",
                         f"{_align.heading_rate * 100:.0f}%",
                         delta_color="normal" if _align.heading_rate >= 0.8 else "inverse",
-                        help="두 문서의 제목이 같은 순서로 대응되는 개수입니다.",
+                        help="두 문서에서 같은 순서로 대응되는 제목 수"
                     )
                     _m2.metric(
-                        "구간 정렬",
+                        "일치하는 구간",
                         f"{_align.sections_matched}/{_align.sections}",
                         f"{_align.section_rate * 100:.0f}%",
                         delta_color="normal" if _align.section_rate >= 0.7 else "inverse",
-                        help="제목 아래 단락 수까지 일치하는 구간입니다.",
+                        help="제목 아래 단락 수까지 같은 구간 수"
                     )
                     _m3.metric(
-                        "화면 라벨 쌍",
+                        "UI 라벨",
                         f"{_align.n_label:,}",
                         help=f"굵게 표시된 라벨 {_align.n_label}쌍 "
-                             f"(확실 {_align.n_bold_direct} · 추정 {_align.n_bold_cooc}). "
-                             "제목·본문까지 합치면 "
-                             f"{_align.n_heading + _align.n_block + _align.n_label:,}쌍입니다.",
+                             f"(확실 {_align.n_bold_direct}, 추정 {_align.n_bold_cooc}). "
+                             f"제목과 본문을 포함하면 "
+                             f"{_align.n_heading + _align.n_block + _align.n_label:,}쌍"
                     )
                     if _align.front_dropped:
                         st.caption(
-                            f"앞표지·법적 고지 등 {_align.front_dropped}블록은 "
-                            "번역물이 아니므로 제외했습니다."
+                            f"표지와 법적 고지 등 {_align.front_dropped}개 블록은 제외했습니다."
                         )
                     if _align.mismatched:
                         with st.expander(
-                            f"🔍 구성이 어긋난 구간 {len(_align.mismatched)}건 "
-                            "— 한쪽 문서의 누락일 수 있습니다"
+                            f"구성이 다른 구간 {len(_align.mismatched)}개"
                         ):
                             st.dataframe(
                                 pd.DataFrame(
                                     _align.mismatched,
-                                    columns=["국문 제목", "국문 단락",
-                                             "영문 제목", "영문 단락"],
+                                    columns=["한국어 제목", "한국어 단락 수",
+                                             "영어 제목", "영어 단락 수"],
                                 ),
                                 use_container_width=True,
                                 hide_index=True,
                             )
                             st.caption(
-                                "이 구간은 짝이 어긋날 수 있어 후보에서 제외했습니다. "
-                                "단락 수가 1~2개 차이면 대개 한쪽에 설명이 빠진 것이니 "
-                                "원본 문서를 확인해 보세요."
+                                "이 구간은 후보에서 제외했습니다. 단락 수가 조금 다르면 "
+                                "한쪽 문서에 내용이 빠졌을 수 있습니다."
                             )
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("대응 쌍", f"{_stats['공통키']:,}")
+            c1.metric("찾은 쌍", f"{_stats['공통키']:,}")
             c2.metric("용어", f"{_stats['용어후보']:,}",
-                      help=("조건을 통과한 "
-                            f"**전체 {_stats['용어풀']:,}개**를 모두 보고 있습니다."
+                      help=(f"전체 후보 {_stats['용어풀']:,}개"
                             if _show_all else
-                            f"빈도 상위 {_stats['용어후보']:,}개 "
-                            f"(조건 통과 {_stats['용어풀']:,}개)"))
+                            f"전체 {_stats['용어풀']:,}개 중 자주 나오는 순으로 "
+                            f"{_stats['용어후보']:,}개"))
             c3.metric("패턴", f"{_stats['패턴후보']:,}",
-                      help=("문형별 대표를 "
-                            f"**전부 {_stats['패턴후보']:,}개** 보고 있습니다 "
-                            f"(원본 문장 {_stats['패턴풀']:,}개)."
-                            if _show_all else
-                            f"문형별 대표 {_stats['패턴후보']:,}개 "
-                            f"(문장 {_stats['패턴풀']:,}개)"))
-            c4.metric("표기 충돌", f"{len(_conf):,}")
+                      help=f"문장 {_stats['패턴풀']:,}개를 문형별로 묶은 결과")
+            c4.metric("표기 충돌", f"{len(_conf):,}", help="같은 한국어에 영어 표기가 여러 개인 항목")
             if _stats.get("문서적중"):
                 st.caption(
-                    f"카탈로그 라벨 {_stats['라벨 고유KO']:,}건 중 "
-                    f"**{_stats['문서적중']:,}건**이 이 문서에 나옵니다. "
-                    "아래 후보는 그중에서 고른 것입니다."
+                    f"리소스의 라벨 {_stats['라벨 고유KO']:,}개 중 "
+                    f"{_stats['문서적중']:,}개가 번역할 문서에 나옵니다."
                 )
 
             # ── 입력 자료 진단 ────────────────────────────────────────
@@ -1948,8 +1882,8 @@ if st.session_state.app_mode == "Glossary 추출":
                 # 등재가 이 화면의 본 목적이므로 진단은 항상 접어 둔다.
                 # 접힌 한 줄에도 등급과 조치 건수는 보이게 한다.
                 with st.expander(
-                    f"용어 데이터베이스 진단  ·  {_dsum['등급']}"
-                    + (f"  ·  조치 필요 {_n_act}건" if _n_act else ""),
+                    f"데이터 품질 진단 · {_dsum['등급']}"
+                    + (f" · 조치 필요 {_n_act}개" if _n_act else ""),
                     expanded=False,
                 ):
                     _mcols = st.columns(len(_dsum["지표"]))
@@ -1966,19 +1900,18 @@ if st.session_state.app_mode == "Glossary 추출":
                         if _f.get("영향"):
                             _body += " " + _f["영향"]
                         st.markdown(_body)
-                        st.markdown(f"**권고.** {_f['권고']}")
+                        st.markdown(f"**권장 조치:** {_f['권고']}")
                         _tbl = _f.get("표")
                         if _tbl is not None and len(_tbl):
                             st.dataframe(_tbl.head(8), use_container_width=True,
                                          hide_index=True)
                             if len(_tbl) > 8:
                                 st.caption(
-                                    f"외 {len(_tbl) - 8}건. 전체 내역은 "
-                                    "아래 문서에 포함됩니다."
+                                    f"외 {len(_tbl) - 8}개. 전체 목록은 진단 보고서에 있습니다."
                                 )
                     st.markdown("---")
                     st.download_button(
-                        "진단 결과 문서로 내려받기",
+                        "진단 보고서 다운로드",
                         data=catalog.diagnosis_markdown(
                             _findings,
                             st.session_state.get("catalog_target_name"),
@@ -1987,34 +1920,32 @@ if st.session_state.app_mode == "Glossary 추출":
                         file_name="용어DB_진단결과.md",
                         mime="text/markdown",
                         use_container_width=True,
-                        help="Word에 붙여넣어 고객 제출 자료로 사용하실 수 있습니다.",
+                        help="Markdown 형식입니다. Word에 붙여 넣어 사용할 수 있습니다.",
                     )
 
             with st.expander(
-                "추출 개수 조정" + ("  ·  전체 보기 켜짐" if _show_all else "")
+                "표시 개수" + (" · 전체 표시 중" if _show_all else "")
             ):
                 st.checkbox(
-                    "조건을 통과한 후보 전체 보기",
+                    "모든 후보 표시",
                     key="catalog_show_all",
-                    help="상한을 걸지 않고 다 봅니다. 아래 표는 검색으로 좁혀 "
-                         "나눠 등재하세요.",
+                    help="후보가 많으면 검색으로 범위를 좁혀 추가하세요.",
                 )
                 a1, a2 = st.columns(2)
                 a1.number_input(
                     "용어", min_value=10, max_value=1000, step=10,
                     key="catalog_term_limit", value=_t_raw, disabled=_show_all,
-                    help="빈도가 높은 순으로 이만큼만 가져옵니다.",
+                    help="자주 나오는 순으로 표시할 개수"
                 )
                 a2.number_input(
                     "패턴", min_value=5, max_value=200, step=5,
                     key="catalog_pattern_limit", value=_p_raw, disabled=_show_all,
-                    help="같은 말투의 문장은 하나로 묶고, 흔한 문형 순으로 가져옵니다.",
+                    help="비슷한 문장을 묶어 자주 나오는 순으로 표시할 개수"
                 )
                 if _show_all:
                     st.caption(
-                        f"상한 없이 용어 {_stats['용어후보']:,}개 · "
-                        f"패턴 {_stats['패턴후보']:,}개를 보고 있습니다. "
-                        "빈도가 낮은 쪽에는 용어가 아닌 것도 섞입니다."
+                        f"용어 {_stats['용어후보']:,}개와 패턴 {_stats['패턴후보']:,}개를 "
+                        "모두 표시합니다. 빈도가 낮은 항목에는 용어가 아닌 것도 있습니다."
                     )
 
             # 제품·공개 범위 선택은 등재 버튼 바로 위로 옮겼다. 무엇이 어디로
@@ -2027,9 +1958,13 @@ if st.session_state.app_mode == "Glossary 추출":
 
             def _register(chosen, kind):
                 """선택한 행을 글로서리/패턴에 삽입."""
+                # 'Personal'을 그대로 넘기면 owner가 문자열 'Personal'이 되어
+                # 누구의 '내 항목'에도 잡히지 않고 번역에도 쓰이지 않는다.
+                _scope = (st.session_state.current_user
+                          if _extract_scope == "Personal" else "Team")
                 if kind == "pattern":
                     rows = pd.DataFrame({
-                        "id": None, "Scope": _extract_scope,
+                        "id": None, "Scope": _scope,
                         "KO": chosen["KO"].values, "EN": chosen["EN"].values,
                         "Note": chosen.get("문맥(key)", ""),
                         "Status": "approved", "File": _source_name,
@@ -2040,7 +1975,7 @@ if st.session_state.app_mode == "Glossary 추출":
                         current_user=st.session_state.current_user,
                     )
                 rows = pd.DataFrame({
-                    "id": None, "Scope": _extract_scope,
+                    "id": None, "Scope": _scope,
                     "KO": chosen["KO"].values, "EN": chosen["EN"].values,
                     "Product": _extract_product,
                     "DNT": chosen.get("DNT", False), "Case-sensitive": False,
@@ -2066,7 +2001,7 @@ if st.session_state.app_mode == "Glossary 추출":
 
                 client = make_client(OPENAI_API_KEY)
                 state = {}
-                with st.spinner("검수 중"):
+                with st.spinner("AI가 검토하는 중..."):
                     for kind, sel_df in selections:
                         if sel_df is None or sel_df.empty:
                             continue
@@ -2079,7 +2014,7 @@ if st.session_state.app_mode == "Glossary 추출":
                                           else None),
                             )
                         except Exception as e:
-                            st.error(f"검수 오류: {e}")
+                            st.error(f"검토하지 못했습니다. ({e})")
                             return
                         # 기존 글로서리와 표기가 다른 항목도 검수에서 함께 고르게
                         # 한다. "1건이 다릅니다"라고만 알리면 무엇이 어떻게
@@ -2094,8 +2029,8 @@ if st.session_state.app_mode == "Glossary 추출":
                                     continue
                                 _merged[_i] = {
                                     "suggest": _prev,
-                                    "reason": f"기존 글로서리에는 `{_prev}`로 등록돼 있습니다.",
-                                    "labels": ["기존 글로서리", "카탈로그 표기"],
+                                    "reason": f"Glossary에는 `{_prev}`(으)로 등록되어 있습니다.",
+                                    "labels": ["Glossary 표기", "리소스 표기"],
                                 }
                         # 카탈로그 안에서 표기가 갈리는 항목은 반드시 사람이
                         # 고르게 한다. 제안이 없으면 검수 카드 없이 그대로
@@ -2111,7 +2046,7 @@ if st.session_state.app_mode == "Glossary 추출":
                                 _cur = dict(_merged.get(_i) or {})
                                 _cur.setdefault("suggest", _r["EN"])
                                 _cur["reason"] = (
-                                    f"고객 카탈로그에 {_n}가지 표기가 있습니다 — "
+                                    f"리소스에 표기가 {_n}가지 있습니다: "
                                     f"{_r.get('EN 후보', '')}"
                                 )
                                 _merged[_i] = _cur
@@ -2123,8 +2058,8 @@ if st.session_state.app_mode == "Glossary 추출":
                 st.session_state["catalog_review"] = state
                 st.rerun()
 
-            _CUSTOM = "✏️ 직접 입력"
-            _SKIP = "🚫 등재 안 함"
+            _CUSTOM = "직접 입력"
+            _SKIP = "추가 안 함"
 
             def _review_one(kind, i, r, s):
                 """
@@ -2141,9 +2076,9 @@ if st.session_state.app_mode == "Glossary 추출":
                     # 봐서는 알 수 없고 — 실제로 History로 잘못 등재돼 세 곳이
                     # 틀렸다 — 이 한 줄이면 바로 갈린다.
                     if r.get("문서 용례"):
-                        st.caption(f"문서 용례 · {r['문서 용례']}")
+                        st.caption(f"문서 예문: {r['문서 용례']}")
                     _opts = [s["suggest"], r["EN"]]
-                    _caps = list(s.get("labels", ["제안", "원본 유지"]))[:2]
+                    _caps = list(s.get("labels", ["AI 제안", "원래 표기"]))[:2]
                     if _opts[0] == _opts[1]:          # 같으면 라디오가 깨진다
                         _opts, _caps = _opts[:1], _caps[:1]
                     # 카탈로그에 표기가 여럿이면 나머지도 선택지로 올린다.
@@ -2151,17 +2086,17 @@ if st.session_state.app_mode == "Glossary 추출":
                         _v = _v.strip()
                         if _v and _v not in _opts:
                             _opts.append(_v)
-                            _caps.append("카탈로그 표기")
+                            _caps.append("리소스 표기")
                     pick = st.radio(
                         r["KO"],
                         options=_opts + [_CUSTOM, _SKIP],
-                        captions=_caps + ["내가 고쳐 쓰기", "이 항목 빼기"],
+                        captions=_caps + ["", ""],
                         index=0, horizontal=len(_opts) <= 2,
                         label_visibility="collapsed",
                         key=f"catalog_rev_{kind}_{i}",
                     )
                     if pick == _SKIP:
-                        st.caption("이 항목은 등재하지 않습니다.")
+                        st.caption("이 항목은 추가하지 않습니다.")
                         return None
                     if pick == _CUSTOM:
                         # 원본을 채워두고 거기서 고치게 한다 — 빈 칸에서
@@ -2170,7 +2105,7 @@ if st.session_state.app_mode == "Glossary 추출":
                             "직접 입력", value=r["EN"],
                             key=f"catalog_rev_txt_{kind}_{i}",
                             label_visibility="collapsed",
-                            placeholder="등재할 영문 표기",
+                            placeholder="영어 표기 입력",
                         )
                         pick = typed.strip() or r["EN"]   # 비우면 원본 유지
                     if s.get("reason"):
@@ -2184,22 +2119,21 @@ if st.session_state.app_mode == "Glossary 추출":
                 _all_sugg = {k: v["sugg"] for k, v in rv.items()}
                 _n_sugg = sum(len(v) for v in _all_sugg.values())
 
-                st.markdown(f"##### 등재 전 검수 · {_total}건")
+                st.markdown(f"##### 추가 전 검토 · {_total}개")
                 if _n_sugg:
                     _n_prior = sum(1 for sg in _all_sugg.values()
                                    for v in sg.values() if v.get("labels"))
                     _bits = []
                     if _n_sugg - _n_prior:
-                        _bits.append(f"수정 제안 {_n_sugg - _n_prior}건")
+                        _bits.append(f"수정 제안 {_n_sugg - _n_prior}개")
                     if _n_prior:
-                        _bits.append(f"기존 글로서리와 충돌 {_n_prior}건")
+                        _bits.append(f"Glossary와 표기가 다름 {_n_prior}개")
                     st.caption(
                         " · ".join(_bits)
-                        + f" · 나머지 {_total - _n_sugg}건은 그대로 등재됩니다."
-                        + "  ·  제안이 마음에 들지 않으면 **직접 입력**으로 고칠 수 있습니다."
+                        + f" · 나머지 {_total - _n_sugg}개는 그대로 추가됩니다."
                     )
                 else:
-                    st.caption("수정할 항목이 없습니다. 그대로 등재하시면 됩니다.")
+                    st.caption("수정할 항목이 없습니다.")
 
                 finals, changed, skipped = {}, 0, 0
                 for kind in ("term", "pattern"):
@@ -2209,8 +2143,8 @@ if st.session_state.app_mode == "Glossary 추출":
                     rows, sugg = blk["rows"], blk["sugg"]
                     if len(rv) > 1:
                         st.markdown(
-                            f"**{_KIND_KO[kind]} {len(rows)}건**"
-                            + (f"  ·  제안 {len(sugg)}건" if sugg else "")
+                            f"**{_KIND_KO[kind]} {len(rows)}개**"
+                            + (f" · 제안 {len(sugg)}개" if sugg else "")
                         )
                     out = []
                     for i, r in enumerate(rows):
@@ -2233,11 +2167,9 @@ if st.session_state.app_mode == "Glossary 추출":
                     st.rerun()
                 _final_n = sum(len(v) for v in finals.values())
                 if skipped:
-                    st.caption(f"🚫 {skipped}건은 등재하지 않습니다.")
+                    st.caption(f"{skipped}개는 추가하지 않습니다.")
                 if b2.button(
-                    f"확정하고 {_final_n}건 등재"
-                    + (f" (수정 {changed}건 반영)" if changed else "")
-                    + (f" · 제외 {skipped}건" if skipped else ""),
+                    f"{_final_n}개 추가" + (f" (수정 {changed}개)" if changed else ""),
                     type="primary", key="catalog_rev_ok",
                     use_container_width=True,
                     disabled=_final_n == 0,
@@ -2254,7 +2186,7 @@ if st.session_state.app_mode == "Glossary 추출":
                         st.session_state["catalog_last_save"] = {
                             "msg": " · ".join(_msg),
                             "product": _extract_product,
-                            "scope": _extract_scope,
+                            "scope": "Team" if _extract_scope == "Team" else "개인",
                             "skipped": skipped,
                             # 저장 계층이 이미 있는 항목을 걸러낸 수.
                             # 화면 판정과 별개로 최종 방어선이 동작한 결과다.
@@ -2266,7 +2198,7 @@ if st.session_state.app_mode == "Glossary 추출":
                         # 결과 배너와 갱신된 표(✅ 표시)가 보인다.
                         st.rerun()
                     except Exception as e:
-                        st.error(f"등재 오류: {e}")
+                        st.error(f"추가하지 못했습니다. ({e})")
 
             def _render_table(df, cols, key, kind, hidden=()):
                 """
@@ -2284,19 +2216,19 @@ if st.session_state.app_mode == "Glossary 추출":
                 with f1:
                     select_all = st.checkbox(
                         "전체 선택", value=False, key=f"catalog_all_{key}",
-                        help="아래 목록에 보이는 항목을 모두 체크합니다.",
+                        help="표에 표시된 항목을 모두 선택합니다.",
                     )
                 with f2:
                     q = st.text_input(
-                        "검색", key=f"catalog_q_{key}", placeholder="한국어 또는 영어 검색",
+                        "검색", key=f"catalog_q_{key}", placeholder="한국어 또는 영어로 검색",
                         label_visibility="collapsed",
                     )
                 with f3:
                     # 기본값을 False로 둔다. True면 등재 직후 그 항목이 표에서
                     # **사라져** 성공했는지 알 수 없다. 보이되 상태로 구분한다.
                     skip_dup = st.checkbox(
-                        "등록된 항목 숨기기", value=False, key=f"catalog_skip_{key}",
-                        help="이미 같은 표기로 등재된 항목(✅)을 목록에서 감춥니다.",
+                        "추가된 항목 숨기기", value=False, key=f"catalog_skip_{key}",
+                        help="Glossary에 같은 표기로 이미 있는 항목(✅)을 숨깁니다.",
                     )
 
                 view = df
@@ -2311,7 +2243,7 @@ if st.session_state.app_mode == "Glossary 추출":
                 capped = view.head(_EDIT_CAP)
                 st.caption(
                     f"{len(capped):,} / {len(view):,}개 표시"
-                    + ("  ·  검색으로 좁혀서 나눠 등재하세요" if len(view) > _EDIT_CAP else "")
+                    + (" · 검색으로 범위를 좁혀 나누어 추가하세요." if len(view) > _EDIT_CAP else "")
                 )
 
                 # 숨김 컬럼도 실어 보낸다 — 화면에는 안 나오지만 등재 직전
@@ -2325,21 +2257,20 @@ if st.session_state.app_mode == "Glossary 추출":
                 if "문맥(key)" in cols:
                     # 매뉴얼은 key가 없으니 절 제목을, 카탈로그는 네임스페이스를 보여준다
                     col_cfg["문맥(key)"] = st.column_config.TextColumn(
-                        "출처 (절)" if _align_on else "문맥 (key)", disabled=True,
-                        help="이 후보가 문서의 어느 절에서 나왔는지."
-                             if _align_on else "메시지 key의 첫 마디.",
+                        "위치" if _align_on else "키", disabled=True,
+                        help="이 후보가 나온 문서의 절"
+                             if _align_on else "리소스 키의 첫 부분",
                     )
                 if "문형 빈도" in cols:
                     col_cfg["문형 빈도"] = st.column_config.NumberColumn(
                         "문형", disabled=True, width="small"
                     )
                 if "DNT" in cols:
-                    col_cfg["DNT"] = st.column_config.CheckboxColumn("DNT", disabled=True)
+                    col_cfg["DNT"] = st.column_config.CheckboxColumn("번역 안 함", disabled=True)
                 if "상태" in cols:
                     col_cfg["상태"] = st.column_config.TextColumn(
                         "상태", disabled=True, width="small",
-                        help="🆕 신규 · ✅ 이미 등재(같은 제품·같은 표기) · "
-                             "⚠️ 표기 충돌(기존과 영문이 다름)",
+                        help="🆕 새 항목 · ✅ Glossary에 있음 · ⚠️ Glossary와 표기가 다름",
                     )
                 for _num in ("빈도", "후보수"):
                     if _num in cols:
@@ -2398,7 +2329,7 @@ if st.session_state.app_mode == "Glossary 추출":
                 # 바로 위에 모은다. 예전에는 이 선택지가 표 위쪽에 떨어져
                 # 있어서, 무엇이 어디로 가는지 모른 채 버튼을 눌렀다.
                 with st.container(border=True):
-                    st.markdown("##### 📥 등재 대상")
+                    st.markdown("##### 추가할 위치")
                     _dc1, _dc2 = st.columns(2)
                     # key= 를 쓰지 않는다 — 위에서 설명한 이유로 위젯 키는
                     # 화면이 바뀌면 사라진다. index로 현재 값을 보여주고,
@@ -2408,21 +2339,22 @@ if st.session_state.app_mode == "Glossary 추출":
                         _extract_product = st.selectbox(
                             "제품", options=_p_opts,
                             index=_p_opts.index(_extract_product),
-                            help="이 제품 기준으로 중복을 판정하고 등재합니다.",
+                            help="선택한 제품의 Glossary에 추가합니다. 중복도 이 제품 기준으로 확인합니다.",
                         )
                         st.session_state.catalog_product_value = _extract_product
                     with _dc2:
                         _s_opts = ["Team", "Personal"]
                         _extract_scope = st.selectbox(
-                            "공개 범위", options=_s_opts,
+                            "범위", options=_s_opts,
                             index=_s_opts.index(_extract_scope),
-                            help="Team = 모두가 사용 · Personal = 본인만",
+                            format_func=lambda v: ("Team (모든 사용자)" if v == "Team"
+                                                   else "개인 (본인만)"),
                         )
                         st.session_state.catalog_scope_value = _extract_scope
 
                     # 목록에 없는 제품이면 여기서 바로 만든다. 설정 파일을
                     # 열러 가지 않아도 되게.
-                    with st.expander("➕ 새 제품 추가"):
+                    with st.expander("새 제품 추가"):
                         _np1, _np2 = st.columns([3, 1])
                         _new_name = _np1.text_input(
                             "새 제품 이름", key="catalog_new_product",
@@ -2441,7 +2373,7 @@ if st.session_state.app_mode == "Glossary 추출":
                             else:
                                 st.warning(_m, icon="⚠️")
                         st.caption(
-                            "추가하면 Localize의 제품 목록에도 함께 나타납니다."
+                            "추가한 제품은 Localize 제품 목록에도 표시됩니다."
                         )
 
                     if _n_t + _n_p:
@@ -2458,38 +2390,35 @@ if st.session_state.app_mode == "Glossary 추출":
                             for k, n in (("term", _n_t), ("pattern", _n_p)) if n
                         )
                         st.markdown(
-                            f"**{_picked}** 을 "
-                            f"`{_extract_product}` · `{_extract_scope}` 에 등재합니다."
+                            f"선택한 항목: **{_picked}**"
                         )
-                        _bits = [f"🆕 신규 {_to_save - _dupe:,}"]
+                        _bits = [f"🆕 새 항목 {_to_save - _dupe:,}"]
                         if _same:
-                            _bits.append(f"✅ 이미 등재 {_same:,} (건너뜀)")
+                            _bits.append(f"✅ 이미 있음 {_same:,} (제외)")
                         if _dupe:
-                            _bits.append(f"⚠️ 표기 충돌 {_dupe:,} (검수에서 선택)")
+                            _bits.append(f"⚠️ 표기 다름 {_dupe:,} (검토에서 선택)")
                         st.caption("   ·   ".join(_bits))
 
                         if _dupe:
-                            with st.expander(f"⚠️ 표기가 다른 {_dupe}건 미리 보기"):
+                            with st.expander(f"표기가 다른 항목 {_dupe}개"):
                                 st.dataframe(
                                     _sel_terms[
                                         _sel_terms["기존대조"] == "충돌(기존)"
                                     ][["KO", "EN", "기존 EN"]].rename(
-                                        columns={"EN": "이번 후보",
-                                                 "기존 EN": "기존 글로서리"}
+                                        columns={"EN": "새 표기",
+                                                 "기존 EN": "Glossary 표기"}
                                     ),
                                     use_container_width=True, hide_index=True,
                                 )
                                 st.caption(
-                                    "검수 단계에서 항목마다 어느 쪽을 쓸지 "
-                                    "고르게 됩니다."
+                                    "다음 단계에서 항목별로 사용할 표기를 선택합니다."
                                 )
 
                         # 총계를 밝힌다. 예전에는 "58건 검수 후 등재
                         # (이미 등재 72건 제외)"처럼 나와, 58건 중 72건을
                         # 뺀다는 말로 읽혔다.
                         _label = (
-                            f"선택 {_picked_n:,}건 중 {_to_save:,}건 검수 후 등재"
-                            if _same else f"{_to_save:,}건 검수 후 등재"
+                            f"{_to_save:,}개 검토 후 추가"
                         )
                         if st.button(
                             _label,
@@ -2509,31 +2438,21 @@ if st.session_state.app_mode == "Glossary 추출":
                         # 고른 것이 없어도 버튼을 남긴다. 통째로 사라지면
                         # 기능이 없어진 것처럼 보이고, 무엇을 해야 다음으로
                         # 넘어가는지도 알 수 없다.
-                        st.markdown(
-                            f"등재 대상: `{_extract_product}` · "
-                            f"`{_extract_scope}`"
-                        )
                         st.button(
-                            "검수 후 등재", type="primary",
+                            "검토 후 추가", type="primary",
                             key="catalog_save_all", use_container_width=True,
                             disabled=True,
                         )
                         st.caption(
-                            "위 표의 **적용** 열에서 등재할 항목을 선택하면 "
-                            "버튼이 켜집니다. 표 위의 **전체 선택**으로 한 번에 "
-                            "고를 수 있고, 용어와 패턴을 함께 골라 한 번에 "
-                            "검수·등재할 수 있습니다."
+                            "표에서 추가할 항목을 선택하세요. 용어와 패턴을 함께 선택할 수 있습니다."
                         )
 
             # 등재 여부와 상관없이, 지금 고른 제품으로 바로 번역하러 갈 수
             # 있게 한다. 추출만 하고 등재는 나중에 하는 경우도 있다.
             st.markdown("---")
             _gl1, _gl2 = st.columns([3, 1])
-            _gl1.caption(
-                f"`{_extract_product}` 글로서리로 문서를 번역하려면 "
-                "오른쪽 버튼으로 이동하세요."
-            )
-            if _gl2.button("Localize 하기 →", use_container_width=True,
+            _gl1.caption(f"{_extract_product} Glossary로 문서를 번역할 수 있습니다.")
+            if _gl2.button("Localize로 이동", use_container_width=True,
                            key="catalog_go_localize"):
                 _try_navigate({
                     "app_mode": "Localize", "step": 1,
@@ -2547,27 +2466,27 @@ if st.session_state.app_mode == "Glossary 추출":
             # 라디오를 그려야 한다.
             if not _conf.empty:
                 st.markdown("---")
-                st.markdown(f"##### 표기 충돌 {len(_conf):,}건")
+                st.markdown(f"##### 표기 충돌 {len(_conf):,}개")
                 st.caption(
-                    "같은 한국어에 영어가 여러 개인 항목입니다. "
-                    "단복수·대소문자 차이는 LLM이 정리하고, 화면마다 뜻이 다른 것만 직접 고르시면 됩니다."
+                    "같은 한국어에 영어 표기가 여러 개인 항목입니다. 단순한 표기 차이는 AI가 "
+                    "정리하고, 의미가 다른 항목만 직접 선택합니다."
                 )
 
                 _resolved = st.session_state.get("catalog_resolved")
                 if st.session_state.get("catalog_review_conflicts") is not None:
                     _render_review("conflicts")
                 elif not _resolved:
-                    if st.button(f"{len(_conf):,}건 분류", key="catalog_resolve"):
+                    if st.button(f"AI로 {len(_conf):,}개 분류", key="catalog_resolve"):
                         from translator_engine import make_client  # 이 화면에서만 필요
 
-                        with st.spinner("분류 중"):
+                        with st.spinner("분류하는 중..."):
                             try:
                                 st.session_state.catalog_resolved = catalog.resolve_conflicts(
                                     make_client(OPENAI_API_KEY), _conf
                                 )
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"분류 오류: {e}")
+                                st.error(f"분류하지 못했습니다. ({e})")
                 else:
                     _rows = _conf.to_dict("records")
                     _n_split = sum(
@@ -2575,12 +2494,12 @@ if st.session_state.app_mode == "Glossary 추출":
                         if (_resolved.get(r["KO"]) or {}).get("kind") == "SPLIT"
                     )
                     st.caption(
-                        f"표기 불일치 {len(_rows) - _n_split:,}건은 대표 표기를 미리 골라뒀습니다. "
-                        f"문맥 분기 {_n_split:,}건은 직접 선택하세요."
+                        f"단순 표기 차이 {len(_rows) - _n_split:,}개는 AI가 표기를 추천했습니다. "
+                        f"의미가 다른 {_n_split:,}개는 직접 선택하세요."
                     )
 
                     _only_split = st.checkbox(
-                        "직접 골라야 하는 것만 보기", value=True, key="catalog_only_split"
+                        "직접 선택할 항목만 표시", value=True, key="catalog_only_split"
                     )
                     if st.session_state.get("catalog_prev_filter") != _only_split:
                         # 목록이 통째로 바뀌므로 첫 페이지로 되돌린다
@@ -2606,8 +2525,8 @@ if st.session_state.app_mode == "Glossary 추출":
                     # 클릭해야 등재 대상이 된다.
                     _SKIP = "선택 안 함"
                     _use_reco = st.checkbox(
-                        "추천값 일괄 선택", value=False, key="catalog_use_reco",
-                        help="LLM이 고른 표기를 이 페이지 전체에 미리 적용합니다.",
+                        "AI 추천 표기 모두 선택", value=False, key="catalog_use_reco",
+                        help="이 페이지의 모든 항목에 AI가 추천한 표기를 선택합니다.",
                     )
 
                     _picked = {}
@@ -2627,7 +2546,7 @@ if st.session_state.app_mode == "Glossary 추출":
                         )
                         if _use_reco and _reco not in _options:
                             _idx = 1 if len(_options) > 1 else 0
-                        _badge = "직접 선택" if _info.get("kind") == "SPLIT" else "자동 정리"
+                        _badge = "직접 선택" if _info.get("kind") == "SPLIT" else "AI 추천"
 
                         with st.container(border=True):
                             st.markdown(f"**{_ko}**  ·  :gray[{_badge}]")
@@ -2639,7 +2558,7 @@ if st.session_state.app_mode == "Glossary 추출":
                             )
                             _hint = " · ".join(
                                 x for x in (
-                                    f"추천 **{_reco}**" if _reco else "",
+                                    f"추천: **{_reco}**" if _reco else "",
                                     _info.get("reason", ""),
                                 ) if x
                             )
@@ -2668,7 +2587,7 @@ if st.session_state.app_mode == "Glossary 추출":
                             st.rerun()
 
                     if st.button(
-                        f"선택한 {len(_picked)}건 검수 후 등재", type="primary",
+                        f"{len(_picked)}개 검토 후 추가", type="primary",
                         key="catalog_save_conf", use_container_width=True,
                         disabled=not _picked,
                     ):
@@ -2684,11 +2603,11 @@ if st.session_state.app_mode == "Glossary 추출":
                             "conflicts", "term",
                         )
                     if not _picked:
-                        st.caption("각 항목에서 쓸 표기를 클릭하면 등재 대상이 됩니다.")
+                        st.caption("항목별로 사용할 표기를 선택하세요.")
 
             st.markdown("---")
             st.download_button(
-                "엑셀로 내려받기",
+                "Excel로 다운로드",
                 data=catalog.to_excel(
                     _result.terms, _result.patterns, product=_extract_product
                 ),
@@ -2696,8 +2615,7 @@ if st.session_state.app_mode == "Glossary 추출":
                 mime=("application/vnd.openxmlformats-officedocument"
                       ".spreadsheetml.sheet"),
                 use_container_width=True,
-                help="[Glossary 관리]의 마스터 엑셀 업로드에 "
-                     "그대로 넣을 수 있는 형식입니다.",
+                help="Glossary 관리의 Excel 가져오기에 그대로 사용할 수 있습니다.",
             )
 
     st.stop()
@@ -2712,15 +2630,62 @@ if st.session_state.app_mode == "대시보드":
     from datetime import date, timedelta
 
     st.subheader("대시보드")
-    st.caption(
-        "로컬라이즈 처리량과 비용, 언어 자산 현황입니다. 모든 숫자는 실제 기록에서 "
-        "집계했으며, 가정을 넣어 환산한 값(예: 번역가 대비 절감 시간)은 쓰지 않습니다."
-    )
 
-    _period = st.segmented_control(
-        "기간", ["전체", "최근 30일", "최근 90일", "올해"],
-        default="전체", key="dash_period", label_visibility="collapsed",
-    ) or "전체"
+    # ── 바로 가기 ───────────────────────────────────────────────────
+    # 대시보드가 첫 화면이므로, 숫자보다 "다음에 할 일"이 먼저 보이게 한다.
+    _SHORTCUTS = [
+        ("문서 Localize", "문서를 영어로 번역합니다.",
+         {"app_mode": "Localize", "step": 1}, "dash_go_localize", "primary"),
+        ("Glossary 관리", "용어와 패턴을 편집합니다.",
+         {"app_mode": "Glossary 관리"}, "dash_go_glossary", "secondary"),
+        ("Glossary 추출", "새 용어 후보를 찾습니다.",
+         {"app_mode": "Glossary 추출"}, "dash_go_extract", "secondary"),
+        ("작업 기록", "지난 번역을 확인합니다.",
+         {"app_mode": "로그"}, "dash_go_logs", "secondary"),
+    ]
+    for _col, (_title, _desc, _target, _key, _type) in zip(
+        st.columns(len(_SHORTCUTS)), _SHORTCUTS
+    ):
+        with _col, st.container(border=True):
+            st.markdown(f"**{_title}**")
+            st.caption(_desc)
+            if st.button("시작" if _type == "primary" else "열기",
+                         key=_key, type=_type, use_container_width=True):
+                _try_navigate(_target)
+
+    # ── 최근 작업 ───────────────────────────────────────────────────
+    st.markdown(" ")
+    _rh, _rb = st.columns([5, 1], vertical_alignment="bottom")
+    _rh.markdown("**내 최근 작업**")
+    if _rb.button("모두 보기 →", key="dash_all_logs", type="tertiary"):
+        _try_navigate({"app_mode": "로그"})
+    _recent = list_logs(user=st.session_state.current_user, limit=5)
+    if _recent.empty:
+        st.caption("아직 번역한 문서가 없습니다. 문서 Localize에서 시작하세요.")
+    else:
+        _rv = _recent[["created_at", "source_file", "product",
+                       "paragraphs_translated", "note"]].copy()
+        _rv["created_at"] = _rv["created_at"].str[:16].str.replace("T", " ")
+        st.dataframe(
+            _rv, use_container_width=True, hide_index=True,
+            column_config={
+                "created_at": st.column_config.TextColumn("날짜", width="small"),
+                "source_file": st.column_config.TextColumn("문서"),
+                "product": st.column_config.TextColumn("제품", width="small"),
+                "paragraphs_translated": st.column_config.NumberColumn("단락", width="small"),
+                "note": st.column_config.TextColumn("메모"),
+            },
+        )
+
+    # ── 현황 ────────────────────────────────────────────────────────
+    st.markdown(" ")
+    _sh, _sp = st.columns([3, 2], vertical_alignment="bottom")
+    _sh.markdown("**로컬라이즈 현황**")
+    with _sp:
+        _period = st.segmented_control(
+            "기간", ["전체", "최근 30일", "최근 90일", "올해"],
+            default="전체", key="dash_period", label_visibility="collapsed",
+        ) or "전체"
     _since = {
         "최근 30일": (date.today() - timedelta(days=30)).isoformat(),
         "최근 90일": (date.today() - timedelta(days=90)).isoformat(),
@@ -2732,41 +2697,36 @@ if st.session_state.app_mode == "대시보드":
     _n_terms = _gc["terms"]["team"] + _gc["terms"]["personal"]
     _n_patterns = _gc["patterns"]["team"] + _gc["patterns"]["personal"]
 
-    # ── 처리량 · 비용 ───────────────────────────────────────────────
     _k1, _k2, _k3, _k4 = st.columns(4)
-    _k1.metric("로컬라이즈 문서", f"{len(_df):,}건")
-    _k2.metric("번역 단락", f"{int(_df['paragraphs_translated'].sum()):,}개")
+    _k1.metric("번역한 문서", f"{len(_df):,}")
+    _k2.metric("번역한 단락", f"{int(_df['paragraphs_translated'].sum()):,}")
     _cost = float(_df["cost_usd"].sum())
     _k3.metric(
         "API 비용", f"${_cost:,.2f}",
-        help=(f"{metrics.PRICE_MODEL} 공식 단가로 계산: 1M 토큰당 입력 "
-              f"${metrics.PRICE_PER_1M_INPUT}, 캐시 입력 ${metrics.PRICE_PER_1M_CACHED_INPUT}, "
-              f"출력 ${metrics.PRICE_PER_1M_OUTPUT} ({metrics.PRICE_CHECKED} 확인)"),
+        help=(f"{metrics.PRICE_MODEL} 공식 단가 기준 (1M 토큰당 입력 "
+              f"${metrics.PRICE_PER_1M_INPUT}, 캐시된 입력 ${metrics.PRICE_PER_1M_CACHED_INPUT}, "
+              f"출력 ${metrics.PRICE_PER_1M_OUTPUT}, {metrics.PRICE_CHECKED} 확인)"),
     )
     _k4.metric(
-        "Glossary", f"{_n_terms:,}개 용어",
-        help=f"패턴 {_n_patterns:,}개 별도. 기간과 관계없이 현재 등재된 수입니다.",
+        "Glossary 용어", f"{_n_terms:,}",
+        help="현재 등록된 용어 수입니다. 기간과 관계없습니다.",
     )
     if len(_df):
         st.caption(
-            f"문서 1건당 평균 비용 ${_cost / len(_df):,.2f} · "
+            f"문서당 평균 비용 ${_cost / len(_df):,.2f} · "
             f"단가 출처: [OpenAI API Pricing]({metrics.PRICE_SOURCE_URL})"
         )
 
     if _df.empty:
-        st.info("이 기간에는 로컬라이즈 기록이 없습니다.", icon="ℹ️")
+        st.info("이 기간에 번역한 문서가 없습니다.", icon="ℹ️")
         st.stop()
 
-    # ── 품질 · 처리 시간 (기록 시작 이후분만) ────────────────────────
+    # 처리 시간 · 품질 (기록 시작 이후분만)
     _m = metrics.measured_subset(_df)
-    st.markdown(" ")
     with st.container(border=True):
-        st.markdown("##### 처리 시간 · 품질")
+        st.markdown("**처리 시간 및 품질**")
         if _m.empty:
-            st.caption(
-                "처리 시간, Glossary 적용, 산출물 검증 결과는 이번 업데이트부터 "
-                "기록됩니다. 다음 로컬라이즈부터 여기에 집계됩니다."
-            )
+            st.caption("처리 시간, Glossary 적용, 결과 검사 지표는 다음 번역부터 집계됩니다.")
         else:
             _secs = float(_m["elapsed_seconds"].mean())
             _paras = float(_m["paragraphs_translated"].sum())
@@ -2779,19 +2739,15 @@ if st.session_state.app_mode == "대시보드":
             _q3.metric(
                 "문서당 Glossary 적용",
                 f"{float(_m['applied_count'].mean()):,.0f}회",
-                help="Glossary·UI 매핑으로 영문 표기를 고정한 횟수의 문서당 평균",
+                help="Glossary와 UI 텍스트 매핑이 적용된 횟수의 문서당 평균",
             )
             _q4.metric(
-                "검증 오류 없음",
+                "검사 통과율",
                 f"{(_m['verify_errors'] == 0).mean() * 100:.0f}%",
-                help="저장된 산출물을 원본과 대조해 오류가 하나도 없었던 문서의 비율",
+                help="결과 검사에서 오류가 없었던 문서의 비율",
             )
-            st.caption(
-                f"처리 시간·품질 지표 기록이 있는 {len(_m)}건 기준 "
-                f"({_m['created_at'].min()[:10]} 이후)"
-            )
+            st.caption(f"{_m['created_at'].min()[:10]} 이후 {len(_m)}개 문서 기준")
 
-    # ── 추이 · 분포 ─────────────────────────────────────────────────
     # 한 차트에 시리즈 하나 — 색은 정체성을 나타낼 일이 없으므로 한 가지만 쓴다.
     _BAR = "#2E7D32"
     _monthly = (
@@ -2801,7 +2757,7 @@ if st.session_state.app_mode == "대시보드":
         .reset_index()
     )
     _monthly["비용"] = _monthly["비용"].round(2)
-    st.markdown("##### 월별 로컬라이즈 문서")
+    st.markdown("**월별 번역 문서**")
     st.altair_chart(
         alt.Chart(_monthly).mark_bar(color=_BAR, cornerRadiusTopLeft=4,
                                      cornerRadiusTopRight=4, size=28)
@@ -2811,58 +2767,51 @@ if st.session_state.app_mode == "대시보드":
             tooltip=[alt.Tooltip("month:O", title="월"), "문서:Q",
                      alt.Tooltip("단락:Q", format=","),
                      alt.Tooltip("비용:Q", format="$,.2f")],
-        ).properties(height=240),
+        ).properties(height=220),
         use_container_width=True,
     )
 
-    def _breakdown(col: str, label: str):
-        _g = (_df.groupby(col)
+    _c_left, _c_right = st.columns(2)
+    with _c_left:
+        _g = (_df.groupby("product")
               .agg(문서=("created_at", "size"), 단락=("paragraphs_translated", "sum"))
               .reset_index().sort_values("문서", ascending=False))
-        st.markdown(f"##### {label}별 문서")
+        st.markdown("**제품별 번역 문서**")
         st.altair_chart(
             alt.Chart(_g).mark_bar(color=_BAR, cornerRadiusTopRight=4,
                                    cornerRadiusBottomRight=4, size=16)
             .encode(
-                y=alt.Y(f"{col}:N", title=None, sort="-x"),
+                y=alt.Y("product:N", title=None, sort="-x"),
                 x=alt.X("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
-                tooltip=[alt.Tooltip(f"{col}:N", title=label), "문서:Q",
+                tooltip=[alt.Tooltip("product:N", title="제품"), "문서:Q",
                          alt.Tooltip("단락:Q", format=",")],
             ).properties(height=max(120, 30 * len(_g))),
             use_container_width=True,
         )
-
-    _c_left, _c_right = st.columns(2)
-    with _c_left:
-        _breakdown("product", "제품")
     with _c_right:
-        _breakdown("user", "사용자")
-
-    st.markdown("##### 언어 자산")
-    st.dataframe(
-        pd.DataFrame([
-            {"구분": "용어", "Team": _gc["terms"]["team"],
-             "Personal": _gc["terms"]["personal"], "합계": _n_terms},
-            {"구분": "패턴", "Team": _gc["patterns"]["team"],
-             "Personal": _gc["patterns"]["personal"], "합계": _n_patterns},
-        ]),
-        use_container_width=True, hide_index=True,
-    )
+        st.markdown("**Glossary 현황**")
+        st.dataframe(
+            pd.DataFrame([
+                {"구분": "용어", "Team": _gc["terms"]["team"],
+                 "개인": _gc["terms"]["personal"], "합계": _n_terms},
+                {"구분": "패턴", "Team": _gc["patterns"]["team"],
+                 "개인": _gc["patterns"]["personal"], "합계": _n_patterns},
+            ]),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption("개인 항목은 등록한 사용자의 번역에만 적용됩니다.")
 
     st.stop()
 
 
 if st.session_state.app_mode == "로그":
-    st.subheader("로그")
-    st.caption(
-        "팀 전체의 번역 이력입니다. 각 행에는 그때 사용한 UI 텍스트 매핑이 함께 저장되어 있어 "
-        "동일 문서 재번역이나 에이전트 테스트 시 매핑을 그대로 불러올 수 있습니다."
-    )
+    st.subheader("작업 기록")
+    st.caption("팀 전체의 번역 기록입니다. 기록에 저장된 UI 텍스트 매핑을 다음 번역에 다시 사용할 수 있습니다.")
 
     _log_search = st.text_input(
-        "검색 (파일명 / 제품 / 메모)",
+        "검색",
         key="log_search",
-        placeholder="예: Wrapsody, getting-started.docx, 에이전트 테스트 …",
+        placeholder="파일 이름, 제품 또는 메모로 검색",
         label_visibility="collapsed",
     )
 
@@ -2872,10 +2821,10 @@ if st.session_state.app_mode == "로그":
         search=_log_search,
         limit=200,
     )
-    st.caption(f"{len(_logs_df)}개")
+    st.caption(f"{len(_logs_df)}개 기록")
 
     if _logs_df.empty:
-        st.info("아직 번역 이력이 없습니다. **Localize** 메뉴에서 첫 번역을 실행해 보세요.", icon="ℹ️")
+        st.info("번역 기록이 없습니다. Localize에서 첫 문서를 번역하세요.", icon="ℹ️")
     else:
         # 표용 데이터 가공 — 핵심 컬럼만. ID는 selectbox 내부 식별자로만 쓰고
         # 표에서는 숨기고 사용자 이름을 노출한다.
@@ -2902,14 +2851,14 @@ if st.session_state.app_mode == "로그":
         )
 
         st.markdown(" ")
-        st.markdown("##### 🔎 상세 보기 / 관리")
+        st.markdown("##### 기록 상세")
         _id_options = _logs_df["id"].tolist()
         _id_labels = {
             int(row["id"]): f"{row['created_at']} — {row['user']} — {row['source_file']}"
             for _, row in _logs_df.iterrows()
         }
         _selected_id = st.selectbox(
-            "로그 선택",
+            "기록 선택",
             options=_id_options,
             format_func=lambda i: _id_labels.get(int(i), str(i)),
             key="log_selected_id",
@@ -2922,8 +2871,8 @@ if st.session_state.app_mode == "로그":
                     col_d_a, col_d_b, col_d_c = st.columns(3)
                     col_d_a.markdown(f"**날짜**\n\n{_detail['created_at']}")
                     col_d_a.markdown(f"**사용자**\n\n{_detail['user']}")
-                    col_d_b.markdown(f"**제품**\n\n{_detail['product'] or '(없음)'}")
-                    col_d_b.markdown(f"**유형**\n\n{_detail['translation_mode'] or '(없음)'}")
+                    col_d_b.markdown(f"**제품**\n\n{_detail['product'] or '—'}")
+                    col_d_b.markdown(f"**텍스트 유형**\n\n{_detail['translation_mode'] or '—'}")
                     col_d_c.markdown(f"**원본 파일**\n\n{_detail['source_file']}")
                     col_d_c.markdown(f"**결과 파일**\n\n{_detail['output_file']}")
 
@@ -2938,11 +2887,11 @@ if st.session_state.app_mode == "로그":
                     _mapping = _detail.get("ui_text_overrides") or {}
                     if _mapping:
                         _map_df = pd.DataFrame(
-                            [{"KO (Bold)": k, "EN (입력)": v} for k, v in _mapping.items()]
+                            [{"한국어": k, "영어": v} for k, v in _mapping.items()]
                         )
                         st.dataframe(_map_df, use_container_width=True, hide_index=True)
                     else:
-                        st.caption("이 번역에서는 UI 텍스트 매핑을 사용하지 않았습니다.")
+                        st.caption("UI 텍스트 매핑을 사용하지 않은 번역입니다.")
 
                     st.markdown("##### 메모")
                     _note_value = st.text_area(
@@ -2958,14 +2907,14 @@ if st.session_state.app_mode == "로그":
                         if st.button("메모 저장", use_container_width=True, key=f"log_note_save_{_selected_id}"):
                             try:
                                 update_note(int(_selected_id), _note_value.strip())
-                                st.toast("메모 저장됨", icon="💾")
+                                st.toast("메모를 저장했습니다.", icon="✅")
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"메모 저장 오류: {e}")
+                                st.error(f"메모를 저장하지 못했습니다. ({e})")
                     with col_act_load:
                         _can_load = bool(_mapping)
                         if st.button(
-                            "이 매핑으로 새 번역",
+                            "이 매핑으로 번역",
                             use_container_width=True,
                             disabled=not _can_load,
                             type="primary" if _can_load else "secondary",
@@ -2975,20 +2924,20 @@ if st.session_state.app_mode == "로그":
                             st.session_state["preload_ui_mapping"] = dict(_mapping)
                             st.session_state.app_mode = "Localize"
                             st.session_state.step = 1
-                            st.toast("매핑 가져왔습니다. Localize → Step 2에서 자동 적용됩니다.", icon="📥")
+                            st.toast("매핑을 가져왔습니다. 2단계에서 자동으로 채워집니다.", icon="✅")
                             st.rerun()
                     with col_act_del:
                         if st.button(
-                            "🗑️ 로그 삭제",
+                            "기록 삭제",
                             use_container_width=True,
                             key=f"log_del_{_selected_id}",
                         ):
                             try:
                                 delete_log(int(_selected_id))
-                                st.toast("로그 삭제됨", icon="🗑️")
+                                st.toast("기록을 삭제했습니다.", icon="✅")
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"삭제 오류: {e}")
+                                st.error(f"삭제하지 못했습니다. ({e})")
 
     st.stop()
 
@@ -2998,15 +2947,10 @@ if st.session_state.app_mode == "로그":
 # ─────────────────────────────────────────────
 
 if st.session_state.step == 2:
-    st.subheader("Step 2. 업로드 & UI 텍스트 매핑")
+    st.subheader("2단계: 문서 업로드")
     st.caption(
-        "Word(.docx) 또는 Markdown(.md/.mdx) 문서를 올리면 **볼드(Bold)로 표시된 한국어**를 "
-        "자동으로 뽑아 표에 보여드립니다. "
-        "그대로 쓰고 싶은 영문 표기가 있으면 EN 칸에 입력하세요. "
-        "비워두면 LLM이 알아서 번역하고, 입력한 항목은 그 표기 그대로 사용됩니다. "
-        "**여러 개를 한 번에 올릴 수 있습니다** — 매핑 표는 하나로 합쳐지고, "
-        "입력한 영문이 올린 문서 전체에 같게 적용됩니다. "
-        "이 매핑은 자동으로 **[로그] 메뉴에 기록**되어, 나중에 같은 문서를 다시 번역할 때 불러올 수 있어요."
+        "Word(.docx) 또는 Markdown(.md, .mdx) 문서를 업로드하세요. 여러 파일을 한 번에 "
+        "업로드할 수 있습니다. 굵게 표시된 UI 텍스트의 영어 표기를 미리 지정할 수 있습니다."
     )
     render_summary_pills(
         st.session_state.selected_product,
@@ -3042,7 +2986,7 @@ if st.session_state.step == 2:
     )
 
     uploaded_docs = st.file_uploader(
-        "업로드 또는 끌어서 놓기 (여러 개 선택 가능)",
+        "문서 업로드",
         type=["docx", "md", "markdown", "mdx"],
         accept_multiple_files=True,
         label_visibility="collapsed",
@@ -3050,11 +2994,11 @@ if st.session_state.step == 2:
     if uploaded_docs:
         if len(uploaded_docs) > 1:
             st.caption(
-                f"📎 {len(uploaded_docs)}개 · 순차로 번역합니다 — "
-                + " · ".join(d.name for d in uploaded_docs)
+                f"파일 {len(uploaded_docs)}개를 차례로 번역합니다: "
+                + ", ".join(d.name for d in uploaded_docs)
             )
         else:
-            st.caption(f"📎 {uploaded_docs[0].name}")
+            st.caption(uploaded_docs[0].name)
 
     # ── 파일 업로드 후: bold 추출 + 글로서리 자동 매칭 → 매핑 입력 표 ─
     #
@@ -3124,7 +3068,7 @@ if st.session_state.step == 2:
                     ).to_dict("records")
                 )
             except Exception as e:
-                st.error(f"문서에서 볼드 텍스트 추출 실패: {e}")
+                st.error(f"문서를 읽지 못했습니다. ({e})")
 
         saved_input_paths = st.session_state.get("ui_text_input_paths") or []
         ui_mapping_df = pd.DataFrame(
@@ -3133,7 +3077,7 @@ if st.session_state.step == 2:
         )
 
         if ui_mapping_df.empty:
-            st.info("올린 문서에는 볼드 처리된 한국어 텍스트가 없습니다. 그대로 번역을 진행하세요.", icon="ℹ️")
+            st.info("굵게 표시된 UI 텍스트가 없습니다. 바로 번역을 시작할 수 있습니다.", icon="ℹ️")
         else:
             # 같은 파일 또는 같은 제품의 이전 로그가 있으면 매핑 재사용 옵션 제공.
             # 여러 파일이면 첫 파일 이름으로 찾는다 — '동일 제품' 매칭이 어차피
@@ -3151,16 +3095,14 @@ if st.session_state.step == 2:
                 with st.container(border=True):
                     _headline_bits = []
                     if not _file_matches.empty:
-                        _headline_bits.append(f"동일 파일 **{len(_file_matches)}건**")
+                        _headline_bits.append(f"같은 파일 {len(_file_matches)}개")
                     if not _product_matches.empty:
                         _headline_bits.append(
-                            f"동일 제품(**{st.session_state.selected_product}**) "
-                            f"**{len(_product_matches)}건**"
+                            f"같은 제품 {len(_product_matches)}개"
                         )
                     st.markdown(
-                        "📚 **이전 번역의 UI 매핑을 재사용할 수 있어요** — "
-                        + " · ".join(_headline_bits)
-                        + ". 매핑 개수와 메모를 보고 선택하세요."
+                        "**이전 번역의 UI 텍스트 매핑을 사용할 수 있습니다.** "
+                        + "(" + ", ".join(_headline_bits) + ")"
                     )
 
                     _prev_options = {}
@@ -3176,14 +3118,14 @@ if st.session_state.step == 2:
                     col_pl_sel, col_pl_btn = st.columns([3, 1])
                     with col_pl_sel:
                         _pl_id = st.selectbox(
-                            "가져올 로그",
+                            "가져올 기록",
                             options=list(_prev_options.keys()),
                             format_func=lambda i: _prev_options.get(int(i), str(i)),
                             label_visibility="collapsed",
                             key="prev_log_picker",
                         )
                     with col_pl_btn:
-                        if st.button("매핑 불러오기", use_container_width=True, key="prev_log_load"):
+                        if st.button("매핑 가져오기", use_container_width=True, key="prev_log_load"):
                             _ld = get_log(int(_pl_id))
                             _ld_map = (_ld or {}).get("ui_text_overrides") or {}
                             _filled = 0
@@ -3193,11 +3135,11 @@ if st.session_state.step == 2:
                                     if ko in _ld_map:
                                         row["EN (입력)"] = _ld_map[ko]
                                         _filled += 1
-                            st.toast(f"로그에서 {_filled}개 매핑을 채웠습니다.", icon="📥")
+                            st.toast(f"매핑 {_filled}개를 채웠습니다.", icon="✅")
                             st.rerun()
                     st.caption(
-                        "📄 = 같은 파일 · 🏷️ = 같은 제품. "
-                        "매핑에 있는 KO 중 이 문서의 볼드 KO와 일치하는 것만 자동으로 채워집니다 (기존 입력은 덮어쓰지 않음)."
+                        "📄 같은 파일 · 🏷️ 같은 제품. 이 문서에 있는 항목만 채우며, "
+                        "이미 입력한 값은 바꾸지 않습니다."
                     )
 
             # 자동 매칭 결과 요약
@@ -3205,20 +3147,17 @@ if st.session_state.step == 2:
             if _counts.get("글로서리", 0) or _counts.get("로그", 0):
                 bits = []
                 if _counts.get("로그", 0):
-                    bits.append(f"이전 로그에서 **{_counts['로그']}개**")
+                    bits.append(f"작업 기록 {_counts['로그']}개")
                 if _counts.get("글로서리", 0):
-                    bits.append(f"글로서리에서 **{_counts['글로서리']}개**")
-                st.caption(f"💡 {' / '.join(bits)} 자동 매칭됨")
+                    bits.append(f"Glossary {_counts['글로서리']}개")
+                st.caption(f"자동으로 채운 항목: {', '.join(bits)}")
 
             st.markdown(
-                f"##### 📋 UI 텍스트 매핑 ({len(ui_mapping_df)}개)"
-                + (f" — 파일 {len(uploaded_docs)}개에서 병합"
-                   if len(uploaded_docs) > 1 else "")
+                f"##### UI 텍스트 매핑 ({len(ui_mapping_df)}개)"
             )
             st.caption(
-                "⌨️ EN 칸에 입력하고 **Enter**를 누르면 값이 확정되면서 "
-                "**바로 아래 행의 EN 칸**으로 내려갑니다. 연속 입력에 쓰세요. "
-                "(Tab은 오른쪽 칸으로 이동합니다.)"
+                "영어 표기를 지정할 항목만 입력하세요. 비워 두면 AI가 번역합니다. "
+                "Enter를 누르면 다음 행으로 이동합니다."
             )
             ui_mapping_df = st.data_editor(
                 ui_mapping_df,
@@ -3230,19 +3169,19 @@ if st.session_state.step == 2:
                               if len(uploaded_docs) > 1
                               else ["KO (Bold)", "EN (입력)", "맥락"]),
                 column_config={
-                    "KO (Bold)": st.column_config.TextColumn("KO (Bold)", width="small"),
+                    "KO (Bold)": st.column_config.TextColumn("한국어", width="small"),
                     "출처": st.column_config.TextColumn(
                         "출처 파일", disabled=True, width="small",
-                        help="이 라벨이 나온 파일. 입력한 영문은 올린 파일 전체에 적용됩니다.",
+                        help="입력한 영어 표기는 업로드한 모든 파일에 적용됩니다.",
                     ),
                     "EN (입력)": st.column_config.TextColumn(
-                        "EN (입력)",
-                        help="비워두면 LLM이 번역. 입력하면 이 표기 그대로 사용.",
+                        "영어",
+                        help="입력하면 이 표기를 그대로 사용합니다.",
                         width="medium",
                     ),
                     "맥락": st.column_config.TextColumn(
-                        "맥락 (앞뒤 문장)",
-                        help="해당 단어가 본문에서 등장한 위치의 앞뒤 문맥. 「대상」 으로 강조 표시.",
+                        "문맥",
+                        help="본문에서 이 텍스트가 나오는 문장입니다.",
                         width="large",
                     ),
                 },
@@ -3258,20 +3197,16 @@ if st.session_state.step == 2:
             term_df = pd.DataFrame(
                 _term_rows, columns=["KO", "EN (입력)", "빈도", "묶음", "맥락"])
             _n_grouped = int((term_df["묶음"] != "").sum())
-            st.markdown(f"##### 📖 반복 용어 — Glossary 후보 ({len(term_df)}개)")
+            st.markdown(f"##### 반복 용어 ({len(term_df)}개)")
             st.caption(
-                "이 문서에서 3회 이상 반복되는데 **글로서리에 아직 없는** 용어입니다. "
-                "영문을 정해두면 문서 전체에서 그 표기로 통일됩니다. "
-                "비워두면 LLM이 문단마다 알아서 번역합니다 — 표기가 갈릴 수 있습니다."
+                "문서에 3번 이상 나오지만 Glossary에 없는 용어입니다. "
+                "영어 표기를 지정하면 문서 전체에 일관되게 적용됩니다."
             )
             if _n_grouped:
                 st.info(
-                    f"**묶음** 표시가 붙은 {_n_grouped}개는 끝말이 같은 용어끼리 "
-                    "모아둔 것입니다. 붙는 말에 따라 **영어가 달라지는** 낱말이라 "
-                    "각각 따로 정해야 합니다.\n\n"
-                    "예: `대화 내용 내보내기` → export · `사용자 내보내기` → remove · "
-                    "`삭제 확인` → confirm · `상태 확인` → check",
-                    icon="🔀",
+                    f"**그룹**이 표시된 {_n_grouped}개는 앞말에 따라 영어가 달라질 수 있습니다. "
+                    "각각 지정하세요. (예: 대화 내용 내보내기 → export, 사용자 내보내기 → remove)",
+                    icon="ℹ️",
                 )
             term_df = st.data_editor(
                 term_df,
@@ -3282,31 +3217,29 @@ if st.session_state.step == 2:
                 column_order=["묶음", "빈도", "KO", "EN (입력)", "맥락"],
                 column_config={
                     "빈도": st.column_config.NumberColumn(
-                        "빈도", disabled=True, width="small",
-                        help="이 문서에서 몇 번 나오는지.",
+                        "횟수", disabled=True, width="small",
+                        help="문서에 나오는 횟수",
                     ),
-                    "KO": st.column_config.TextColumn("KO", width="medium"),
+                    "KO": st.column_config.TextColumn("한국어", width="medium"),
                     "EN (입력)": st.column_config.TextColumn(
-                        "EN (입력)",
-                        help="정해두면 본문 어디서든 이 표기로 통일됩니다.",
+                        "영어",
+                        help="입력하면 문서 전체에서 이 표기를 사용합니다.",
                         width="medium",
                     ),
                     "묶음": st.column_config.TextColumn(
-                        "묶음", disabled=True, width="small",
-                        help="끝말이 같은 용어끼리 모은 것. 붙는 말에 따라 영어가 "
-                             "달라지므로 각각 따로 정하세요.",
+                        "그룹", disabled=True, width="small",
+                        help="끝말이 같은 용어 그룹. 앞말에 따라 영어가 달라질 수 있습니다.",
                     ),
                     "맥락": st.column_config.TextColumn(
-                        "맥락 (앞뒤 문장)", width="large",
-                        help="해당 용어가 처음 등장한 자리. 「대상」으로 강조 표시.",
+                        "문맥", width="large",
+                        help="본문에서 이 용어가 처음 나오는 문장입니다.",
                     ),
                 },
                 key="term_candidate_editor",
             )
             st.checkbox(
-                "번역 후 이 용어들을 글로서리에도 등재",
+                "번역이 끝나면 입력한 용어를 Glossary에 추가",
                 key="term_candidates_register",
-                help="다음 번역부터는 다시 입력하지 않아도 됩니다.",
             )
 
     st.markdown("---")
@@ -3410,7 +3343,7 @@ if st.session_state.step == 2:
 # ─────────────────────────────────────────────
 
 elif st.session_state.step == 3:
-    st.subheader("Step 3. 다운로드")
+    st.subheader("3단계: 다운로드")
 
     results = st.session_state.get("last_results") or []
 
@@ -3418,9 +3351,8 @@ elif st.session_state.step == 3:
     # 사용자는 "다운로드를 눌렀더니 화면이 튕겼다"로만 인식한다.
     if not results:
         st.warning(
-            "앱이 다시 시작되어 이전 번역 결과가 사라졌습니다. "
-            "배포나 재시작이 있으면 세션이 초기화됩니다. "
-            "실행 기록은 **로그** 메뉴에 남아 있습니다.",
+            "앱이 다시 시작되어 번역 결과를 표시할 수 없습니다. "
+            "번역 기록은 작업 기록에서 확인할 수 있습니다.",
             icon="⚠️",
         )
         _c1, _c2 = st.columns(2)
@@ -3428,7 +3360,7 @@ elif st.session_state.step == 3:
                       key="step3_restart"):
             st.session_state.step = 1
             st.rerun()
-        if _c2.button("로그 보기", use_container_width=True, key="step3_logs"):
+        if _c2.button("작업 기록 보기", use_container_width=True, key="step3_logs"):
             _try_navigate({"app_mode": "로그"})
         st.stop()
 
@@ -3446,8 +3378,8 @@ elif st.session_state.step == 3:
 
     if not ok:
         st.warning(
-            "산출물 파일을 찾을 수 없습니다. 앱이 재시작되면서 임시 파일이 "
-            "정리된 것으로 보입니다. 다시 번역해 주세요.",
+            "결과 파일을 찾을 수 없습니다. 앱이 다시 시작되어 임시 파일이 "
+            "삭제되었습니다. 다시 번역하세요.",
             icon="⚠️",
         )
         if st.button("처음으로", type="primary", key="step3_restart_missing"):
@@ -3469,35 +3401,33 @@ elif st.session_state.step == 3:
 
     if failed:
         st.warning(
-            f"{len(results)}개 중 **{len(ok)}개 완료**, **{len(failed)}개 실패**. "
-            "실패한 파일은 아래 표에서 사유를 확인하고 다시 시도하세요.",
+            f"파일 {len(results)}개 중 {len(ok)}개를 번역했고 {len(failed)}개는 실패했습니다. "
+            "아래 표에서 실패 사유를 확인하세요.",
             icon="⚠️",
         )
     elif _n_verify_err:
         st.warning(
-            f"로컬라이즈는 끝났지만 {_n_verify_err}개 파일의 산출물 검증에서 "
-            "오류가 나왔습니다. 아래를 확인한 뒤 배포하세요.",
+            f"번역을 완료했지만 파일 {_n_verify_err}개에서 오류가 발견되었습니다. "
+            "배포하기 전에 결과 검사 내용을 확인하세요.",
             icon="⚠️",
         )
     else:
         st.success(
-            f"로컬라이즈가 완료되었습니다. ({len(ok)}개)" if len(ok) > 1
-            else "로컬라이즈가 완료되었습니다."
+            f"파일 {len(ok)}개를 번역했습니다." if len(ok) > 1
+            else "번역을 완료했습니다."
         )
     if gone:
         st.caption(
-            "⚠️ 산출물 파일이 사라진 항목이 있습니다(앱 재시작): "
+            "앱이 다시 시작되어 결과 파일을 찾을 수 없는 항목: "
             + ", ".join(r["source_name"] for r in gone)
         )
 
-    st.write("### 결과")
-
-    _tot_in = sum((r.get("result") or {}).get("input_tokens", 0) for r in ok)
-    _tot_out = sum((r.get("result") or {}).get("output_tokens", 0) for r in ok)
+    _tot_paras = sum((r.get("result") or {}).get("paragraphs_translated", 0) or 0 for r in ok)
+    _tot_tokens = sum((r.get("result") or {}).get("total_tokens", 0) or 0 for r in ok)
     col_a, col_b, col_c = st.columns(3)
-    col_a.metric("입력 토큰", f"{_tot_in:,}")
-    col_b.metric("출력 토큰", f"{_tot_out:,}")
-    col_c.metric("예상 비용", f"${round(sum(_cost_of(r) for r in ok), 4)}")
+    col_a.metric("번역한 단락", f"{_tot_paras:,}")
+    col_b.metric("토큰", f"{_tot_tokens:,}")
+    col_c.metric("API 비용", f"${sum(_cost_of(r) for r in ok):,.2f}")
 
     # 파일이 여러 개면 한눈에 보는 표를 먼저. 상세는 아래에서 하나씩.
     if len(results) > 1:
@@ -3507,9 +3437,9 @@ elif st.session_state.step == 3:
             _v_err = _errors_of(r)
             _v_all = m.get("verification") or []
             if not r.get("result"):
-                _state, _verify_cell = "✗ 실패", "-"
+                _state, _verify_cell = "✗ 실패", "—"
             elif not r["available"]:
-                _state, _verify_cell = "⚠️ 파일 없음", "-"
+                _state, _verify_cell = "⚠️ 파일 없음", "—"
             elif _v_err:
                 _state, _verify_cell = "✓ 완료", f"⚠️ 오류 {len(_v_err)}"
             elif _v_all:
@@ -3521,7 +3451,7 @@ elif st.session_state.step == 3:
                 "상태": _state,
                 "문단": m.get("paragraphs_translated", 0) or 0,
                 "토큰": m.get("total_tokens", 0) or 0,
-                "비용": f"${_cost_of(r)}" if r.get("result") else "-",
+                "비용": f"${_cost_of(r):,.2f}" if r.get("result") else "—",
                 "검증": _verify_cell,
                 # 실패가 없으면 빈 열이 되므로 아래에서 떼어낸다.
                 "사유": (r.get("error") or "")[:120],
@@ -3534,10 +3464,10 @@ elif st.session_state.step == 3:
             column_config={
                 "파일": st.column_config.TextColumn("파일", width="medium"),
                 "상태": st.column_config.TextColumn("상태", width="small"),
-                "문단": st.column_config.NumberColumn("문단", width="small"),
+                "문단": st.column_config.NumberColumn("단락", width="small"),
                 "토큰": st.column_config.NumberColumn("토큰", width="small"),
                 "비용": st.column_config.TextColumn("비용", width="small"),
-                "검증": st.column_config.TextColumn("검증", width="small"),
+                "검증": st.column_config.TextColumn("결과 검사", width="small"),
                 "사유": st.column_config.TextColumn("실패 사유", width="large"),
             },
         )
@@ -3554,7 +3484,7 @@ elif st.session_state.step == 3:
                 st.session_state[_zip_key] = _buf.getvalue()
             except Exception as _e:
                 st.session_state[_zip_key] = None
-                st.caption(f"ZIP을 만들지 못했습니다: {_e}")
+                st.caption(f"ZIP 파일을 만들지 못했습니다. ({_e})")
         _zip_bytes = st.session_state.get(_zip_key)
         if _zip_bytes:
             _zip_name = (
@@ -3562,7 +3492,7 @@ elif st.session_state.step == 3:
                 f"{len(ok)}files.zip"
             )
             st.download_button(
-                f"전체 ZIP 다운로드 ({len(ok)}개)",
+                f"모두 다운로드 (ZIP, {len(ok)}개)",
                 data=_zip_bytes,
                 file_name=_zip_name,
                 mime="application/zip",
@@ -3574,13 +3504,13 @@ elif st.session_state.step == 3:
 
     # ── 파일 선택 → 상세 ─────────────────────────────────────────────
     if len(results) > 1:
-        st.markdown("##### 파일별 상세")
+        st.markdown("##### 파일별 결과")
         _labels = {
             i: ("✓ " if r.get("result") and r["available"] else "✗ ") + r["source_name"]
             for i, r in enumerate(results)
         }
         _pick = st.selectbox(
-            "상세를 볼 파일",
+            "파일 선택",
             options=list(_labels.keys()),
             format_func=lambda i: _labels[int(i)],
             key="last_batch_detail",
@@ -3601,7 +3531,7 @@ elif st.session_state.step == 3:
             st.rerun()
 
     with col_restart:
-        if st.button("처음으로 돌아가기", use_container_width=True):
+        if st.button("새 문서 번역", use_container_width=True):
             reset_translation_result()
             st.session_state.step = 1
             st.rerun()

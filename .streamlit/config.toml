@@ -11,3 +11,7 @@ showSidebarNavigation = false
 
 [browser]
 gatherUsageStats = false
+
+# 기본(primary) 버튼과 강조색을 사이드바 활성 메뉴의 녹색과 맞춘다.
+[theme]
+primaryColor = "#2E7D32"
