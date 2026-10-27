@@ -422,8 +422,10 @@ def render_review(entry: dict) -> None:
         # index=를 함께 주면 Streamlit이 두 출처가 겹친다고 경고한다.
         _rkey = f"review_filter::{output_path}::{len(options)}"
         st.session_state.setdefault(_rkey, options[0])
+        # 필터를 고르면 표기 확인('단락 보기') 모드를 푼다 — 안 풀면 필터가 먹지 않는다
         mode = st.radio("표시", options, horizontal=True, key=_rkey,
-                        label_visibility="collapsed")
+                        label_visibility="collapsed",
+                        on_change=lambda: st.session_state.pop(fkey, None))
     with f2:
         q = st.text_input("검색", key=f"review_q::{output_path}",
                           placeholder="원문 또는 번역에서 검색",
@@ -467,6 +469,8 @@ def render_review(entry: dict) -> None:
             if edit_mode else
             "적용된 용어는 파란색으로 강조됩니다."
         )
+        if mode == "확인 필요" and view:
+            _render_flag_guide(view, output_path, edit_mode)
         if not view:
             st.caption("확인이 필요한 단락이 없습니다." if mode == "확인 필요"
                        else "표시할 단락이 없습니다.")
@@ -499,8 +503,9 @@ def render_review(entry: dict) -> None:
                 tag = ('<span class="rv-tag rv-t-edit">수정함</span>' if r["_edited"]
                        else "".join(f'<span class="rv-tag rv-t-flag">{f}</span>'
                                     for f in r["_fl"]))
+                # 확인 필요·표기 확인은 원문과 비교해야 판단할 수 있다 — 원문을 늘 붙인다
                 src = (f'<div class="rv-src">{review.to_preview_html(r["_src"], [])}</div>'
-                       if show_src else "")
+                       if show_src or mode in ("확인 필요", "표기 확인") else "")
                 paras.append(f'<div class="{cls}">'
                              f'{review.to_preview_html(r["_out"], r["_terms"], vsurf)}{tag}{src}</div>')
             with st.container(height=520, border=False):
@@ -521,6 +526,35 @@ def render_review(entry: dict) -> None:
                 _render_variant_cards(entry, variants, fkey, dismissed)
         with st.container(border=True):
             _render_applied_terms(entry, added)
+
+
+# 확인 필요 태그마다 — 무엇이 문제인지, 어떻게 고치는지
+_FLAG_GUIDE = {
+    "한국어 남음": "번역문에 한국어가 남아 있습니다. 남은 한국어를 영어로 바꾸세요.",
+    "빈 값": "nan, null 같은 빈 값이 들어갔습니다. 대개 Glossary나 UI 텍스트 매핑의 빈 칸 "
+             "때문입니다. 그 단어를 지우거나 알맞은 표현으로 바꾸세요.",
+    "공백 누락": "단어 두 개가 붙어 있습니다(예: websiteGo). 사이에 공백을 넣으세요.",
+    "서식 확인": "원문의 굵게·링크·이미지 위치가 번역과 맞지 않습니다. 아래 회색 원문과 비교해 "
+                 "\\*\\* 위치를 맞추세요. 그대로 두면 다운로드 문서에서 해당 서식이 빠질 수 있습니다.",
+}
+
+
+def _render_flag_guide(view: list, output_path: str, edit_mode: bool) -> None:
+    """'확인 필요' 단락에 붙은 태그를 풀어 설명하고, 고치는 곳으로 보낸다."""
+    from collections import Counter
+    cnt = Counter(f for r in view for f in r["_fl"])
+    if not cnt:
+        return
+    lines = "\n".join(f"- **{f}** {n}곳 — {_FLAG_GUIDE.get(f, '')}" for f, n in cnt.items())
+    with st.container(border=True):
+        st.markdown(f"**자동 검사에서 확인이 필요한 단락 {len(view)}개를 찾았습니다.**\n\n{lines}")
+        if edit_mode:
+            st.caption("아래 표의 번역 칸을 고친 뒤 **수정 내용 적용**을 선택하세요.")
+        else:
+            st.button("편집해서 고치기", type="primary", key=f"review_fixgo::{output_path}",
+                      on_click=lambda: st.session_state.__setitem__(
+                          f"review_edit::{output_path}", True))
+            st.caption("문제가 아니라고 판단되면 그대로 다운로드해도 됩니다.")
 
 
 def _render_variant_cards(entry: dict, variants: list, fkey: str, dismissed: set) -> None:

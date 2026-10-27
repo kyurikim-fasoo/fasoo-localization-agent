@@ -141,6 +141,19 @@ if _v:
 check("Glossary로 고정된 용어는 제외", review.term_variants(_pairs, exclude_ko={"정책 설정"}) == [])
 _same = [(i, k, e.replace("policy configuration", "policy settings")) for i, k, e in _pairs]
 check("표기가 하나면 경고 없음", review.term_variants(_same) == [])
+# UI 표기(See more/Show more)는 동사로 시작해도 후보가 돼야 하고,
+# 그 단락들에 우연히 겹친 긴 문장 조각("message window appears")은 표기가 아니다.
+_ko2 = ["더 보기를 선택합니다.", "목록 아래의 더 보기를 누르면 전체 메시지 창이 열립니다.",
+        "더 보기를 누르면 메시지 창이 나타납니다.", "답변이 길면 더 보기가 표시됩니다.",
+        "더 보기 버튼을 누르면 메시지 창이 나타납니다."]
+_en2 = ["Select See more.", "Select See more below the list to open the full message window.",
+        "Select Show more and the message window appears.",
+        "If the answer is long, Show more is displayed.",
+        "Select the See more button and the message window appears."]
+_v2 = review.term_variants([(i, k, e) for i, (k, e) in enumerate(zip(_ko2, _en2))])
+check("UI 표기 구분 (See more / Show more)",
+      [[x["en"] for x in v["variants"]] for v in _v2] == [["See more", "Show more"]],
+      str([[x["en"] for x in v["variants"]] for v in _v2]))
 _h = review.to_preview_html("the Policy Settings and ⟦B⟧policy configuration⟦/B⟧", ["Save"],
                             [["Policy Settings"], ["policy configuration"]])
 check("표기별 색", '<span class="rv-v0">Policy Settings</span>' in _h

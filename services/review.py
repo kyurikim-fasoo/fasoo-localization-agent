@@ -187,14 +187,23 @@ def _norm_word(w: str) -> str:
     return w
 
 
+# 구절 앞뒤에 올 수 없는 기능어. output_check._EN_STOP은 see·select·click 같은
+# 동사까지 막아 "See more"·"Select all" 같은 UI 표기를 후보에서 지워 버린다.
+_EDGE_STOP = {
+    "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are", "be",
+    "was", "were", "you", "your", "it", "its", "this", "that", "these", "those", "with",
+    "from", "by", "at", "as", "if", "not", "can", "will", "when", "then", "than",
+}
+
+
 def _phrases(text: str, lo: int = 2, hi: int = 4) -> Dict[str, str]:
-    """{정규화 키: 본문에 쓰인 모양}. 앞뒤 낱말이 불용어인 구절은 버린다."""
+    """{정규화 키: 본문에 쓰인 모양}. 앞뒤 낱말이 기능어인 구절은 버린다."""
     words = output_check._EN_WORD_RE.findall(text)
     out: Dict[str, str] = {}
     for n in range(lo, hi + 1):
         for i in range(len(words) - n + 1):
             g = words[i:i + n]
-            if g[0].lower() in output_check._EN_STOP or g[-1].lower() in output_check._EN_STOP:
+            if g[0].lower() in _EDGE_STOP or g[-1].lower() in _EDGE_STOP:
                 continue
             out.setdefault(" ".join(_norm_word(w) for w in g), " ".join(g))
     return out
@@ -242,6 +251,11 @@ def term_variants(pairs: List[Tuple[int, str, str]], exclude_ko=(),
             best, best_rank = None, None
             for key, n in tally.items():
                 if n < 2 or in_term[key] / doc_df[key] < min_exclusive:
+                    continue
+                # 용어의 번역은 한국어 낱말 수보다 길지 않은 게 보통이다. 긴 구절은
+                # 용어가 아니라 그 단락들에 우연히 겹친 문장 조각("Message window
+                # appears")이기 쉽다.
+                if len(key.split()) > max(2, n_ko):
                     continue
                 if any(key in c or c in key for c, _ in chosen):
                     continue

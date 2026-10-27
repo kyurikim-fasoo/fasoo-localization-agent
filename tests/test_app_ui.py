@@ -215,6 +215,12 @@ check("검토 섹션", "번역 검토 및 보정" in _md and f"총 단락<b>{len
 check("용어 적용 단락 수", "용어 적용<b>1개" in _md, _md[:400])
 check("확인 필요 단락 수", '확인 필요<b class="rv-amber">1개' in _md, _md[:400])
 check("문서 미리보기", "rv-doc" in _md and "rv-term" in _md, _md[:400])
+check("확인 필요 안내: 무엇이·어떻게", "확인이 필요한 단락 1개" in _md and "한국어를 영어로 바꾸세요" in _md,
+      _md[:400])
+check("확인 필요에서는 원문을 함께", 'class="rv-src">' in _md)
+at.button(key=f"review_fixgo::{_rout}").click().run()
+check("편집해서 고치기 → 편집 모드", at.toggle(key=f"review_edit::{_rout}").value is True)
+at.toggle(key=f"review_edit::{_rout}").set_value(False).run()
 check("적용된 용어 패널", "적용된 용어" in _md)
 check("미리보기에서는 편집 버튼 없음",
       not any(b.label == "수정 내용 적용" for b in at.button))
@@ -309,6 +315,12 @@ check("단락 보기 → 안내", any("정책 설정" in str(i.value) for i in a
 check("단락 보기 → 표기별 색", 'class="rv-v1"' in _md_of(at))
 at.button(key=f"review_unfocus::{_vout}").click().run()
 check("전체 보기 → 안내 사라짐", not any("정책 설정" in str(i.value) for i in at.info))
+at.button(key=f"review_vfocus::{_vout}::0").click().run()
+at.radio(key=f"review_filter::{_vout}::4").set_value("수정함").run()
+check("필터를 고르면 단락 보기가 풀린다",
+      not any("정책 설정" in str(i.value) for i in at.info) and "표시할 단락이 없습니다" in
+      " ".join(str(c.value) for c in at.caption),
+      str([str(i.value)[:30] for i in at.info]))
 at.button(key=f"review_vdismiss::{_vout}::0").click().run()
 check("무시 → 카드 사라짐", "표기 확인<b" not in _md_of(at))
 
