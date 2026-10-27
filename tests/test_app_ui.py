@@ -99,6 +99,12 @@ check("예외 없음", not at.exception, str(at.exception))
 check("업로더 1개", len(at.get("file_uploader")) == 1)
 check("번역 시작 버튼", "번역 시작" in [b.label for b in at.button])
 
+print("[3-b] 대시보드 렌더")
+at = make_at(app_mode="대시보드").run()
+check("예외 없음", not at.exception, str(at.exception))
+check("KPI 표시", any(m.label == "API 비용" for m in at.metric),
+      str([m.label for m in at.metric]))
+
 print("[4] rerun을 넘어 살아있는 잡을 UI가 찾아냄")
 _orig = jobs.translate_document
 jobs.translate_document = lambda **kw: (_ for _ in ()).throw(RuntimeError("의도된 실패"))

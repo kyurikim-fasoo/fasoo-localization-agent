@@ -39,14 +39,28 @@ def create_log(
     """
     init_db()
     overrides_json = json.dumps(ui_text_overrides or {}, ensure_ascii=False)
+    # 대시보드 지표. 결과에 해당 키가 없으면 NULL — "0"으로 적으면 측정하지
+    # 않은 것이 "적용 0건 / 오류 0건"으로 집계돼 숫자가 좋아 보이게 된다.
+    elapsed = metrics.get("elapsed_seconds")
+    applied = metrics.get("applied")
+    verification = metrics.get("verification")
+    applied_terms = len(applied) if applied is not None else None
+    applied_count = (sum(int(a.get("적용", 0)) for a in applied)
+                     if applied is not None else None)
+    verify_errors = (sum(1 for v in verification if v.get("level") == "오류")
+                     if verification is not None else None)
+    verify_warnings = (len(verification) - verify_errors
+                       if verification is not None else None)
     with db_session() as conn:
         cur = conn.execute(
             """
             INSERT INTO translation_logs (
                 created_at, user, product, translation_mode, source_file, output_file,
                 ui_text_overrides, input_tokens, cached_tokens, output_tokens,
-                total_tokens, paragraphs_translated, note
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                total_tokens, paragraphs_translated, note,
+                elapsed_seconds, applied_terms, applied_count,
+                verify_errors, verify_warnings
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 now_iso(), user, product, translation_mode, source_file, output_file,
@@ -57,6 +71,8 @@ def create_log(
                 int(metrics.get("total_tokens", 0)),
                 int(metrics.get("paragraphs_translated", 0)),
                 note,
+                int(elapsed) if elapsed is not None else None,
+                applied_terms, applied_count, verify_errors, verify_warnings,
             ),
         )
         new_id = int(cur.lastrowid)

@@ -128,8 +128,9 @@ def start_job(params: dict) -> str:
         for idx, entry in enumerate(files):
             job["current"] = idx
             entry["status"] = "running"
+            t0 = time.monotonic()
             try:
-                entry["result"] = translate_document(
+                result = translate_document(
                     in_path=entry["in_path"],
                     out_path=entry["out_path"],
                     glossary_rows=params["glossary_rows"],
@@ -141,6 +142,10 @@ def start_job(params: dict) -> str:
                     progress_callback=_make_progress(entry),
                     ui_text_overrides=params["ui_overrides"] or None,
                 )
+                # 대시보드의 '문서당 처리 시간'. 추정이 아니라 실측값이다.
+                if isinstance(result, dict):
+                    result["elapsed_seconds"] = round(time.monotonic() - t0)
+                entry["result"] = result
                 entry["status"] = "finished"
             except Exception as e:
                 # 한 파일이 실패해도 나머지는 계속 간다. 5개 중 1개 때문에

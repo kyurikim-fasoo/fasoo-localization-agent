@@ -99,7 +99,14 @@ CREATE TABLE IF NOT EXISTS translation_logs (
     output_tokens           INTEGER DEFAULT 0,
     total_tokens            INTEGER DEFAULT 0,
     paragraphs_translated   INTEGER DEFAULT 0,
-    note                    TEXT    DEFAULT ''
+    note                    TEXT    DEFAULT '',
+    -- 아래는 대시보드용. 기록을 시작하기 전의 로그는 NULL로 남겨서
+    -- "0건"과 "기록 안 됨"을 구분한다.
+    elapsed_seconds         INTEGER,
+    applied_terms           INTEGER,        -- 적용된 서로 다른 용어 수
+    applied_count           INTEGER,        -- 적용 횟수 합
+    verify_errors           INTEGER,
+    verify_warnings         INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS ix_logs_user        ON translation_logs(user);
@@ -131,6 +138,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE patterns ADD COLUMN owner TEXT DEFAULT ''")
         conn.execute("UPDATE patterns SET owner='' WHERE owner IS NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_patterns_owner ON patterns(owner)")
+
+    # M3: translation_logs 대시보드 지표. DEFAULT 없이 추가해 기존 행은 NULL.
+    for col in ("elapsed_seconds", "applied_terms", "applied_count",
+                "verify_errors", "verify_warnings"):
+        if not _column_exists(conn, "translation_logs", col):
+            conn.execute(f"ALTER TABLE translation_logs ADD COLUMN {col} INTEGER")
 
 
 def init_db() -> None:

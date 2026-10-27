@@ -26,6 +26,7 @@ SUITES = [
     ("GitHub 데이터 동기화(배포 브랜치 분리·부팅 복원)", "test_sync.py"),
     ("산출물 검증(마커·저장 후 대조)", "test_output_check.py"),
     ("적용 내역 리포트(하이라이트)", "test_effect_report.py"),
+    ("대시보드 지표(비용·미측정 구분)", "test_metrics.py"),
     ("글로서리 중복 삽입 방지", "test_glossary_dupe.py"),
     ("글로서리 머지 도구", "test_merge_glossary.py"),
     ("글로서리 머지 드라이버(git 통합)", "test_merge_driver.py"),

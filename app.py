@@ -36,6 +36,7 @@ from services.sync import sync_db
 from services import batch
 from services import catalog
 from services import effect_report
+from services import metrics
 from services.jobs import batch_progress, get_job, start_job
 from services.users import add_user, list_users
 from translator_engine import (MARKDOWN_EXTENSIONS, extract_bold_terms,
@@ -63,8 +64,6 @@ def _secret_or_env(key: str, default: str = "") -> str:
 
 
 OPENAI_API_KEY = _secret_or_env("OPENAI_API_KEY", "")
-COST_PER_1K_INPUT_TOKENS = float(_secret_or_env("MODEL_COST_PER_1K_INPUT_TOKENS", "0.005"))
-COST_PER_1K_OUTPUT_TOKENS = float(_secret_or_env("MODEL_COST_PER_1K_OUTPUT_TOKENS", "0.015"))
 
 # GitHub 자동 백업 (Streamlit Cloud ephemeral 회피).
 # secrets에 둔 값을 환경변수로 export — services/sync.py가 os.getenv로 읽음.
@@ -144,11 +143,10 @@ def save_uploaded_file(uploaded_file, save_dir: Path) -> Path:
     return save_path
 
 
-def estimate_cost_usd(input_tokens: int, output_tokens: int) -> float:
-    """Input/output 토큰 비용을 분리해 계산합니다."""
-    cost = (input_tokens / 1000 * COST_PER_1K_INPUT_TOKENS) + \
-           (output_tokens / 1000 * COST_PER_1K_OUTPUT_TOKENS)
-    return round(cost, 4)
+def estimate_cost_usd(input_tokens: int, cached_tokens: int, output_tokens: int) -> float:
+    """공식 단가로 계산한 비용. 단가는 services/metrics.py 한 곳에 둔다 —
+    대시보드와 Step 3가 서로 다른 금액을 보이면 안 되므로."""
+    return round(metrics.api_cost_usd(input_tokens, cached_tokens, output_tokens), 4)
 
 
 def make_default_output_filename(product: str, source_name: str) -> str:
@@ -1086,6 +1084,14 @@ with st.sidebar:
         key="nav_logs",
     ):
         _try_navigate({"app_mode": "로그"})
+
+    if st.button(
+        "대시보드",
+        use_container_width=True,
+        type="primary" if st.session_state.app_mode == "대시보드" else "secondary",
+        key="nav_dashboard",
+    ):
+        _try_navigate({"app_mode": "대시보드"})
 
 # ── 메인 헤더 ─────────────────────────────────────────────────────────
 # 우측 상단: 원형 이니셜 아이콘 (popover trigger). 클릭하면 사용자 이름 +
@@ -2701,6 +2707,151 @@ if st.session_state.app_mode == "Glossary 추출":
 # 로그 페이지 — 번역 이력 + UI 매핑 reuse + 메모 관리
 # ─────────────────────────────────────────────
 
+if st.session_state.app_mode == "대시보드":
+    import altair as alt
+    from datetime import date, timedelta
+
+    st.subheader("대시보드")
+    st.caption(
+        "로컬라이즈 처리량과 비용, 언어 자산 현황입니다. 모든 숫자는 실제 기록에서 "
+        "집계했으며, 가정을 넣어 환산한 값(예: 번역가 대비 절감 시간)은 쓰지 않습니다."
+    )
+
+    _period = st.segmented_control(
+        "기간", ["전체", "최근 30일", "최근 90일", "올해"],
+        default="전체", key="dash_period", label_visibility="collapsed",
+    ) or "전체"
+    _since = {
+        "최근 30일": (date.today() - timedelta(days=30)).isoformat(),
+        "최근 90일": (date.today() - timedelta(days=90)).isoformat(),
+        "올해": date(date.today().year, 1, 1).isoformat(),
+    }.get(_period)
+
+    _df = metrics.load_logs(since=_since)
+    _gc = metrics.glossary_counts()
+    _n_terms = _gc["terms"]["team"] + _gc["terms"]["personal"]
+    _n_patterns = _gc["patterns"]["team"] + _gc["patterns"]["personal"]
+
+    # ── 처리량 · 비용 ───────────────────────────────────────────────
+    _k1, _k2, _k3, _k4 = st.columns(4)
+    _k1.metric("로컬라이즈 문서", f"{len(_df):,}건")
+    _k2.metric("번역 단락", f"{int(_df['paragraphs_translated'].sum()):,}개")
+    _cost = float(_df["cost_usd"].sum())
+    _k3.metric(
+        "API 비용", f"${_cost:,.2f}",
+        help=(f"{metrics.PRICE_MODEL} 공식 단가로 계산: 1M 토큰당 입력 "
+              f"${metrics.PRICE_PER_1M_INPUT}, 캐시 입력 ${metrics.PRICE_PER_1M_CACHED_INPUT}, "
+              f"출력 ${metrics.PRICE_PER_1M_OUTPUT} ({metrics.PRICE_CHECKED} 확인)"),
+    )
+    _k4.metric(
+        "Glossary", f"{_n_terms:,}개 용어",
+        help=f"패턴 {_n_patterns:,}개 별도. 기간과 관계없이 현재 등재된 수입니다.",
+    )
+    if len(_df):
+        st.caption(
+            f"문서 1건당 평균 비용 ${_cost / len(_df):,.2f} · "
+            f"단가 출처: [OpenAI API Pricing]({metrics.PRICE_SOURCE_URL})"
+        )
+
+    if _df.empty:
+        st.info("이 기간에는 로컬라이즈 기록이 없습니다.", icon="ℹ️")
+        st.stop()
+
+    # ── 품질 · 처리 시간 (기록 시작 이후분만) ────────────────────────
+    _m = metrics.measured_subset(_df)
+    st.markdown(" ")
+    with st.container(border=True):
+        st.markdown("##### 처리 시간 · 품질")
+        if _m.empty:
+            st.caption(
+                "처리 시간, Glossary 적용, 산출물 검증 결과는 이번 업데이트부터 "
+                "기록됩니다. 다음 로컬라이즈부터 여기에 집계됩니다."
+            )
+        else:
+            _secs = float(_m["elapsed_seconds"].mean())
+            _paras = float(_m["paragraphs_translated"].sum())
+            _q1, _q2, _q3, _q4 = st.columns(4)
+            _q1.metric("문서당 처리 시간", f"{int(_secs // 60)}분 {int(_secs % 60)}초")
+            _q2.metric(
+                "단락당 처리 시간",
+                f"{float(_m['elapsed_seconds'].sum()) / _paras:.1f}초" if _paras else "—",
+            )
+            _q3.metric(
+                "문서당 Glossary 적용",
+                f"{float(_m['applied_count'].mean()):,.0f}회",
+                help="Glossary·UI 매핑으로 영문 표기를 고정한 횟수의 문서당 평균",
+            )
+            _q4.metric(
+                "검증 오류 없음",
+                f"{(_m['verify_errors'] == 0).mean() * 100:.0f}%",
+                help="저장된 산출물을 원본과 대조해 오류가 하나도 없었던 문서의 비율",
+            )
+            st.caption(
+                f"처리 시간·품질 지표 기록이 있는 {len(_m)}건 기준 "
+                f"({_m['created_at'].min()[:10]} 이후)"
+            )
+
+    # ── 추이 · 분포 ─────────────────────────────────────────────────
+    # 한 차트에 시리즈 하나 — 색은 정체성을 나타낼 일이 없으므로 한 가지만 쓴다.
+    _BAR = "#2E7D32"
+    _monthly = (
+        _df.groupby("month")
+        .agg(문서=("created_at", "size"), 단락=("paragraphs_translated", "sum"),
+             비용=("cost_usd", "sum"))
+        .reset_index()
+    )
+    _monthly["비용"] = _monthly["비용"].round(2)
+    st.markdown("##### 월별 로컬라이즈 문서")
+    st.altair_chart(
+        alt.Chart(_monthly).mark_bar(color=_BAR, cornerRadiusTopLeft=4,
+                                     cornerRadiusTopRight=4, size=28)
+        .encode(
+            x=alt.X("month:O", title=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
+            tooltip=[alt.Tooltip("month:O", title="월"), "문서:Q",
+                     alt.Tooltip("단락:Q", format=","),
+                     alt.Tooltip("비용:Q", format="$,.2f")],
+        ).properties(height=240),
+        use_container_width=True,
+    )
+
+    def _breakdown(col: str, label: str):
+        _g = (_df.groupby(col)
+              .agg(문서=("created_at", "size"), 단락=("paragraphs_translated", "sum"))
+              .reset_index().sort_values("문서", ascending=False))
+        st.markdown(f"##### {label}별 문서")
+        st.altair_chart(
+            alt.Chart(_g).mark_bar(color=_BAR, cornerRadiusTopRight=4,
+                                   cornerRadiusBottomRight=4, size=16)
+            .encode(
+                y=alt.Y(f"{col}:N", title=None, sort="-x"),
+                x=alt.X("문서:Q", title=None, axis=alt.Axis(tickMinStep=1)),
+                tooltip=[alt.Tooltip(f"{col}:N", title=label), "문서:Q",
+                         alt.Tooltip("단락:Q", format=",")],
+            ).properties(height=max(120, 30 * len(_g))),
+            use_container_width=True,
+        )
+
+    _c_left, _c_right = st.columns(2)
+    with _c_left:
+        _breakdown("product", "제품")
+    with _c_right:
+        _breakdown("user", "사용자")
+
+    st.markdown("##### 언어 자산")
+    st.dataframe(
+        pd.DataFrame([
+            {"구분": "용어", "Team": _gc["terms"]["team"],
+             "Personal": _gc["terms"]["personal"], "합계": _n_terms},
+            {"구분": "패턴", "Team": _gc["patterns"]["team"],
+             "Personal": _gc["patterns"]["personal"], "합계": _n_patterns},
+        ]),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.stop()
+
+
 if st.session_state.app_mode == "로그":
     st.subheader("로그")
     st.caption(
@@ -3307,7 +3458,8 @@ elif st.session_state.step == 3:
     # ── 배치 요약 ────────────────────────────────────────────────────
     def _cost_of(r: dict) -> float:
         m = r.get("result") or {}
-        return estimate_cost_usd(m.get("input_tokens", 0), m.get("output_tokens", 0))
+        return estimate_cost_usd(m.get("input_tokens", 0), m.get("cached_tokens", 0),
+                                 m.get("output_tokens", 0))
 
     def _errors_of(r: dict) -> list:
         return [v for v in ((r.get("result") or {}).get("verification") or [])
