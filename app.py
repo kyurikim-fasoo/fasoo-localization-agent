@@ -3191,12 +3191,10 @@ if st.session_state.app_mode == "대시보드":
     for _col, (_title, _desc, _target, _key, _type) in zip(
         st.columns(len(_SHORTCUTS)), _SHORTCUTS
     ):
-        # 제목·설명과 버튼을 한 줄에 — 대시보드 전체가 한 화면에 들어오도록 높이를 줄인다
         with _col, st.container(border=True):
-            _t, _b = st.columns([3, 2], vertical_alignment="center")
-            _t.markdown(f"**{_title}**  \n<span style='font-size:.8rem;opacity:.6'>{_desc}</span>",
-                        unsafe_allow_html=True)
-            if _b.button("시작" if _type == "primary" else "열기",
+            st.markdown(f"**{_title}**")
+            st.caption(_desc)
+            if st.button("시작" if _type == "primary" else "열기",
                          key=_key, type=_type, use_container_width=True):
                 _try_navigate(_target)
 
