@@ -3404,7 +3404,10 @@ def translate_document(
     for r in pass1_results:
         text, problems = finalize_markers(r["unit"].src, r["translated"])
         segments.append({"i": unit_pos[id(r["unit"])], "src": r["unit"].src,
-                         "out": text, "heading": bool(r["unit"].is_heading)})
+                         "out": text, "heading": bool(r["unit"].is_heading),
+                         # 이 단락에 고정된 용어 — 검토 화면에서 강조·분류에 쓴다
+                         "terms": [[ko, en, kind] for ko, en, kind, _n
+                                   in r.get("applied", ())]})
         if problems:
             marker_failed += 1
         elif text != r["translated"]:

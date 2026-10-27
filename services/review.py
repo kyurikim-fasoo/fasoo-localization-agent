@@ -113,3 +113,39 @@ def apply_edits(segments: List[Dict], edited: Dict[int, str],
         elif marked != base:
             ok[i] = marked
     return ok, bad
+
+
+# ── 문서 미리보기 ───────────────────────────────────────────────────────
+# 검토자는 표보다 '문서처럼 보이는' 화면에서 어색한 곳을 더 잘 찾는다.
+# 마커를 화면용 HTML로 바꾸고, 이 단락에 고정된 용어의 영문을 강조한다.
+
+_MARK_HTML = (
+    (re.compile(r"⟦B⟧"), "<b>"), (re.compile(r"⟦/B⟧"), "</b>"),
+    (re.compile(r"⟦I⟧"), "<i>"), (re.compile(r"⟦/I⟧"), "</i>"),
+    (re.compile(r"⟦H\d+⟧"), '<span class="rv-link">'), (re.compile(r"⟦/H\d+⟧"), "</span>"),
+    (re.compile(r"⟦D\d+⟧"), '<span class="rv-img">이미지</span>'),
+    (re.compile(r"⟦LB⟧"), "<br>"), (re.compile(r"⟦TB⟧"), " "),
+)
+_HL_OPEN, _HL_CLOSE = "\x01", "\x02"
+
+
+def _highlight(text: str, terms_en: List[str]) -> str:
+    """마커 밖의 글자에서만 용어 영문을 찾아 표시한다."""
+    terms = sorted({t for t in terms_en if t and t.strip()}, key=len, reverse=True)
+    if not terms:
+        return text
+    rx = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(re.escape(t) for t in terms)
+                    + r")(?![A-Za-z0-9])", re.IGNORECASE)
+    parts = re.split(r"(⟦[^⟧]*⟧)", text)
+    return "".join(p if p.startswith("⟦") else rx.sub(_HL_OPEN + r"\1" + _HL_CLOSE, p)
+                   for p in parts)
+
+
+def to_preview_html(marked: str, terms_en: List[str]) -> str:
+    """마크드 텍스트 한 단락 → 미리보기 HTML. 원문 HTML은 이스케이프한다."""
+    import html as _html
+    text = _html.escape(_highlight(marked or "", terms_en), quote=False)
+    for rx, rep in _MARK_HTML:
+        text = rx.sub(rep, text)
+    text = _ANY_MARKER_RE.sub("", text)          # 그 밖의 마커(주석·봉인 등)는 숨긴다
+    return text.replace(_HL_OPEN, '<span class="rv-term">').replace(_HL_CLOSE, "</span>")

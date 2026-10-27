@@ -177,15 +177,14 @@ def mime_for(filename: str) -> str:
 
 def render_result_detail(entry: dict) -> None:
     """
-    파일 하나의 결과 상세 — 다운로드·통일된 표현·적용내역 리포트·검증·메모.
+    파일 하나의 결과 상세 — 번역 검토(미리보기·적용 용어·수정)·다운로드·
+    결과 검사·메모.
 
     배치 결과 화면에서 선택된 파일 하나만 그린다. 파일이 10개일 때 이 내용을
     모두 펼치면 화면이 감당이 안 되므로, 요약표는 위에서 한눈에 보여주고
     근거·검증은 고른 파일만 펼친다.
     """
     result = entry.get("result")
-    output_path = entry.get("output_path")
-    output_filename = entry.get("output_filename")
 
     if not result:
         st.error(f"번역하지 못했습니다: {entry['source_name']}")
@@ -202,99 +201,22 @@ def render_result_detail(entry: dict) -> None:
         )
         return
 
-    _verify = result.get("verification") or []
-    _v_err = [v for v in _verify if v.get("level") == "오류"]
-
-    with open(output_path, "rb") as f:
-        st.download_button(
-            label=f"다운로드: {output_filename}",
-            data=f,
-            file_name=output_filename,
-            mime=mime_for(output_filename),
-            type="primary",
-            use_container_width=True,
-            key=f"dl::{output_path}",
-        )
-
     render_review(entry)
-
-    # ── 무엇이 통일됐는가 ────────────────────────────────────────────
-    # 산출물만 받아서는 이 도구가 무슨 일을 했는지 알 수 없다. 글로서리와
-    # UI 매핑은 자리표시자로 치환되므로 "어떤 말을 어디에 몇 번 고정했는지"가
-    # 정확히 남는다. 그걸 그대로 보여준다 — 신뢰는 결과가 아니라 근거에서
-    # 나온다.
-    _applied = result.get("applied") or []
-    if _applied:
-        _n_terms = len(_applied)
-        _n_hits = sum(int(a.get("적용") or 0) for a in _applied)
-        st.markdown(" ")
-        with st.container(border=True):
-            st.markdown(
-                f"##### 일관되게 번역된 표현 {_n_terms}개 · {_n_hits:,}곳"
-            )
-            st.caption("Glossary와 UI 텍스트 매핑에 있는 표현은 문서 전체에서 같은 영문으로 번역됩니다.")
-            _adf = pd.DataFrame(_applied)
-            st.dataframe(
-                _adf, use_container_width=True, hide_index=True,
-                column_config={
-                    "KO": st.column_config.TextColumn("국문", width="small"),
-                    "EN": st.column_config.TextColumn("영문", width="small"),
-                    "출처": st.column_config.TextColumn("출처", width="small"),
-                    "적용": st.column_config.NumberColumn("적용 횟수", width="small"),
-                    "예문": st.column_config.TextColumn("예문", width="large"),
-                },
-            )
-            _by_ui = sum(1 for a in _applied if a.get("출처") == "UI 매핑")
-            if _by_ui:
-                st.caption(
-                    f"UI 텍스트 매핑 {_by_ui}개 · Glossary {_n_terms - _by_ui}개"
-                )
-
-            # 적용 지점을 표시한 리포트. 산출물 자체는 건드리지 않는다 —
-            # 배포용 문서에 표시가 남으면 안 되므로 별도 파일이다.
-            # rerun마다 다시 만들지 않도록 산출물 경로로 캐시한다.
-            _rep_key = f"effect_report::{output_path}"
-            if _rep_key not in st.session_state:
-                try:
-                    st.session_state[_rep_key] = effect_report.build_html(
-                        _applied, str(output_path), output_filename,
-                        st.session_state.get("selected_product"),
-                    )
-                except Exception as _e:
-                    st.session_state[_rep_key] = None
-                    st.caption(f"적용 내역 보고서를 만들지 못했습니다. ({_e})")
-            _rep = st.session_state.get(_rep_key)
-            if _rep:
-                st.download_button(
-                    "적용 내역 보고서 다운로드",
-                    data=_rep.encode("utf-8"),
-                    file_name=f"{Path(output_filename).stem}_적용내역.html",
-                    mime="text/html",
-                    use_container_width=True,
-                    key=f"dlrep::{output_path}",
-                    help="적용된 위치를 색으로 표시한 HTML 파일입니다. "
-                         "노란색은 Glossary, 보라색은 UI 텍스트 매핑입니다.",
-                )
-    else:
-        st.markdown(" ")
-        st.info(
-            "이 문서에는 Glossary나 UI 텍스트 매핑에 있는 표현이 없습니다. "
-            "Glossary 추출에서 용어를 추가하면 다음 번역부터 일관되게 적용됩니다.",
-            icon="ℹ️",
-        )
+    _render_download_bar(entry)
 
     # ── 산출물 검증 ──────────────────────────────────────────────────
     # 번역 파이프라인은 문단 단위라, 링크·아이콘을 문서에 되꽂은 뒤 만들어지는
     # 문장 오류를 스스로 볼 수 없다. 저장된 문서를 다시 읽어 검사한 결과다.
+    _verify = result.get("verification") or []
     if _verify:
-        st.markdown(" ")
-        with st.container(border=True):
-            _n_warn = len(_verify) - len(_v_err)
-            st.markdown(
-                f"##### {'⚠️' if _v_err else '✅'} 결과 검사"
-                + (f" — 오류 {len(_v_err)}건" if _v_err else " — 오류 없음")
-                + (f" · 경고 {_n_warn}건" if _n_warn else "")
-            )
+        _v_err = [v for v in _verify if v.get("level") == "오류"]
+        _n_warn = len(_verify) - len(_v_err)
+        with st.expander(
+            f"{'⚠️' if _v_err else '✅'} 결과 검사"
+            + (f" — 오류 {len(_v_err)}건" if _v_err else " — 오류 없음")
+            + (f" · 경고 {_n_warn}건" if _n_warn else ""),
+            expanded=bool(_v_err),
+        ):
             for _v in _verify:
                 _icon = "✗" if _v["level"] == "오류" else "!"
                 st.markdown(f"**{_icon} {_v['title']}**")
@@ -305,9 +227,7 @@ def render_result_detail(entry: dict) -> None:
     # ── 메모 입력 (이번 번역에 대한 비고) ─────────────────────────────
     _log_id = entry.get("log_id")
     if _log_id:
-        st.markdown(" ")
-        with st.container(border=True):
-            st.markdown("##### 메모 (선택)")
+        with st.expander("메모 (선택)"):
             st.caption("메모는 작업 기록에서 검색할 수 있습니다.")
             note_text = st.text_area(
                 "메모",
@@ -324,15 +244,74 @@ def render_result_detail(entry: dict) -> None:
                     st.error(f"메모를 저장하지 못했습니다. ({e})")
 
 
+def _render_download_bar(entry: dict) -> None:
+    """이 문서의 비용과 다운로드 — 검토를 마친 자리에서 바로 받게 한다."""
+    m = entry["result"]
+    output_path, output_filename = entry["output_path"], entry["output_filename"]
+    cost = estimate_cost_usd(m.get("input_tokens", 0), m.get("cached_tokens", 0),
+                             m.get("output_tokens", 0))
+    st.markdown(" ")
+    c1, c2 = st.columns([3, 2], vertical_alignment="center")
+    c1.markdown(
+        '<div class="rv-bar"><span class="rv-bar-k">● 번역 비용</span>'
+        f'<span>입력 토큰 <b>{int(m.get("input_tokens", 0) or 0):,}</b></span>'
+        f'<span>출력 토큰 <b>{int(m.get("output_tokens", 0) or 0):,}</b></span>'
+        f'<span>API 비용 <b>${cost:,.2f}</b></span></div>',
+        unsafe_allow_html=True,
+    )
+    with open(output_path, "rb") as f:
+        c2.download_button(
+            label="번역 확정 및 다운로드",
+            data=f,
+            file_name=output_filename,
+            mime=mime_for(output_filename),
+            type="primary",
+            use_container_width=True,
+            key=f"dl::{output_path}",
+            help=output_filename,
+        )
+
+
 # ─────────────────────────────────────────────
 # 번역 검토 (Review Window)
 #
-# 번역 결과를 단락별로 원문과 나란히 보여주고, 고친 단락을 반영해 결과
-# 문서를 다시 만든다. 문서를 고치는 경로는 translator_engine.rebuild_with_edits
-# 하나뿐이다 — 번역 때와 같은 쓰기 경로를 타야 서식이 똑같이 보존된다.
+# 번역 결과를 문서처럼 미리 보여주고(적용된 용어 강조), 편집 모드에서 단락을
+# 고치면 결과 문서를 다시 만든다. 문서를 고치는 경로는
+# translator_engine.rebuild_with_edits 하나뿐이다 — 번역 때와 같은 쓰기 경로를
+# 타야 서식이 똑같이 보존된다.
 # ─────────────────────────────────────────────
 
-_REVIEW_FILTERS = ["확인 필요", "수정한 단락", "전체"]
+_REVIEW_FILTERS = ["확인 필요", "전체", "용어 적용", "AI 번역", "수정함"]
+
+_REVIEW_CSS = """<style>
+.rv-stats{display:flex;flex-wrap:wrap;gap:6px 32px;padding:14px 20px;margin:4px 0 6px;
+  border-radius:10px;background:rgba(127,127,127,.07);font-size:.88rem}
+.rv-stats span{opacity:.75}.rv-stats b{font-size:1.05rem;opacity:1;margin-left:6px}
+.rv-stats .rv-blue{color:#1E88E5}.rv-stats .rv-amber{color:#E65100}
+.rv-doc{padding:6px 18px 0;font-size:.95rem;line-height:1.7}
+.rv-p{margin:0 0 .75em;padding:2px 0 2px 12px;border-left:3px solid transparent}
+.rv-p.rv-h{font-weight:700;font-size:1.12rem;margin-top:.5em}
+.rv-p.rv-edited{border-left-color:#E53935}
+.rv-p.rv-flag{border-left-color:#F9A825;background:rgba(249,168,37,.08)}
+.rv-term{background:rgba(30,136,229,.13);color:#1565C0;border-radius:3px;font-weight:600}
+.rv-link{color:#1565C0;text-decoration:underline}
+.rv-img{font-size:.72rem;border:1px solid rgba(127,127,127,.45);border-radius:3px;padding:0 4px;opacity:.7}
+.rv-tag{font-size:.7rem;font-weight:600;border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:1px}
+.rv-tag.rv-t-edit{background:rgba(229,57,53,.12);color:#C62828}
+.rv-tag.rv-t-flag{background:rgba(249,168,37,.18);color:#E65100}
+.rv-thead{display:flex;justify-content:space-between;align-items:center;font-weight:700}
+.rv-badge{background:rgba(30,136,229,.13);color:#1565C0;border-radius:6px;padding:1px 9px;font-size:.78rem}
+.rv-legend{font-size:.75rem;opacity:.7;margin:4px 0 8px}
+.rv-legend i,.rv-tcard i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:1px}
+.rv-auto{background:#1E88E5}.rv-added{background:#E53935}
+.rv-tcard{border:1px solid rgba(127,127,127,.22);border-radius:8px;padding:7px 10px;margin-bottom:6px;
+  display:flex;justify-content:space-between;gap:8px}
+.rv-tko{font-size:.8rem;font-weight:600}.rv-ten{font-size:.78rem;opacity:.65}
+.rv-tn{font-size:.72rem;opacity:.6;white-space:nowrap}
+.rv-bar{display:flex;flex-wrap:wrap;gap:4px 22px;padding:10px 16px;border-radius:8px;
+  background:rgba(127,127,127,.07);font-size:.82rem}
+.rv-bar span{opacity:.75}.rv-bar .rv-bar-k{color:#1E88E5;opacity:1;font-weight:600}
+</style>"""
 
 
 def _review_glossary_rows() -> list:
@@ -343,69 +322,103 @@ def _review_glossary_rows() -> list:
 
 
 def render_review(entry: dict) -> None:
+    import html as _html
+
     result = entry.get("result") or {}
     segments = result.get("segments") or []
     output_path = entry.get("output_path")
     in_path = entry.get("in_path")
-    if not segments or not in_path:
+    if not segments:
         return
 
     ekey = f"review_edits::{output_path}"
     vkey = f"review_ver::{output_path}"
     edits: Dict[int, str] = st.session_state.setdefault(ekey, {})
     ver = st.session_state.setdefault(vkey, 0)
+    added = st.session_state.get(f"review_added::{output_path}") or []
 
     rows = []
     for seg in segments:
         out = edits.get(seg["i"], seg["out"])
         fl = review.flags(seg["src"], out)
+        terms_en = [t[1] for t in seg.get("terms") or []]
         rows.append({
             "i": seg["i"],
             "상태": ("✏️ 수정함" if seg["i"] in edits
                     else ("⚠️ " + ", ".join(fl) if fl else "")),
             "원문": review.to_display(seg["src"]),
             "번역": review.to_display(out),
-            "_flag": bool(fl), "_edited": seg["i"] in edits,
+            "_out": out, "_heading": bool(seg.get("heading")), "_fl": fl,
+            "_terms": terms_en + [a[1] for a in added],
+            "_flag": bool(fl), "_edited": seg["i"] in edits, "_term": bool(terms_en),
         })
     n_flag = sum(r["_flag"] for r in rows)
+    n_term = sum(r["_term"] for r in rows)
 
-    st.markdown(" ")
-    with st.container(border=True):
-        st.markdown(
-            f"##### 번역 검토 · 단락 {len(rows):,}개"
-            + (f" · 확인 필요 {n_flag}개" if n_flag else "")
-            + (f" · 수정 {len(edits)}개" if edits else "")
+    st.markdown(_REVIEW_CSS, unsafe_allow_html=True)
+    st.markdown("##### 번역 검토 및 보정")
+    st.caption("원문과 번역을 단락 단위로 대조합니다. 적용된 용어를 확인하고, 필요하면 직접 수정해 완성하세요.")
+    st.markdown(
+        '<div class="rv-stats">'
+        f'<span>총 단락<b>{len(rows):,}개</b></span>'
+        f'<span>용어 적용<b>{n_term:,}개</b></span>'
+        f'<span>AI 번역<b class="rv-blue">{len(rows) - n_term:,}개</b></span>'
+        + (f'<span>수정<b>{len(edits)}개</b></span>' if edits else "")
+        + (f'<span>확인 필요<b class="rv-amber">{n_flag}개</b></span>' if n_flag else "")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    _flash = st.session_state.pop(f"review_flash::{output_path}", None)
+    if _flash:
+        st.success(_flash, icon="✅")
+
+    options = [f for f in _REVIEW_FILTERS if f != "확인 필요" or n_flag]
+    f1, f2, f3 = st.columns([5, 3, 1.2], vertical_alignment="center")
+    with f1:
+        mode = st.radio(
+            "표시", options, index=0, horizontal=True,
+            # 선택지가 바뀌면(확인 필요가 생기거나 사라지면) 새 위젯으로 그린다
+            key=f"review_filter::{output_path}::{len(options)}",
+            label_visibility="collapsed",
         )
-        st.caption("번역 칸을 직접 고친 뒤 **수정 내용 적용**을 선택하세요. 다운로드 파일에 반영됩니다. "
-                   "\\*\\*로 감싼 굵게 표시와 ⟦ ⟧ 기호는 링크·이미지 등의 위치이므로 지우지 마세요.")
-        _flash = st.session_state.pop(f"review_flash::{output_path}", None)
-        if _flash:
-            st.success(_flash, icon="✅")
+    with f2:
+        q = st.text_input("검색", key=f"review_q::{output_path}",
+                          placeholder="원문 또는 번역에서 검색",
+                          label_visibility="collapsed")
+    with f3:
+        edit_mode = st.toggle("편집", key=f"review_edit::{output_path}",
+                              disabled=not in_path,
+                              help="단락을 표에서 직접 고칩니다." if in_path
+                              else "원본 파일이 없어 수정할 수 없습니다.")
 
-        f1, f2 = st.columns([2, 3], vertical_alignment="bottom")
-        with f1:
-            mode = st.radio(
-                "표시", _REVIEW_FILTERS, index=0 if n_flag else 2, horizontal=True,
-                key=f"review_filter::{output_path}", label_visibility="collapsed",
-            )
-        with f2:
-            q = st.text_input("검색", key=f"review_q::{output_path}",
-                              placeholder="원문 또는 번역에서 검색",
-                              label_visibility="collapsed")
-        view = rows
-        if mode == "확인 필요":
-            view = [r for r in rows if r["_flag"]]
-        elif mode == "수정한 단락":
-            view = [r for r in rows if r["_edited"]]
-        if q.strip():
-            ql = q.strip().lower()
-            view = [r for r in view if ql in r["원문"].lower() or ql in r["번역"].lower()]
+    view = {
+        "확인 필요": [r for r in rows if r["_flag"]],
+        "용어 적용": [r for r in rows if r["_term"]],
+        "AI 번역": [r for r in rows if not r["_term"]],
+        "수정함": [r for r in rows if r["_edited"]],
+    }.get(mode, rows)
+    if q.strip():
+        ql = q.strip().lower()
+        view = [r for r in view if ql in r["원문"].lower() or ql in r["번역"].lower()]
 
-        if view:
+    left, right = st.columns([7, 3])
+    changed: Dict[int, str] = {}
+    with left, st.container(border=True):
+        st.markdown(f"**{'단락 편집' if edit_mode else '번역 문서 미리보기 (EN)'}**")
+        st.caption(
+            "번역 칸을 직접 고친 뒤 **수정 내용 적용**을 선택하세요. "
+            "\\*\\*로 감싼 굵게 표시와 ⟦ ⟧ 기호는 링크·이미지 등의 위치이므로 지우지 마세요."
+            if edit_mode else
+            "적용된 용어는 파란색으로 강조됩니다. 단락에 마우스를 올리면 원문이 표시됩니다."
+        )
+        if not view:
+            st.caption("확인이 필요한 단락이 없습니다." if mode == "확인 필요"
+                       else "표시할 단락이 없습니다.")
+        elif edit_mode:
             vdf = pd.DataFrame(view)[["i", "상태", "원문", "번역"]]
             edited_df = st.data_editor(
                 vdf, use_container_width=True, hide_index=True, num_rows="fixed",
-                height=min(460, 38 + 35 * len(vdf)),
+                height=min(520, 38 + 35 * len(vdf)),
                 disabled=["i", "상태", "원문"],
                 column_config={
                     "i": None,
@@ -421,19 +434,97 @@ def render_review(entry: dict) -> None:
                 if (b["번역"] or "") != a["번역"]
             }
         else:
-            st.caption("확인이 필요한 단락이 없습니다. 전체를 선택하면 모든 단락을 볼 수 있습니다."
-                       if mode == "확인 필요" else "표시할 단락이 없습니다.")
-            changed = {}
+            paras = []
+            for r in view:
+                cls = ("rv-p" + (" rv-h" if r["_heading"] else "")
+                       + (" rv-edited" if r["_edited"] else "")
+                       + (" rv-flag" if r["_flag"] and not r["_edited"] else ""))
+                tag = ('<span class="rv-tag rv-t-edit">수정함</span>' if r["_edited"]
+                       else "".join(f'<span class="rv-tag rv-t-flag">{f}</span>'
+                                    for f in r["_fl"]))
+                src = _html.escape(review._ANY_MARKER_RE.sub("", r["원문"]), quote=True)
+                paras.append(f'<div class="{cls}" title="{src}">'
+                             f'{review.to_preview_html(r["_out"], r["_terms"])}{tag}</div>')
+            with st.container(height=520, border=False):
+                st.markdown(f'<div class="rv-doc">{"".join(paras)}</div>',
+                            unsafe_allow_html=True)
+        st.caption(f"{entry.get('source_name', '')} · 단락 {len(view):,}/{len(rows):,}개 표시")
 
-        b1, b2 = st.columns([3, 1], vertical_alignment="center")
-        b1.caption(f"변경한 단락 {len(changed)}개" if changed else "변경한 단락이 없습니다.")
-        if b2.button("수정 내용 적용", type="primary", use_container_width=True,
-                     disabled=not changed, key=f"review_apply::{output_path}"):
-            _apply_review(entry, segments, rows, changed, edits, ekey, vkey, ver)
+        if edit_mode:
+            b1, b2 = st.columns([3, 1], vertical_alignment="center")
+            b1.caption(f"변경한 단락 {len(changed)}개" if changed else "변경한 단락이 없습니다.")
+            if b2.button("수정 내용 적용", type="primary", use_container_width=True,
+                         disabled=not changed, key=f"review_apply::{output_path}"):
+                _apply_review(entry, segments, rows, changed, edits, ekey, vkey, ver)
 
-        # 검토 중 발견한 표현을 바로 Glossary에 — 다음 번역부터 같은 수정을 반복하지 않게
-        with st.expander("Glossary에 용어 추가"):
-            _review_add_term(entry, output_path)
+    with right, st.container(border=True):
+        _render_applied_terms(entry, added)
+
+
+def _render_applied_terms(entry: dict, added: list) -> None:
+    """적용된 용어 패널 — 무엇을 어떤 영문으로 고정했는지, 근거를 옆에 둔다."""
+    import html as _html
+
+    result = entry["result"]
+    output_path, output_filename = entry["output_path"], entry["output_filename"]
+    applied = result.get("applied") or []
+    # 같은 용어가 출처(Glossary/UI 매핑)나 대소문자만 달리 여러 줄로 오면 하나로 합친다
+    merged: Dict[tuple, int] = {}
+    for a in applied:
+        k = (a.get("KO", ""), a.get("EN", ""))
+        k = next((m for m in merged if m[0] == k[0] and m[1].lower() == k[1].lower()), k)
+        merged[k] = merged.get(k, 0) + int(a.get("적용") or 0)
+    st.markdown(
+        f'<div class="rv-thead"><span>적용된 용어</span>'
+        f'<span class="rv-badge">{len(merged) + len(added)}</span></div>'
+        '<div class="rv-legend"><i class="rv-auto"></i>자동 적용 &nbsp; '
+        '<i class="rv-added"></i>검토 중 추가</div>',
+        unsafe_allow_html=True,
+    )
+    cards = [(ko, en, "rv-added", "추가") for ko, en in added] + [
+        (ko, en, "rv-auto", f"{n}회") for (ko, en), n in merged.items()
+    ]
+    if cards:
+        with st.container(height=360, border=False):
+            st.markdown("".join(
+                f'<div class="rv-tcard"><div><div class="rv-tko"><i class="{c}"></i>'
+                f'{_html.escape(str(ko))}</div><div class="rv-ten">{_html.escape(str(en))}</div></div>'
+                f'<div class="rv-tn">{n}</div></div>'
+                for ko, en, c, n in cards
+            ), unsafe_allow_html=True)
+    else:
+        st.caption("이 문서에는 Glossary나 UI 텍스트 매핑에 있는 표현이 없습니다.")
+
+    # 적용 지점을 표시한 리포트. 산출물 자체는 건드리지 않는다 —
+    # 배포용 문서에 표시가 남으면 안 되므로 별도 파일이다.
+    # rerun마다 다시 만들지 않도록 산출물 경로로 캐시한다.
+    if applied:
+        _rep_key = f"effect_report::{output_path}"
+        if _rep_key not in st.session_state:
+            try:
+                st.session_state[_rep_key] = effect_report.build_html(
+                    applied, str(output_path), output_filename,
+                    st.session_state.get("selected_product"),
+                )
+            except Exception as _e:
+                st.session_state[_rep_key] = None
+                st.caption(f"적용 내역 보고서를 만들지 못했습니다. ({_e})")
+        _rep = st.session_state.get(_rep_key)
+        if _rep:
+            st.download_button(
+                "적용 내역 보고서",
+                data=_rep.encode("utf-8"),
+                file_name=f"{Path(output_filename).stem}_적용내역.html",
+                mime="text/html",
+                use_container_width=True,
+                key=f"dlrep::{output_path}",
+                help="적용된 위치를 색으로 표시한 HTML 파일입니다. "
+                     "노란색은 Glossary, 보라색은 UI 텍스트 매핑입니다.",
+            )
+
+    # 검토 중 발견한 표현을 바로 Glossary에 — 다음 번역부터 같은 수정을 반복하지 않게
+    with st.expander("Glossary에 용어 추가"):
+        _review_add_term(entry, output_path)
 
 
 def _apply_review(entry, segments, rows, changed, edits, ekey, vkey, ver) -> None:
@@ -476,14 +567,14 @@ def _apply_review(entry, segments, rows, changed, edits, ekey, vkey, ver) -> Non
 
 
 def _review_add_term(entry: dict, output_path: str) -> None:
-    g1, g2, g3, g4 = st.columns([3, 3, 2, 1.4], vertical_alignment="bottom")
-    _ko = g1.text_input("한국어", key=f"review_g_ko::{output_path}")
-    _en = g2.text_input("영어", key=f"review_g_en::{output_path}")
-    _scope = g3.selectbox(
+    # 좁은 옆 패널에 들어가므로 세로로 쌓는다
+    _ko = st.text_input("한국어", key=f"review_g_ko::{output_path}")
+    _en = st.text_input("영어", key=f"review_g_en::{output_path}")
+    _scope = st.selectbox(
         "범위", ["Team", "Personal"], key=f"review_g_scope::{output_path}",
         format_func=lambda v: "Team (모든 사용자)" if v == "Team" else "개인 (본인만)",
     )
-    if g4.button("추가", use_container_width=True, key=f"review_g_add::{output_path}",
+    if st.button("추가", use_container_width=True, key=f"review_g_add::{output_path}",
                  disabled=not (_ko.strip() and _en.strip())):
         try:
             _res = save_terms_from_dataframe(
@@ -500,7 +591,12 @@ def _review_add_term(entry: dict, output_path: str) -> None:
                 source="번역 검토",
             )
             if _res.get("inserted"):
-                st.toast("Glossary에 추가했습니다. 다음 번역부터 적용됩니다.", icon="✅")
+                # 옆 패널에 '검토 중 추가'로 바로 보이게 하고, 미리보기에서도 강조한다
+                st.session_state.setdefault(f"review_added::{output_path}", []).append(
+                    (_ko.strip(), _en.strip()))
+                st.session_state[f"review_flash::{output_path}"] = (
+                    f"'{_ko.strip()}'을(를) Glossary에 추가했습니다. 다음 번역부터 적용됩니다.")
+                st.rerun()
             else:
                 st.toast("같은 용어가 이미 Glossary에 있습니다.", icon="ℹ️")
         except Exception as e:
@@ -3634,7 +3730,7 @@ if st.session_state.step == 2:
 # ─────────────────────────────────────────────
 
 elif st.session_state.step == 3:
-    st.subheader("3단계: 다운로드")
+    st.subheader("3단계: 번역 검토 및 다운로드")
 
     results = st.session_state.get("last_results") or []
 
@@ -3713,15 +3809,16 @@ elif st.session_state.step == 3:
             + ", ".join(r["source_name"] for r in gone)
         )
 
-    _tot_paras = sum((r.get("result") or {}).get("paragraphs_translated", 0) or 0 for r in ok)
-    _tot_tokens = sum((r.get("result") or {}).get("total_tokens", 0) or 0 for r in ok)
-    col_a, col_b, col_c = st.columns(3)
-    col_a.metric("번역한 단락", f"{_tot_paras:,}")
-    col_b.metric("토큰", f"{_tot_tokens:,}")
-    col_c.metric("API 비용", f"${sum(_cost_of(r) for r in ok):,.2f}")
-
-    # 파일이 여러 개면 한눈에 보는 표를 먼저. 상세는 아래에서 하나씩.
+    # 파일이 여러 개면 합계와 한눈에 보는 표를 먼저. 상세는 아래에서 하나씩.
+    # 파일이 하나면 검토 화면의 통계·비용 막대가 같은 내용을 보여준다.
     if len(results) > 1:
+        _tot_paras = sum((r.get("result") or {}).get("paragraphs_translated", 0) or 0 for r in ok)
+        _tot_tokens = sum((r.get("result") or {}).get("total_tokens", 0) or 0 for r in ok)
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("번역한 단락", f"{_tot_paras:,}")
+        col_b.metric("토큰", f"{_tot_tokens:,}")
+        col_c.metric("API 비용", f"${sum(_cost_of(r) for r in ok):,.2f}")
+
         _rows = []
         for r in results:
             m = r.get("result") or {}
@@ -3817,7 +3914,7 @@ elif st.session_state.step == 3:
     col_prev, col_restart = st.columns(2)
 
     with col_prev:
-        if st.button("이전", use_container_width=True):
+        if st.button("이전 단계로", use_container_width=True):
             st.session_state.step = 2
             st.rerun()
 

@@ -195,6 +195,7 @@ _ad = _te.make_adapter(str(_rsrc)); _ad.load()
 _segs = [{"i": i, "src": u.src, "out": _re.sub(r"[가-힣]+", "Word", u.src), "heading": False}
          for i, u in enumerate(_ad.units()) if _te.contains_korean(u.src)]
 _segs[-1]["out"] = "설정 Check."          # 한국어가 남은 단락 — '확인 필요'에 걸려야 한다
+_segs[0]["terms"] = [["시작하기", "Word", "글로서리"]]   # 미리보기에서 강조돼야 한다
 _te.rebuild_with_edits(str(_rsrc), str(_rout), _segs, {})
 at = AppTest.from_file(APP, default_timeout=60)
 at.session_state["current_user"] = "SmokeTest"
@@ -210,9 +211,16 @@ at.session_state["last_results"] = [{
 at.run()
 check("예외 없음", not at.exception, str(at.exception))
 _md = " ".join(str(m.value) for m in at.markdown)
-check("검토 섹션", "번역 검토" in _md and f"단락 {len(_segs)}개" in _md, _md[:200])
-check("확인 필요 단락 수", "확인 필요 1개" in _md, _md[:200])
-check("검토 표", len(at.get("arrow_data_frame") or []) >= 1, str(len(at.get("arrow_data_frame") or [])))
+check("검토 섹션", "번역 검토 및 보정" in _md and f"총 단락<b>{len(_segs)}개" in _md, _md[:300])
+check("용어 적용 단락 수", "용어 적용<b>1개" in _md, _md[:400])
+check("확인 필요 단락 수", '확인 필요<b class="rv-amber">1개' in _md, _md[:400])
+check("문서 미리보기", "rv-doc" in _md and "rv-term" in _md, _md[:400])
+check("적용된 용어 패널", "적용된 용어" in _md)
+check("미리보기에서는 편집 버튼 없음",
+      not any(b.label == "수정 내용 적용" for b in at.button))
+at.toggle(key=f"review_edit::{_rout}").set_value(True).run()
+check("편집 모드 → 표", len(at.get("arrow_data_frame") or []) >= 1,
+      str(len(at.get("arrow_data_frame") or [])))
 _apply = [b for b in at.button if b.label == "수정 내용 적용"]
 check("변경 전에는 적용 비활성", bool(_apply) and _apply[0].disabled,
       str([(b.label, b.disabled) for b in at.button]))
@@ -247,8 +255,8 @@ try:
     check("파일에 반영", "REVIEWED settings check." in _rout.read_text(encoding="utf-8"))
     check("다른 단락은 그대로", "**Word**" in _rout.read_text(encoding="utf-8"))
     _md = " ".join(str(m.value) for m in at.markdown)
-    check("수정 수 표시", "수정 1개" in _md, _md[:200])
-    check("확인 필요 해소", "확인 필요" not in _md.split("번역 검토")[1][:40], _md[:200])
+    check("수정 수 표시", "수정<b>1개" in _md, _md[:400])
+    check("확인 필요 해소", '확인 필요<b class="rv-amber">' not in _md, _md[:400])
 finally:
     _st.data_editor = _orig_editor
 for _f in (_rsrc, _rout):
@@ -290,7 +298,7 @@ check("부분 실패 안내", any("1개는 실패" in str(w.value) for w in at.w
       str([str(w.value)[:50] for w in at.warning]))
 _dl = [b.label for b in at.get("download_button")]
 check("ZIP 일괄 다운로드", any("모두 다운로드" in l for l in _dl), str(_dl))
-check("파일별 다운로드도 있음", any("다운로드:" in l for l in _dl), str(_dl))
+check("파일별 다운로드도 있음", any("번역 확정 및 다운로드" in l for l in _dl), str(_dl))
 check("파일 선택 셀렉트박스", len(at.get("selectbox")) >= 1)
 check("합산 지표", any(m.label == "API 비용" for m in at.metric),
       str([str(m.value) for m in at.metric]))
