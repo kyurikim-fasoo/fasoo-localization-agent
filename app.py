@@ -25,6 +25,7 @@ from services.glossary import (
 )
 from services.translation_logs import (
     create_log,
+    update_review_edits,
     delete_log,
     find_logs_by_source_file,
     find_related_logs,
@@ -36,9 +37,12 @@ from services.sync import sync_db
 from services import batch
 from services import catalog
 from services import effect_report
+from services import history
+from services import review
 from services import metrics
 from services.jobs import batch_progress, get_job, start_job
 from services.users import add_user, list_users
+import translator_engine
 from translator_engine import (MARKDOWN_EXTENSIONS, extract_bold_terms,
                                extract_korean_paragraphs)
 from translator_engine import _clean as _cell
@@ -212,6 +216,8 @@ def render_result_detail(entry: dict) -> None:
             key=f"dl::{output_path}",
         )
 
+    render_review(entry)
+
     # ── 무엇이 통일됐는가 ────────────────────────────────────────────
     # 산출물만 받아서는 이 도구가 무슨 일을 했는지 알 수 없다. 글로서리와
     # UI 매핑은 자리표시자로 치환되므로 "어떤 말을 어디에 몇 번 고정했는지"가
@@ -316,6 +322,274 @@ def render_result_detail(entry: dict) -> None:
                     st.toast("메모를 저장했습니다.", icon="✅")
                 except Exception as e:
                     st.error(f"메모를 저장하지 못했습니다. ({e})")
+
+
+# ─────────────────────────────────────────────
+# 번역 검토 (Review Window)
+#
+# 번역 결과를 단락별로 원문과 나란히 보여주고, 고친 단락을 반영해 결과
+# 문서를 다시 만든다. 문서를 고치는 경로는 translator_engine.rebuild_with_edits
+# 하나뿐이다 — 번역 때와 같은 쓰기 경로를 타야 서식이 똑같이 보존된다.
+# ─────────────────────────────────────────────
+
+_REVIEW_FILTERS = ["확인 필요", "수정한 단락", "전체"]
+
+
+def _review_glossary_rows() -> list:
+    """결과 검사의 '같은 영어로 번역되는 용어' 확인용 — 번역 때와 같은 범위."""
+    df = load_terms(product=st.session_state.selected_product,
+                    current_user=st.session_state.current_user)
+    return df[df["적용"] == True][["KO", "EN"]].to_dict("records")  # noqa: E712
+
+
+def render_review(entry: dict) -> None:
+    result = entry.get("result") or {}
+    segments = result.get("segments") or []
+    output_path = entry.get("output_path")
+    in_path = entry.get("in_path")
+    if not segments or not in_path:
+        return
+
+    ekey = f"review_edits::{output_path}"
+    vkey = f"review_ver::{output_path}"
+    edits: Dict[int, str] = st.session_state.setdefault(ekey, {})
+    ver = st.session_state.setdefault(vkey, 0)
+
+    rows = []
+    for seg in segments:
+        out = edits.get(seg["i"], seg["out"])
+        fl = review.flags(seg["src"], out)
+        rows.append({
+            "i": seg["i"],
+            "상태": ("✏️ 수정함" if seg["i"] in edits
+                    else ("⚠️ " + ", ".join(fl) if fl else "")),
+            "원문": review.to_display(seg["src"]),
+            "번역": review.to_display(out),
+            "_flag": bool(fl), "_edited": seg["i"] in edits,
+        })
+    n_flag = sum(r["_flag"] for r in rows)
+
+    st.markdown(" ")
+    with st.container(border=True):
+        st.markdown(
+            f"##### 번역 검토 · 단락 {len(rows):,}개"
+            + (f" · 확인 필요 {n_flag}개" if n_flag else "")
+            + (f" · 수정 {len(edits)}개" if edits else "")
+        )
+        st.caption("번역 칸을 직접 고친 뒤 **수정 내용 적용**을 선택하세요. 다운로드 파일에 반영됩니다. "
+                   "\\*\\*로 감싼 굵게 표시와 ⟦ ⟧ 기호는 링크·이미지 등의 위치이므로 지우지 마세요.")
+        _flash = st.session_state.pop(f"review_flash::{output_path}", None)
+        if _flash:
+            st.success(_flash, icon="✅")
+
+        f1, f2 = st.columns([2, 3], vertical_alignment="bottom")
+        with f1:
+            mode = st.radio(
+                "표시", _REVIEW_FILTERS, index=0 if n_flag else 2, horizontal=True,
+                key=f"review_filter::{output_path}", label_visibility="collapsed",
+            )
+        with f2:
+            q = st.text_input("검색", key=f"review_q::{output_path}",
+                              placeholder="원문 또는 번역에서 검색",
+                              label_visibility="collapsed")
+        view = rows
+        if mode == "확인 필요":
+            view = [r for r in rows if r["_flag"]]
+        elif mode == "수정한 단락":
+            view = [r for r in rows if r["_edited"]]
+        if q.strip():
+            ql = q.strip().lower()
+            view = [r for r in view if ql in r["원문"].lower() or ql in r["번역"].lower()]
+
+        if view:
+            vdf = pd.DataFrame(view)[["i", "상태", "원문", "번역"]]
+            edited_df = st.data_editor(
+                vdf, use_container_width=True, hide_index=True, num_rows="fixed",
+                height=min(460, 38 + 35 * len(vdf)),
+                disabled=["i", "상태", "원문"],
+                column_config={
+                    "i": None,
+                    "상태": st.column_config.TextColumn("상태", width="small"),
+                    "원문": st.column_config.TextColumn("원문", width="large"),
+                    "번역": st.column_config.TextColumn("번역", width="large"),
+                },
+                key=f"review_editor::{output_path}::{ver}::{mode}::{q.strip()}",
+            )
+            changed = {
+                int(a["i"]): str(b["번역"] or "")
+                for a, b in zip(vdf.to_dict("records"), edited_df.to_dict("records"))
+                if (b["번역"] or "") != a["번역"]
+            }
+        else:
+            st.caption("확인이 필요한 단락이 없습니다. 전체를 선택하면 모든 단락을 볼 수 있습니다."
+                       if mode == "확인 필요" else "표시할 단락이 없습니다.")
+            changed = {}
+
+        b1, b2 = st.columns([3, 1], vertical_alignment="center")
+        b1.caption(f"변경한 단락 {len(changed)}개" if changed else "변경한 단락이 없습니다.")
+        if b2.button("수정 내용 적용", type="primary", use_container_width=True,
+                     disabled=not changed, key=f"review_apply::{output_path}"):
+            _apply_review(entry, segments, rows, changed, edits, ekey, vkey, ver)
+
+        # 검토 중 발견한 표현을 바로 Glossary에 — 다음 번역부터 같은 수정을 반복하지 않게
+        with st.expander("Glossary에 용어 추가"):
+            _review_add_term(entry, output_path)
+
+
+def _apply_review(entry, segments, rows, changed, edits, ekey, vkey, ver) -> None:
+    output_path, in_path = entry["output_path"], entry["in_path"]
+    ok, bad = review.apply_edits(segments, changed, edits)
+    for i, probs in bad.items():
+        _src = next(r["원문"] for r in rows if r["i"] == i)
+        st.error(f"반영하지 못했습니다: {_src[:40]}… — {probs[0]}")
+    if not ok:
+        return
+    new_edits = {**edits, **ok}
+    try:
+        verification = translator_engine.rebuild_with_edits(
+            in_path, output_path, segments, new_edits, _review_glossary_rows(),
+        )
+    except FileNotFoundError:
+        st.error("원본 파일을 찾을 수 없습니다. 앱이 다시 시작되어 임시 파일이 "
+                 "삭제되었습니다. 다시 번역하세요.")
+        return
+    except Exception as e:
+        st.error(f"수정 내용을 적용하지 못했습니다. ({e})")
+        return
+    st.session_state[ekey] = new_edits
+    st.session_state[vkey] = ver + 1
+    entry["result"]["verification"] = verification
+    # 다운로드용 캐시(적용 내역 보고서·ZIP)는 이전 파일 기준이다
+    for k in [k for k in st.session_state
+              if k.startswith("batch_zip::") or k == f"effect_report::{output_path}"]:
+        del st.session_state[k]
+    if entry.get("log_id"):
+        try:
+            update_review_edits(int(entry["log_id"]), len(new_edits))
+        except Exception:
+            pass        # 기록 실패가 수정 반영을 막지는 않는다
+    st.session_state[f"review_flash::{output_path}"] = (
+        f"단락 {len(ok)}개를 수정했습니다. 다운로드 파일에 반영되었습니다."
+        + (f" ({len(bad)}개는 반영하지 못했습니다.)" if bad else "")
+    )
+    st.rerun()
+
+
+def _review_add_term(entry: dict, output_path: str) -> None:
+    g1, g2, g3, g4 = st.columns([3, 3, 2, 1.4], vertical_alignment="bottom")
+    _ko = g1.text_input("한국어", key=f"review_g_ko::{output_path}")
+    _en = g2.text_input("영어", key=f"review_g_en::{output_path}")
+    _scope = g3.selectbox(
+        "범위", ["Team", "Personal"], key=f"review_g_scope::{output_path}",
+        format_func=lambda v: "Team (모든 사용자)" if v == "Team" else "개인 (본인만)",
+    )
+    if g4.button("추가", use_container_width=True, key=f"review_g_add::{output_path}",
+                 disabled=not (_ko.strip() and _en.strip())):
+        try:
+            _res = save_terms_from_dataframe(
+                pd.DataFrame([{
+                    "id": None,
+                    "Scope": "Team" if _scope == "Team" else st.session_state.current_user,
+                    "KO": _ko.strip(), "EN": _en.strip(),
+                    "Product": st.session_state.selected_product or "ALL",
+                    "DNT": False, "Case-sensitive": False,
+                    "Note": "번역 검토에서 추가", "Status": "approved",
+                    "File": entry.get("source_name", ""),
+                }]),
+                view_ids=set(), current_user=st.session_state.current_user,
+                source="번역 검토",
+            )
+            if _res.get("inserted"):
+                st.toast("Glossary에 추가했습니다. 다음 번역부터 적용됩니다.", icon="✅")
+            else:
+                st.toast("같은 용어가 이미 Glossary에 있습니다.", icon="ℹ️")
+        except Exception as e:
+            st.error(f"추가하지 못했습니다. ({e})")
+
+
+# ─────────────────────────────────────────────
+# Glossary 변경 이력 (Glossary 관리 > 변경 이력 탭)
+# ─────────────────────────────────────────────
+
+@st.dialog("변경 되돌리기")
+def _confirm_revert_dialog(batch_id: str, summary: str) -> None:
+    st.write(f"다음 변경을 되돌립니다: **{summary}**")
+    st.caption("이후에 다시 수정된 항목은 덮어쓰지 않고 건너뜁니다.")
+    c1, c2 = st.columns(2)
+    if c1.button("취소", use_container_width=True, key="revert_cancel"):
+        st.rerun()
+    if c2.button("되돌리기", type="primary", use_container_width=True, key="revert_ok"):
+        try:
+            res = history.revert_batch(batch_id, st.session_state.current_user)
+        except Exception as e:
+            st.error(f"되돌리지 못했습니다. ({e})")
+            return
+        msg = f"{res['reverted']}개 항목을 되돌렸습니다."
+        if res["conflicts"]:
+            msg += f" 이후 다시 수정된 {res['conflicts']}개는 건너뛰었습니다."
+        st.session_state["history_flash"] = msg
+        # 편집기가 되돌린 값을 다시 읽도록 키를 바꾼다
+        st.session_state.glossary_editor_key += 1
+        st.session_state.pattern_editor_key += 1
+        st.rerun()
+
+
+def render_glossary_history(blocked: bool = False) -> None:
+    """저장 묶음 목록 → 선택한 묶음의 상세 → 되돌리기."""
+    user = st.session_state.current_user
+    st.caption("Glossary를 저장할 때마다 변경 내용이 기록됩니다. "
+               "변경을 선택해 이전 상태로 되돌릴 수 있습니다.")
+    _flash = st.session_state.pop("history_flash", None)
+    if _flash:
+        st.success(_flash, icon="✅")
+
+    batches = history.list_batches(user)
+    if batches.empty:
+        st.info("변경 기록이 없습니다.", icon="ℹ️")
+        return
+
+    def _src(s: str) -> str:
+        return "되돌리기" if s.startswith("되돌리기:") else s
+
+    view = batches.copy()
+    view["changed_at"] = view["changed_at"].str[:16].str.replace("T", " ")
+    view["source"] = view["source"].map(_src)
+    view["상태"] = view["reverted"].map(lambda v: "되돌림" if v else "")
+    st.dataframe(
+        view[["changed_at", "user", "source", "table", "추가", "수정", "삭제", "상태"]],
+        use_container_width=True, hide_index=True,
+        height=min(300, 38 + 35 * len(view)),
+        column_config={
+            "changed_at": st.column_config.TextColumn("일시", width="small"),
+            "user": st.column_config.TextColumn("사용자", width="small"),
+            "source": st.column_config.TextColumn("작업", width="small"),
+            "table": st.column_config.TextColumn("대상", width="small"),
+            "추가": st.column_config.NumberColumn("추가", width="small"),
+            "수정": st.column_config.NumberColumn("수정", width="small"),
+            "삭제": st.column_config.NumberColumn("삭제", width="small"),
+            "상태": st.column_config.TextColumn("상태", width="small"),
+        },
+    )
+
+    labels = {}
+    for _, b in view.iterrows():
+        parts = [f"{k} {b[k]}" for k in ("추가", "수정", "삭제") if b[k]]
+        labels[b["batch_id"]] = (f"{b['changed_at']} · {b['user']} · {b['source']} "
+                                 f"({', '.join(parts)})")
+    pick = st.selectbox("변경 선택", list(labels), format_func=lambda k: labels[k],
+                        key="history_pick")
+    rows = history.batch_rows(pick, user)
+    st.dataframe(rows, use_container_width=True, hide_index=True,
+                 height=min(320, 38 + 35 * max(1, len(rows))))
+
+    already = bool(batches.set_index("batch_id").loc[pick, "reverted"])
+    if already:
+        st.caption("이미 되돌린 변경입니다.")
+    elif blocked:
+        st.caption("저장하지 않은 변경 내용이 있습니다. 먼저 저장하거나 취소하세요.")
+    if st.button("이 변경 되돌리기", key="history_revert",
+                 disabled=already or blocked):
+        _confirm_revert_dialog(pick, labels[pick])
 
 
 # ─────────────────────────────────────────────
@@ -460,6 +734,7 @@ def render_translation_progress() -> None:
             "source_name": f["source_name"],
             "output_filename": f["output_filename"],
             "output_path": f["out_path"],
+            "in_path": f["in_path"],          # 번역 검토에서 문서를 다시 만들 때
             "result": f["result"],
             "error": f["error"],
             "log_id": None,
@@ -521,6 +796,7 @@ def render_translation_progress() -> None:
                 }),
                 view_ids=set(),
                 current_user=st.session_state.current_user,
+                source="Localize",
             )
             if _saved.get("inserted"):
                 st.toast(f"Glossary에 용어 {_saved['inserted']}개를 추가했습니다.",
@@ -1251,7 +1527,7 @@ if st.session_state.app_mode == "Glossary 관리":
                 del st.session_state.staged_master
                 st.rerun()
 
-    tab1, tab2 = st.tabs(["용어", "패턴"])
+    tab1, tab2, tab_hist = st.tabs(["용어", "패턴", "변경 이력"])
 
     # ── 용어 탭 ──────────────────────────────
     with tab1:
@@ -1355,12 +1631,14 @@ if st.session_state.app_mode == "Glossary 관리":
                         _sdf,
                         source_file=f"{_stg['source']} [{_sname}]",
                         product_filter=_stg.get("active_product"),
+                        current_user=st.session_state.current_user,
                     )
                     # patterns 시트가 있고 아직 staged면 한 번에 처리
                     if _stg.get("pattern_sheet"):
                         _psname, _psdf = _stg["pattern_sheet"]
                         m = replace_patterns_from_excel(
-                            _psdf, source_file=f"{_stg['source']} [{_psname}]"
+                            _psdf, source_file=f"{_stg['source']} [{_psname}]",
+                            current_user=st.session_state.current_user,
                         )
                         st.toast(f"Master Glossary를 적용했습니다. 용어 {n}개, 패턴 {m}개", icon="✅")
                     else:
@@ -1471,7 +1749,8 @@ if st.session_state.app_mode == "Glossary 관리":
                 if _is_staged and _stg.get("pattern_sheet"):
                     _psname, _psdf = _stg["pattern_sheet"]
                     m = replace_patterns_from_excel(
-                        _psdf, source_file=f"{_stg['source']} [{_psname}]"
+                        _psdf, source_file=f"{_stg['source']} [{_psname}]",
+                        current_user=st.session_state.current_user,
                     )
                     if _stg.get("glossary_sheet"):
                         _sname, _sdf = _stg["glossary_sheet"]
@@ -1479,6 +1758,7 @@ if st.session_state.app_mode == "Glossary 관리":
                             _sdf,
                             source_file=f"{_stg['source']} [{_sname}]",
                             product_filter=_stg.get("active_product"),
+                            current_user=st.session_state.current_user,
                         )
                         st.toast(f"Master Glossary를 적용했습니다. 용어 {n}개, 패턴 {m}개", icon="✅")
                     else:
@@ -1500,6 +1780,10 @@ if st.session_state.app_mode == "Glossary 관리":
                     st.rerun()
             except Exception as e:
                 st.error(f"저장하지 못했습니다. ({e})")
+
+    # ── 변경 이력 탭 ─────────────────────────────
+    with tab_hist:
+        render_glossary_history(blocked=bool(terms_changed or patterns_changed))
 
     # Glossary 관리 페이지는 워크플로가 아니므로 여기서 페이지 렌더링 끝.
     st.stop()
@@ -1973,6 +2257,7 @@ if st.session_state.app_mode == "Glossary 추출":
                     return save_patterns_from_dataframe(
                         rows, view_ids=set(),
                         current_user=st.session_state.current_user,
+                        source="Glossary 추출",
                     )
                 rows = pd.DataFrame({
                     "id": None, "Scope": _scope,
@@ -1985,6 +2270,7 @@ if st.session_state.app_mode == "Glossary 추출":
                 return save_terms_from_dataframe(
                     rows, view_ids=set(),
                     current_user=st.session_state.current_user,
+                    source="Glossary 추출",
                 )
 
             _KIND_KO = {"term": "용어", "pattern": "패턴"}
@@ -2746,7 +3032,12 @@ if st.session_state.app_mode == "대시보드":
                 f"{(_m['verify_errors'] == 0).mean() * 100:.0f}%",
                 help="결과 검사에서 오류가 없었던 문서의 비율",
             )
-            st.caption(f"{_m['created_at'].min()[:10]} 이후 {len(_m)}개 문서 기준")
+            _rev = _m["review_edits"].fillna(0)
+            st.caption(
+                f"{_m['created_at'].min()[:10]} 이후 {len(_m)}개 문서 기준"
+                + (f" · 번역 검토에서 {int((_rev > 0).sum())}개 문서, "
+                   f"단락 {int(_rev.sum())}개 수정" if _rev.sum() else "")
+            )
 
     # 한 차트에 시리즈 하나 — 색은 정체성을 나타낼 일이 없으므로 한 가지만 쓴다.
     _BAR = "#2E7D32"

@@ -48,6 +48,7 @@ _LOG_COLUMNS = [
     "created_at", "user", "product", "input_tokens", "cached_tokens",
     "output_tokens", "paragraphs_translated", "elapsed_seconds",
     "applied_terms", "applied_count", "verify_errors", "verify_warnings",
+    "review_edits",
 ]
 
 

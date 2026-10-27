@@ -27,6 +27,8 @@ SUITES = [
     ("산출물 검증(마커·저장 후 대조)", "test_output_check.py"),
     ("적용 내역 리포트(하이라이트)", "test_effect_report.py"),
     ("대시보드 지표(비용·미측정 구분)", "test_metrics.py"),
+    ("Glossary 변경 이력·되돌리기", "test_history.py"),
+    ("번역 검토(단락 수정 반영)", "test_review.py"),
     ("글로서리 중복 삽입 방지", "test_glossary_dupe.py"),
     ("글로서리 머지 도구", "test_merge_glossary.py"),
     ("글로서리 머지 드라이버(git 통합)", "test_merge_driver.py"),

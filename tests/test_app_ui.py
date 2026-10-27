@@ -183,6 +183,85 @@ at.run()
 check("예외 없음", not at.exception, str(at.exception))
 check("다운로드 버튼 렌더", len(at.get("download_button")) == 1)
 
+print("[6-r] Step 3 — 번역 검토 화면")
+# 번역 없이 segments를 만든다: 원본 유닛의 한국어만 영어로 바꾸고 마커는 둔다.
+import re as _re
+import translator_engine as _te
+_rsrc = ROOT / "outputs" / "_ui_review_src.md"
+_rout = ROOT / "outputs" / "_ui_review_FSP_en.md"
+_rsrc.write_text("# 시작하기\n\n**저장** 버튼을 누릅니다.\n\n설정을 확인합니다.\n",
+                 encoding="utf-8")
+_ad = _te.make_adapter(str(_rsrc)); _ad.load()
+_segs = [{"i": i, "src": u.src, "out": _re.sub(r"[가-힣]+", "Word", u.src), "heading": False}
+         for i, u in enumerate(_ad.units()) if _te.contains_korean(u.src)]
+_segs[-1]["out"] = "설정 Check."          # 한국어가 남은 단락 — '확인 필요'에 걸려야 한다
+_te.rebuild_with_edits(str(_rsrc), str(_rout), _segs, {})
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Localize"
+at.session_state["step"] = 3
+at.session_state["selected_product"] = PRODUCT
+at.session_state["last_results"] = [{
+    "source_name": _rsrc.name, "output_filename": _rout.name,
+    "output_path": str(_rout), "in_path": str(_rsrc),
+    "result": {"input_tokens": 1, "output_tokens": 1, "segments": _segs},
+    "error": None, "log_id": None,
+}]
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+_md = " ".join(str(m.value) for m in at.markdown)
+check("검토 섹션", "번역 검토" in _md and f"단락 {len(_segs)}개" in _md, _md[:200])
+check("확인 필요 단락 수", "확인 필요 1개" in _md, _md[:200])
+check("검토 표", len(at.get("arrow_data_frame") or []) >= 1, str(len(at.get("arrow_data_frame") or [])))
+_apply = [b for b in at.button if b.label == "수정 내용 적용"]
+check("변경 전에는 적용 비활성", bool(_apply) and _apply[0].disabled,
+      str([(b.label, b.disabled) for b in at.button]))
+check("Glossary 추가 폼", any("Glossary에 용어 추가" in str(e.label) for e in at.expander))
+
+print("[6-r2] 번역 검토 — 고친 단락이 다운로드 파일에 반영된다")
+# AppTest는 data_editor 편집을 흉내 낼 수 없다. 검토 표에 한해 st.data_editor가
+# '사용자가 마지막 단락을 고친 결과'를 돌려주게 바꿔 끼운다. 나머지 경로(검사 →
+# 문서 재생성 → 캐시 정리 → 화면 갱신)는 실제 코드 그대로 탄다.
+import streamlit as _st
+_orig_editor = _st.data_editor
+
+
+def _fake_editor(data, *a, **kw):
+    out = _orig_editor(data, *a, **kw)
+    if str(kw.get("key", "")).startswith("review_editor::") and len(out):
+        out = out.copy()
+        out.iloc[-1, out.columns.get_loc("번역")] = "REVIEWED settings check."
+    return out
+
+
+_st.data_editor = _fake_editor
+try:
+    at.run()
+    _ap = [b for b in at.button if b.label == "수정 내용 적용"]
+    check("변경 감지 → 적용 활성", bool(_ap) and not _ap[0].disabled,
+          str([(b.label, b.disabled) for b in at.button]))
+    at = _ap[0].click().run()
+    check("예외 없음", not at.exception, str(at.exception))
+    check("완료 안내", any("다운로드 파일에 반영" in str(s.value) for s in at.success),
+          str([str(s.value)[:40] for s in at.success]))
+    check("파일에 반영", "REVIEWED settings check." in _rout.read_text(encoding="utf-8"))
+    check("다른 단락은 그대로", "**Word**" in _rout.read_text(encoding="utf-8"))
+    _md = " ".join(str(m.value) for m in at.markdown)
+    check("수정 수 표시", "수정 1개" in _md, _md[:200])
+    check("확인 필요 해소", "확인 필요" not in _md.split("번역 검토")[1][:40], _md[:200])
+finally:
+    _st.data_editor = _orig_editor
+for _f in (_rsrc, _rout):
+    _f.unlink(missing_ok=True)
+
+print("[6-h] Glossary 관리 — 변경 이력 탭")
+at = AppTest.from_file(APP, default_timeout=60)
+at.session_state["current_user"] = "SmokeTest"
+at.session_state["app_mode"] = "Glossary 관리"
+at.run()
+check("예외 없음", not at.exception, str(at.exception))
+check("변경 이력 탭", any(t.label == "변경 이력" for t in at.tabs), str([t.label for t in at.tabs]))
+
 print("[6-a] Step 3 — 여러 파일이면 요약표 + ZIP + 파일 선택")
 tmp_out2 = ROOT / "outputs" / "_ui_probe2_FSP_en.mdx"
 tmp_out2.write_text("# hi 2\n", encoding="utf-8")

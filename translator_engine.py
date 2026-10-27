@@ -3006,6 +3006,34 @@ def verify_saved_output(in_path: str, out_path: str,
                  "detail": str(e)}]
 
 
+def rebuild_with_edits(in_path: str, out_path: str, segments: List[Dict],
+                       edits: Dict[int, str],
+                       glossary_rows: Optional[List[dict]] = None) -> List[Dict]:
+    """
+    번역 검토에서 고친 단락을 반영해 결과 문서를 **원본에서 다시** 만든다.
+
+    저장된 결과 문서를 열어 고치지 않는 이유 — 결과 문서에는 굵게·링크·
+    이미지가 이미 Word 구조로 풀려 있어, 문단 하나를 바꾸려면 그 구조를 다시
+    해석해야 한다. 원본을 다시 읽어 번역 때와 똑같은 유닛 목록을 만들고,
+    번역 때 쓴 텍스트(segments[].out) 대신 고친 텍스트를 넣으면 쓰기 경로가
+    번역과 완전히 같다.
+
+    edits: {segments[].i: 마크드 텍스트}. 마커 검사는 호출자가 끝낸 상태여야 한다.
+    반환: verify_saved_output() 결과
+    """
+    adapter = make_adapter(in_path)
+    adapter.load()
+    units = adapter.units()
+    for seg in segments:
+        i = seg["i"]
+        if i >= len(units) or units[i].src != seg["src"]:
+            # 원본이 바뀌었으면 위치가 어긋난 채로 쓰게 된다 — 차라리 멈춘다.
+            raise ValueError("원본 문서가 번역할 때와 다릅니다.")
+        adapter.write(units[i], edits.get(i, seg["out"]))
+    adapter.save(out_path)
+    return verify_saved_output(in_path, out_path, glossary_rows or [])
+
+
 def translate_document(
     in_path: str,
     out_path: str,
@@ -3073,7 +3101,11 @@ def translate_document(
     # 번역 대상 유닛 — 한국어가 없는 단락/블록은 여기서 걸러진다.
     # 마크다운에서는 인라인 봉인이 이 판정보다 먼저 끝나 있어야 한다
     # (`![img](/img/분석실행.png)` 처럼 경로에만 한글이 있는 경우 때문).
-    units: List[TransUnit] = [u for u in adapter.units() if contains_korean(u.src)]
+    all_units = adapter.units()
+    units: List[TransUnit] = [u for u in all_units if contains_korean(u.src)]
+    # 전체 유닛 목록에서의 위치. 번역 검토에서 고친 단락을 원본에서 다시
+    # 조립할 때(rebuild_with_edits) 이 번호로 같은 단락을 찾는다.
+    unit_pos = {id(u): i for i, u in enumerate(all_units)}
 
     # heading 여부는 여기서 한 번만 확정한다 — 포맷 고유 판정(스타일/`#`)에
     # 텍스트 휴리스틱을 OR로 얹은 값을 Pass 1·2가 공유한다.
@@ -3368,8 +3400,11 @@ def translate_document(
     # 여기가 문서로 나가는 유일한 통로다. 마커 검사를 다른 데 두면 이후
     # 후처리가 또 망가뜨릴 수 있으므로, 관문은 반드시 이 자리여야 한다.
     marker_repaired = marker_failed = 0
+    segments: List[Dict] = []
     for r in pass1_results:
         text, problems = finalize_markers(r["unit"].src, r["translated"])
+        segments.append({"i": unit_pos[id(r["unit"])], "src": r["unit"].src,
+                         "out": text, "heading": bool(r["unit"].is_heading)})
         if problems:
             marker_failed += 1
         elif text != r["translated"]:
@@ -3402,6 +3437,8 @@ def translate_document(
         "marker_repaired": marker_repaired,
         "marker_failed": marker_failed,
         "verification": verification,
+        # 번역 검토 화면용 — 단락별 원문/번역(마크드 텍스트)과 원본 내 위치
+        "segments": segments,
         "applied": [
             {"KO": ko, "EN": en, "출처": kind, "적용": n,
              "예문": applied_example.get((ko, en, kind), "")}

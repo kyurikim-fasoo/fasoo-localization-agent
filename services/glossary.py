@@ -16,6 +16,7 @@ from typing import Optional, Set  # noqa: F401  (Set kept for clarity in 3.9 typ
 import pandas as pd
 
 from db.schema import db_session, init_db, now_iso
+from services import history
 from services.sync import sync_db
 
 
@@ -192,6 +193,7 @@ def save_terms_from_dataframe(
     df: pd.DataFrame,
     view_ids: Optional[set[int]] = None,
     current_user: str = "",
+    source: str = "Glossary 관리",
 ) -> dict:
     """
     Persist edits from the Streamlit data_editor back to DB.
@@ -210,10 +212,15 @@ def save_terms_from_dataframe(
 
     Returns counts: {'inserted': N, 'updated': N, 'deleted': N, 'denied': N}.
     `denied` counts rows the user tried to modify but doesn't own.
+    `updated` counts only rows whose values actually changed.
+
+    Every change is written to glossary_history in the same transaction
+    (`source` names the screen it came from).
     """
     init_db()
     counts = {"inserted": 0, "updated": 0, "deleted": 0, "denied": 0, "skipped": 0}
     now = now_iso()
+    batch = history.new_batch()
 
     with db_session() as conn:
         # 권한 체크를 위해 id → owner 매핑을 미리 조회
@@ -260,13 +267,17 @@ def save_terms_from_dataframe(
                     counts["denied"] += 1
                     continue
                 edited_ids.add(rid_int)
+                before = history.snapshot(conn, "terms", rid_int)
                 conn.execute(
                     """UPDATE terms SET ko=?, en=?, product=?, dnt=?, case_sensitive=?,
                        note=?, status=?, source_file=?, owner=?, updated_at=? WHERE id=?""",
                     (ko, en, product, dnt, case_sensitive, note, status, source_file,
                      target_owner, now, rid_int),
                 )
-                counts["updated"] += 1
+                # 편집기는 보이는 행을 전부 다시 쓴다 — 값이 바뀐 것만 센다.
+                if history.record(conn, batch, "terms", rid_int, "update", current_user,
+                                  source, before, history.snapshot(conn, "terms", rid_int)):
+                    counts["updated"] += 1
             else:
                 # 신규 row: Scope 지정 없으면 current_user (Personal) 기본값
                 if not scope:
@@ -277,12 +288,14 @@ def save_terms_from_dataframe(
                     counts['skipped'] += 1
                     continue
                 existing_keys.add(key)
-                conn.execute(
+                cur = conn.execute(
                     """INSERT INTO terms (ko, en, product, dnt, case_sensitive, note, status,
                        source_file, owner, imported_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (ko, en, product, dnt, case_sensitive, note, status, source_file,
                      target_owner, now, now),
                 )
+                history.record(conn, batch, "terms", cur.lastrowid, "insert", current_user,
+                               source, None, history.snapshot(conn, "terms", cur.lastrowid))
                 counts["inserted"] += 1
 
         # 삭제: view_ids 안 + 편집기에서 빠진 id 중 본인이 owner이거나 Team인 row만
@@ -293,7 +306,11 @@ def save_terms_from_dataframe(
             if owner and owner != current_user:
                 counts["denied"] += 1
                 continue
+            before = history.snapshot(conn, "terms", did)
             conn.execute("DELETE FROM terms WHERE id=?", (did,))
+            if before is not None:
+                history.record(conn, batch, "terms", did, "delete", current_user,
+                               source, before, None)
             counts["deleted"] += 1
 
     sync_db(f"terms: +{counts['inserted']} ~{counts['updated']} -{counts['deleted']} by {current_user}")
@@ -304,11 +321,13 @@ def save_patterns_from_dataframe(
     df: pd.DataFrame,
     view_ids: Optional[set[int]] = None,
     current_user: str = "",
+    source: str = "Glossary 관리",
 ) -> dict:
-    """Same multi-user contract as [save_terms_from_dataframe]."""
+    """Same multi-user and history contract as [save_terms_from_dataframe]."""
     init_db()
     counts = {"inserted": 0, "updated": 0, "deleted": 0, "denied": 0, "skipped": 0}
     now = now_iso()
+    batch = history.new_batch()
 
     with db_session() as conn:
         owner_by_id = {r["id"]: r["owner"] for r in conn.execute("SELECT id, owner FROM patterns")}
@@ -341,12 +360,15 @@ def save_patterns_from_dataframe(
                     counts["denied"] += 1
                     continue
                 edited_ids.add(rid_int)
+                before = history.snapshot(conn, "patterns", rid_int)
                 conn.execute(
                     """UPDATE patterns SET ko=?, en=?, note=?, status=?, source_file=?,
                        owner=?, updated_at=? WHERE id=?""",
                     (ko, en, note, status, source_file, target_owner, now, rid_int),
                 )
-                counts["updated"] += 1
+                if history.record(conn, batch, "patterns", rid_int, "update", current_user,
+                                  source, before, history.snapshot(conn, "patterns", rid_int)):
+                    counts["updated"] += 1
             else:
                 if not scope:
                     target_owner = current_user
@@ -356,11 +378,13 @@ def save_patterns_from_dataframe(
                     counts['skipped'] += 1
                     continue
                 existing_keys.add(key)
-                conn.execute(
+                cur = conn.execute(
                     """INSERT INTO patterns (ko, en, note, status, source_file, owner,
                        imported_at, updated_at) VALUES (?,?,?,?,?,?,?,?)""",
                     (ko, en, note, status, source_file, target_owner, now, now),
                 )
+                history.record(conn, batch, "patterns", cur.lastrowid, "insert", current_user,
+                               source, None, history.snapshot(conn, "patterns", cur.lastrowid))
                 counts["inserted"] += 1
 
         deletion_pool = view_ids if view_ids is not None else existing_ids
@@ -369,7 +393,11 @@ def save_patterns_from_dataframe(
             if owner and owner != current_user:
                 counts["denied"] += 1
                 continue
+            before = history.snapshot(conn, "patterns", did)
             conn.execute("DELETE FROM patterns WHERE id=?", (did,))
+            if before is not None:
+                history.record(conn, batch, "patterns", did, "delete", current_user,
+                               source, before, None)
             counts["deleted"] += 1
 
     sync_db(f"patterns: +{counts['inserted']} ~{counts['updated']} -{counts['deleted']} by {current_user}")
@@ -383,6 +411,7 @@ def replace_terms_from_excel(
     sheet_df: pd.DataFrame,
     source_file: str,
     product_filter: Optional[str] = None,
+    current_user: str = "",
 ) -> int:
     """
     Wipe the terms table and refill from an Excel sheet. Used for the
@@ -414,8 +443,14 @@ def replace_terms_from_excel(
         df = df[df["Product"].apply(keep)].copy()
 
     inserted = 0
+    batch = history.new_batch()
     with db_session() as conn:
         # Team rows만 교체 — Personal rows(각 사용자의 커스텀)는 절대 안 건드림.
+        # 지우기 전에 이력에 남긴다. 교체는 한 번에 수백 건이라 되돌릴 수
+        # 있어야 가장 필요한 작업이다.
+        for (tid,) in conn.execute("SELECT id FROM terms WHERE owner=''").fetchall():
+            history.record(conn, batch, "terms", tid, "delete", current_user,
+                           "Excel 가져오기", history.snapshot(conn, "terms", tid), None)
         conn.execute("DELETE FROM terms WHERE owner=''")
         for _, row in df.iterrows():
             ko = _clean_text(row.get("KO"))
@@ -428,11 +463,13 @@ def replace_terms_from_excel(
             note = _clean_text(row.get("Note"))
             status = _clean_text(row.get("Status")) or "approved"
 
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO terms (ko, en, product, dnt, case_sensitive, note, status,
                    source_file, owner, imported_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (ko, en, product, dnt, case_sensitive, note, status, source_file, "", now, now),
             )
+            history.record(conn, batch, "terms", cur.lastrowid, "insert", current_user,
+                           "Excel 가져오기", None, history.snapshot(conn, "terms", cur.lastrowid))
             inserted += 1
 
     sync_db(f"Master glossary replaced: {inserted} terms from {source_file}")
@@ -551,7 +588,8 @@ def export_to_excel(current_user: str = "", scope_filter: str = "all") -> bytes:
     return buf.getvalue()
 
 
-def replace_patterns_from_excel(sheet_df: pd.DataFrame, source_file: str) -> int:
+def replace_patterns_from_excel(sheet_df: pd.DataFrame, source_file: str,
+                                current_user: str = "") -> int:
     """Wipe + refill the **Team** patterns from a single sheet.
     Personal patterns are preserved across re-imports."""
     init_db()
@@ -565,7 +603,11 @@ def replace_patterns_from_excel(sheet_df: pd.DataFrame, source_file: str) -> int
             df[col] = ""
 
     inserted = 0
+    batch = history.new_batch()
     with db_session() as conn:
+        for (pid,) in conn.execute("SELECT id FROM patterns WHERE owner=''").fetchall():
+            history.record(conn, batch, "patterns", pid, "delete", current_user,
+                           "Excel 가져오기", history.snapshot(conn, "patterns", pid), None)
         conn.execute("DELETE FROM patterns WHERE owner=''")
         for _, row in df.iterrows():
             ko = _clean_text(row.get("KO"))
@@ -574,11 +616,13 @@ def replace_patterns_from_excel(sheet_df: pd.DataFrame, source_file: str) -> int
                 continue
             note = _clean_text(row.get("Note"))
             status = _clean_text(row.get("Status")) or "approved"
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO patterns (ko, en, note, status, source_file, owner,
                    imported_at, updated_at) VALUES (?,?,?,?,?,?,?,?)""",
                 (ko, en, note, status, source_file, "", now, now),
             )
+            history.record(conn, batch, "patterns", cur.lastrowid, "insert", current_user,
+                           "Excel 가져오기", None, history.snapshot(conn, "patterns", cur.lastrowid))
             inserted += 1
 
     sync_db(f"Master patterns replaced: {inserted} patterns from {source_file}")

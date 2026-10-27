@@ -156,6 +156,16 @@ def update_note(log_id: int, note: str) -> None:
     sync_db(f"Log #{log_id} note updated")
 
 
+def update_review_edits(log_id: int, n_edits: int) -> None:
+    """번역 검토에서 고친 단락 수. 누적값으로 덮어쓴다(같은 단락을 두 번 고쳐도 1)."""
+    init_db()
+    with db_session() as conn:
+        conn.execute(
+            "UPDATE translation_logs SET review_edits = ? WHERE id = ?", (n_edits, log_id)
+        )
+    sync_db(f"Log #{log_id} review edits: {n_edits}")
+
+
 def delete_log(log_id: int) -> None:
     init_db()
     with db_session() as conn:

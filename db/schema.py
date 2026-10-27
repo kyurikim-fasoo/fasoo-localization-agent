@@ -106,8 +106,28 @@ CREATE TABLE IF NOT EXISTS translation_logs (
     applied_terms           INTEGER,        -- 적용된 서로 다른 용어 수
     applied_count           INTEGER,        -- 적용 횟수 합
     verify_errors           INTEGER,
-    verify_warnings         INTEGER
+    verify_warnings         INTEGER,
+    review_edits            INTEGER         -- 번역 검토에서 고친 단락 수
 );
+
+-- Glossary 변경 이력. 저장 한 번(batch_id)에 여러 행이 바뀌므로 묶음으로
+-- 보여주고 묶음 단위로 되돌린다. before/after는 행 전체의 JSON 스냅샷 —
+-- 컬럼 단위로 쪼개 두면 되돌릴 때 다시 조립해야 한다.
+CREATE TABLE IF NOT EXISTS glossary_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id    TEXT    NOT NULL,
+    table_name  TEXT    NOT NULL,           -- 'terms' | 'patterns'
+    row_id      INTEGER NOT NULL,
+    action      TEXT    NOT NULL,           -- 'insert' | 'update' | 'delete'
+    user        TEXT    DEFAULT '',
+    source      TEXT    DEFAULT '',         -- 어느 화면에서 바뀌었나
+    changed_at  TEXT    NOT NULL,
+    before_json TEXT,
+    after_json  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_hist_batch   ON glossary_history(batch_id);
+CREATE INDEX IF NOT EXISTS ix_hist_changed ON glossary_history(changed_at);
 
 CREATE INDEX IF NOT EXISTS ix_logs_user        ON translation_logs(user);
 CREATE INDEX IF NOT EXISTS ix_logs_created     ON translation_logs(created_at);
@@ -140,8 +160,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS ix_patterns_owner ON patterns(owner)")
 
     # M3: translation_logs 대시보드 지표. DEFAULT 없이 추가해 기존 행은 NULL.
+    # review_edits: 번역 검토에서 고친 단락 수 (M4).
     for col in ("elapsed_seconds", "applied_terms", "applied_count",
-                "verify_errors", "verify_warnings"):
+                "verify_errors", "verify_warnings", "review_edits"):
         if not _column_exists(conn, "translation_logs", col):
             conn.execute(f"ALTER TABLE translation_logs ADD COLUMN {col} INTEGER")
 
