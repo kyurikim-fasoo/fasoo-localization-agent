@@ -160,5 +160,9 @@
   "Sparrow": {
     "default_glossaries": [],
     "default_patterns": []
+  },
+  "FC-BR": {
+    "default_glossaries": [],
+    "default_patterns": []
   }
 }
